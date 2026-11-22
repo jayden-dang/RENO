@@ -121,10 +121,11 @@ that I paste exactly that text in order.
 **Story:** As the owner, I want to leave a thread and come back to it in the same session and find the view where I left
 it, so that I keep my place in a long conversation.
 
-- **TRANSCRIPT-4.1** WHEN the owner leaves a thread's run screen THE SYSTEM SHALL remember, for that thread, the entry at
-  the top of the view and the offset into it, in memory only. (Weigh; agent-decided: not on disk)
-- **TRANSCRIPT-4.2** WHEN the owner returns to that thread while the app is still running THE SYSTEM SHALL show the
-  remembered entry at the remembered offset (Weigh: W3, fork 1).
+- **TRANSCRIPT-4.1** WHEN the owner leaves a thread's run screen THE SYSTEM SHALL save, for that thread, the entry at the
+  top of the view and the offset into it, in the app's own state under the data dir, as an additive key that a file
+  without it reads as "no saved place". (frame default, operator-confirmed 2026-11-22)
+- **TRANSCRIPT-4.2** WHEN the owner returns to that thread, in the same session or after the app restarts, THE SYSTEM SHALL
+  show the saved entry at the saved offset (Weigh: W3; across a restart: frame default, operator-confirmed 2026-11-22).
 - **TRANSCRIPT-4.3** IF the remembered entry is gone, or now sits inside a closed fold, THEN THE SYSTEM SHALL restore to
   that fold's head, else to the next entry after it in the thread (Weigh: W4, fork 1).
 - **TRANSCRIPT-4.4** WHEN a run's view moves from the run's key to its thread's key because the daemon named the thread
@@ -194,8 +195,12 @@ formulas as formulas.
 - **TRANSCRIPT-9.2** WHEN a reply holds inline math (`$…$`, `\(…\)`) THE SYSTEM SHALL draw it typeset in the line, aligned
   on the text's baseline (Lock L7).
 - **TRANSCRIPT-9.3** IF a formula does not typeset THEN THE SYSTEM SHALL show its source as code, with no error dialog (Weigh: W1).
-- **TRANSCRIPT-9.4** THE SYSTEM SHALL size math to the surrounding text and colour it from the theme. (agent-decided: no
-  setting; see Open Questions S4)
+- **TRANSCRIPT-9.4** THE SYSTEM SHALL size math to the surrounding text by default and colour it from the theme
+  (agent-decided).
+- **TRANSCRIPT-9.5** WHERE the owner turns "Typeset math" off in Settings › Appearance THE SYSTEM SHALL show math as its TeX
+  source in code style; it is on by default, and the setting is an additive app-local key (frame default, operator-confirmed 2026-11-22).
+- **TRANSCRIPT-9.6** WHEN the owner sets the math size in Settings › Appearance (90 % to 150 % of the text size, in 10 %
+  steps, default 100 %) THE SYSTEM SHALL draw math at that size; the setting is an additive app-local key (frame default, operator-confirmed 2026-11-22).
 
 ## 10. See diagrams
 
@@ -253,11 +258,17 @@ follow a live run without it jumping.
 - **TRANSCRIPT-13.1** WHEN reply text streams in THE SYSTEM SHALL reveal it in steps of 16 ms, catching up with the
   received text within 200 ms of the last delta, and SHALL stop the reveal timer once caught up. (agent-decided: streaming pace)
 - **TRANSCRIPT-13.2** WHILE reduce motion is on THE SYSTEM SHALL show received text at once (agent-decided: close package decision 20).
-- **TRANSCRIPT-13.3** WHILE a reasoning block streams THE SYSTEM SHALL show it open, scrolled to its newest line, and WHEN
+- **TRANSCRIPT-13.3** WHILE "Thinking" is Auto and a reasoning block streams THE SYSTEM SHALL show it open, scrolled to its newest line, and WHEN
   it ends THE SYSTEM SHALL close it unless the owner opened or closed it meanwhile. (Weigh: the reference's default)
 - **TRANSCRIPT-13.4** WHEN a new edit call with a diff or a new command call arrives while its turn is live THE SYSTEM
   SHALL show that call expanded inside its tool group, opening the group to show it, and other tool calls collapsed.
   (Weigh: reference #39; inside a group: agent-decided)
+- **TRANSCRIPT-13.17** WHERE the owner sets "Thinking" in Settings › General to Auto (the default), Preview (open while
+  streaming at most 16 lines high), Always open or Always closed THE SYSTEM SHALL show reasoning blocks that way; the
+  setting is an additive app-local key (Weigh: reference #38; frame default, operator-confirmed 2026-11-22).
+- **TRANSCRIPT-13.18** WHERE the owner turns off "Expand new edits" or "Expand new commands" in Settings › General (both
+  on by default) THE SYSTEM SHALL show that kind of new call collapsed; each is an additive app-local key (Weigh:
+  reference #38; frame default, operator-confirmed 2026-11-22).
 - **TRANSCRIPT-13.5** WHEN a tool call edits one file THE SYSTEM SHALL show the file's badge with "Go to file", and its
   diff inline when expanded; WHEN a call applies a patch to several files THE SYSTEM SHALL show one hunk block per file.
   (Weigh: reference #40, #41)
@@ -344,8 +355,12 @@ through and grade the reading tools on mocked data.
   must keep durable is the existing contracts (Compat obligation Internal, docs/agents/project.md:24).
   - **TRANSCRIPT-16.10** (guard) THE SYSTEM SHALL CONTINUE TO match the protocol schema snapshot unchanged: no new event,
     feature flag or method — verified by `protocol_schema_matches_snapshot`.
-  - **TRANSCRIPT-16.11** (guard) THE SYSTEM SHALL CONTINUE TO read and write `panel-state.json` and `app-settings.json` in
-    their current shapes — verified by the existing persist and prefs tests.
+  - **TRANSCRIPT-16.11** (guard) THE SYSTEM SHALL CONTINUE TO read every existing `panel-state.json` and `app-settings.json`
+    as today, adding only optional keys (a file without them reads as the defaults; `panel-state.json` stays version 1) — verified by the existing persist and prefs tests and a test that reads a file
+    from before this feature.
+  - **TRANSCRIPT-16.13** (guard) WHEN the owner opens Settings › Appearance or Settings › General THE SYSTEM SHALL CONTINUE
+    TO show and apply every existing control as today; the new math and thinking rows are added beside them — verified
+    by the existing settings tests.
 - **Accessibility:** No standing accessibility doc (docs/standards/accessibility.md absent).
   - **TRANSCRIPT-16.8** THE SYSTEM SHALL make every new control (find bar and its toggles, jump to latest, Copy and wrap
     buttons, diagram tabs and zoom reset, the context menu) reachable and operable by keyboard alone — verified by GPUI
@@ -375,7 +390,8 @@ Every file the change touches, and the guards that protect its existing behaviou
 | `crates/reno-client/src/` (a new desk module) | no behavior to guard (new file) |
 | `crates/reno-markdown/src/` | 13.14 |
 | `crates/reno-proto/` (not changed) | 16.10 |
-| `apps/reno-app/src/panel/persist.rs` (not changed) | 16.11 |
+| `apps/reno-app/src/panel/persist.rs` (additive key only) | 4.1, 16.11 |
+| `apps/reno-app/src/screens/settings_pages.rs` (new rows in Appearance and General) | 16.13 |
 | `Cargo.toml`, `deny.toml` | no behavior to guard; new crates under 16.12 |
 
 ## Out of Scope
@@ -384,7 +400,8 @@ Every file the change touches, and the guards that protect its existing behaviou
 - The real daemon side of agent-posted visuals and tool-result images (after MILE-10, ROAD-54).
 - Any change to how the daemon keeps run journals.
 - Any wire change: new events, feature flags or methods.
-- Any new or changed persisted format; see S1, S3, S4.
+- Any change to the daemon's store or the wire (the persisted-format hard stop, as the conductor clarified
+  2026-11-22). App-local settings and panel state gain only additive keys (16.11).
 - An internet client in the app; see S2.
 - Editing a past prompt and regenerating from it (ROAD-59).
 - Pieces of the reference agent panel not built, each for a documented reason:
@@ -404,10 +421,7 @@ Every file the change touches, and the guards that protect its existing behaviou
 
 Owned unknowns from the close package (§2a). Each is the operator's; no one builds on a guess.
 
-- S1 Scroll position surviving an app relaunch (a persisted format) — operator — 2026-11-22 — forbid-guess (cấm đoán)
 - S2 Remote http(s) images in replies; runner-up is click to load — operator — 2026-11-22 — forbid-guess (cấm đoán)
-- S3 Thinking display-mode and the edit/command auto-expand settings (persisted settings) — operator — 2026-11-22 — forbid-guess (cấm đoán)
-- S4 Math toggle and size in Settings › Appearance (a persisted setting) — operator — 2026-11-22 — forbid-guess (cấm đoán)
 - S5 Stopping one tool call without stopping the run (no per-tool cancel on the wire): a road or not — operator — 2026-11-22 — forbid-guess (cấm đoán)
 
 Unverified (each has its check; none is guessed):
@@ -415,7 +429,8 @@ Unverified (each has its check; none is guessed):
 - U1 The 31 ms cause (one list item holding an open fold's ~4,000 rows, plus the per-event rebuild) was read from code, not
   profiled; 1.1, 1.2 and 16.1 rest on it — check: the plan's first task profiles the 2,000-message bench before the row
   model is built, and a different cause goes through `reroute-plan`.
-- U2 The reference keeps the scroll position across a relaunch — read from source, not run; matters only if S1 is taken.
+- U2 The reference keeps the scroll position across a relaunch — read from source, not run; no longer
+  load-bearing, as the operator confirmed saving the position (4.1).
 - U3 Math copies as TeX in common web math renderers — recalled; checked at the operator's pick.
 - U4 Markdown-image exfiltration from agent chat UIs is a published class — recalled; 11.4 does not rest on it.
 - U5 Which executors expose a rewind call — not researched; for ROAD-59's frame.
