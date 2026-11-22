@@ -26,3 +26,7 @@ Not decided yet
 
 - What the per-bot policy allows or refuses (its own road)
 - The bot's computer and its network allowlist (a later milestone)
+
+## Comments
+
+**2026-11-22.** The spec is written and waits for Jayden's review and approval. Five choices need his word: how strict a supervised bot on the new harness should be before the per-bot policy lands, keeping each run's session files for resumes, the executor's name, and two gaps later roads close (per-call usage and the 45-minute cap). Nothing is built yet.
