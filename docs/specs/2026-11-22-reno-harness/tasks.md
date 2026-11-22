@@ -648,13 +648,13 @@ only what is specific to `reno`.
 
 **Depends-on:** Task 6
 
-- [ ] Write guard tests:
+- [x] Write guard tests:
   - A `reno` run's Pi is spawned as its own process group, and that group is reported to `ExecControls::processes`
     at spawn, so the kernel's shutdown and the orphan sweep can end it.
   - Dropping the executor's run ends the group.
-- [ ] Run `cargo test -p reno-harness --test pi reno_group`, and expect a pass. Record any failure as a design
+- [x] Run `cargo test -p reno-harness --test pi reno_group`, and expect a pass. Record any failure as a design
   finding.
-- [ ] `git commit -m "test(harness): pin the process-group guards for the Reno harness"`
+- [x] `git commit -m "test(harness): pin the process-group guards for the Reno harness"`
 
 _Requirements: RENOHARNESS-6.4, RENOHARNESS-6.5, RENOHARNESS-10.4_
 
