@@ -710,3 +710,29 @@ fn find_goes_to_hits_opens_what_hides_them_and_closes_only_that(cx: &mut TestApp
     a_fold_the_owner_opened_stays_open_and_a_row_the_owner_touches_becomes_theirs(vcx, &screen);
     the_count_follows_changes_once_per_150_ms_and_keeps_the_current_match(vcx, &screen);
 }
+
+/// The thread's runs arrive one after another: a query typed while they do is still "1 of 7"
+/// once they are all in, because no hit was gone to (TRANSCRIPT-3.2, 3.3).
+#[gpui::test]
+fn a_query_typed_while_the_thread_loads_ends_on_one_of_seven(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let all = screen.read_with(vcx, |s, _| s.rows().to_vec());
+    // Only the later runs are in when the query is typed...
+    let later = all[all.len() / 2..].to_vec();
+    screen.update(vcx, |s, cx| s.replace_rows(0, Some(later), cx));
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    vcx.simulate_keystrokes("cmd-a");
+    type_query(vcx, "supervisor.rs");
+    let partial = screen.read_with(vcx, |s, _| s.find_found().hits.len());
+    assert!(
+        (1..7).contains(&partial),
+        "{partial} hits with half the thread"
+    );
+    // ...then the earlier ones arrive and the count follows.
+    screen.update(vcx, |s, cx| {
+        s.replace_rows(0, Some(all), cx);
+        s.find_recount(cx);
+    });
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+}

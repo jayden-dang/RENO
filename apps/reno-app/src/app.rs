@@ -353,6 +353,64 @@ pub(crate) struct Start {
     pub(crate) draft33_find: Option<Draft33Find>,
 }
 
+/// The run whose transcript shows the whole "fix the ACP v2 handshake" thread above it.
+fn draft33_thread_run() -> &'static str {
+    reno_client::fake::transcript::HANDSHAKE_RUNS[reno_client::fake::transcript::TURNS - 1]
+}
+
+/// Waits until the daemon has answered and, when `run` is given, knows that run: the draft's
+/// hooks start from what is there, not after a fixed time, so a slow start cannot make them
+/// act on an app that is still connecting. Gives up after a minute.
+async fn wait_for_store(
+    root: &gpui::WeakEntity<RootView>,
+    run: Option<&'static str>,
+    cx: &mut gpui::AsyncWindowContext,
+) {
+    for _ in 0..240 {
+        let ready = root
+            .update(cx, |root, cx| {
+                let store = root.store.read(cx);
+                store.client().is_some()
+                    && run.is_none_or(|r| {
+                        RunId::from_suffix(r).is_ok_and(|id| store.state().run(&id).is_some())
+                    })
+            })
+            .unwrap_or(true);
+        if ready {
+            return;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(250))
+            .await;
+    }
+}
+
+/// Prints `ready <word>` once the run screen says the state the hook names is reached, for the
+/// script that captures it to wait for. Gives up after two minutes.
+#[allow(clippy::print_stdout)]
+async fn announce_ready(
+    root: &gpui::WeakEntity<RootView>,
+    word: &'static str,
+    cx: &mut gpui::AsyncWindowContext,
+) {
+    for _ in 0..480 {
+        let ready = root
+            .update(cx, |root, cx| {
+                root.run_screen()
+                    .cloned()
+                    .is_some_and(|screen| screen.update(cx, |s, cx| s.demo_ready(word, cx)))
+            })
+            .unwrap_or(true);
+        if ready {
+            println!("ready {word}");
+            return;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(250))
+            .await;
+    }
+}
+
 pub(crate) fn run(options: Options) {
     let app = application().with_assets(Assets);
     // A Dock click with no window open: build a new one around the running store.
@@ -540,94 +598,122 @@ pub(crate) fn open_window(
                 }
                 root.init_first_run(setup, named, window, cx);
                 if let Some(hook) = draft33_find {
-                    // After the runs and their threads are read.
                     cx.spawn_in(window, async move |root, cx| {
+                        // When the daemon has answered and knows the thread, not on a timer.
+                        wait_for_store(&root, Some(draft33_thread_run()), cx).await;
                         cx.background_executor()
-                            .timer(Duration::from_millis(1500))
+                            .timer(Duration::from_millis(500))
                             .await;
                         root.update_in(cx, |root, window, cx| {
                             root.draft33_find_hook(hook, window, cx);
                         })
                         .ok();
+                        announce_ready(&root, hook.word(), cx).await;
                     })
                     .detach();
                 }
                 if let Some(hook) = draft33_open {
-                    // After the runs and their threads are read.
                     cx.spawn_in(window, async move |root, cx| {
+                        let run = match hook {
+                            Draft33Hook::Thread | Draft33Hook::Folds => Some(draft33_thread_run()),
+                            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode => {
+                                Some(reno_client::fake::transcript::RENDER_RUN)
+                            }
+                            Draft33Hook::Stream | Draft33Hook::Latest => None,
+                        };
+                        wait_for_store(&root, run, cx).await;
                         cx.background_executor()
-                            .timer(Duration::from_millis(1500))
+                            .timer(Duration::from_millis(500))
                             .await;
                         root.update_in(cx, |root, window, cx| {
                             root.draft33_hook(hook, window, cx);
                         })
                         .ok();
-                        if hook == Draft33Hook::Latest {
-                            // The reply streams: take the view off its tail once it can scroll.
-                            for _ in 0..12 {
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(1000))
-                                    .await;
-                                let done = root
-                                    .update(cx, |root, cx| {
-                                        root.run_screen().cloned().is_some_and(|screen| {
-                                            screen.update(cx, |s, cx| s.demo_scroll_up(cx))
-                                        })
-                                    })
-                                    .unwrap_or(true);
-                                if done {
-                                    break;
-                                }
-                            }
-                        }
-                        if matches!(
-                            hook,
-                            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode
-                        ) {
-                            // The walk starts at the top of the thread, not at its tail; the
-                            // diagram and pictures landing move the tail, so say it a few times.
-                            for _ in 0..8 {
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(2000))
-                                    .await;
-                                root.update(cx, |root, cx| {
-                                    if let Some(screen) = root.run_screen().cloned() {
-                                        screen.update(cx, |screen, cx| screen.demo_scroll_top(cx));
-                                    }
-                                })
-                                .ok();
-                            }
-                        }
-                        if matches!(hook, Draft33Hook::Select | Draft33Hook::CopyCode) {
-                            // The reply has to be drawn (and its diagram and picture landed)
-                            // before there is anything to select.
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1500))
-                                .await;
-                            root.update_in(cx, |root, window, cx| {
-                                if let Some(screen) = root.run_screen().cloned() {
-                                    screen.update(cx, |screen, cx| {
-                                        screen.demo_copy(hook == Draft33Hook::Select, window, cx);
-                                    });
-                                }
+                        let screen = |root: &gpui::WeakEntity<RootView>,
+                                      cx: &mut gpui::AsyncWindowContext,
+                                      act: &dyn Fn(
+                            &mut RunScreen,
+                            &mut Context<RunScreen>,
+                        ) -> bool| {
+                            root.update(cx, |root, cx| {
+                                root.run_screen()
+                                    .cloned()
+                                    .is_some_and(|screen| screen.update(cx, |s, cx| act(s, cx)))
                             })
-                            .ok();
-                        }
-                        if hook == Draft33Hook::Folds {
-                            // A long thread's runs arrive one after another: open what is there,
-                            // twice (an open fold stays open).
-                            for _ in 0..2 {
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(1500))
-                                    .await;
-                                root.update(cx, |root, cx| {
-                                    if let Some(screen) = root.run_screen().cloned() {
-                                        screen.update(cx, |screen, cx| screen.open_all_folds(cx));
+                            .unwrap_or(true)
+                        };
+                        match hook {
+                            Draft33Hook::Latest => {
+                                // The reply streams: take the view off its tail once it can scroll.
+                                for _ in 0..120 {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(500))
+                                        .await;
+                                    if screen(&root, cx, &|s, cx| s.demo_scroll_up(cx)) {
+                                        break;
                                     }
-                                })
-                                .ok();
+                                }
                             }
+                            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode => {
+                                // The walk starts at the top of the thread, not at its tail, and
+                                // the diagram and pictures landing move the tail: say it until
+                                // the view is at the top and nothing more has landed for a moment.
+                                for _ in 0..120 {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(500))
+                                        .await;
+                                    let still = screen(&root, cx, &|s, cx| {
+                                        s.demo_scroll_top(cx);
+                                        s.render_is_still(cx)
+                                    });
+                                    if still {
+                                        break;
+                                    }
+                                }
+                                if hook != Draft33Hook::Render {
+                                    // Once the reply is in and the selection holds text.
+                                    for _ in 0..120 {
+                                        let went = root
+                                            .update_in(cx, |root, window, cx| {
+                                                root.run_screen().cloned().is_some_and(|s| {
+                                                    s.update(cx, |s, cx| {
+                                                        s.demo_copy(
+                                                            hook == Draft33Hook::Select,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    })
+                                                })
+                                            })
+                                            .unwrap_or(true);
+                                        if went {
+                                            break;
+                                        }
+                                        cx.background_executor()
+                                            .timer(Duration::from_millis(500))
+                                            .await;
+                                    }
+                                }
+                            }
+                            Draft33Hook::Folds => {
+                                // A long thread's runs arrive one after another: open what is
+                                // there until all are.
+                                for _ in 0..120 {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(500))
+                                        .await;
+                                    screen(&root, cx, &|s, cx| {
+                                        s.open_all_folds(cx);
+                                        false
+                                    });
+                                    if screen(&root, cx, &|s, cx| s.demo_ready("folds", cx)) {
+                                        break;
+                                    }
+                                }
+                            }
+                            Draft33Hook::Thread | Draft33Hook::Stream => {}
                         }
+                        announce_ready(&root, hook.word(), cx).await;
                     })
                     .detach();
                 }

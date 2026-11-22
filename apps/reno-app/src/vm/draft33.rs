@@ -85,6 +85,19 @@ pub(crate) enum OpenHook {
 }
 
 impl OpenHook {
+    /// The word that names it in `RENO_DRAFT33_OPEN`, and in the `ready <word>` line it prints.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Thread => "thread",
+            Self::Folds => "folds",
+            Self::Render => "render",
+            Self::Stream => "stream",
+            Self::Latest => "latest",
+            Self::Select => "select",
+            Self::CopyCode => "copycode",
+        }
+    }
+
     pub(crate) fn parse(word: &str) -> Option<Self> {
         match word.trim().to_ascii_lowercase().as_str() {
             "thread" => Some(Self::Thread),
@@ -114,6 +127,15 @@ pub(crate) enum FindHook {
 }
 
 impl FindHook {
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Find => "find",
+            Self::Enter => "enter",
+            Self::Enter3 => "enter3",
+            Self::Escape => "escape",
+        }
+    }
+
     /// What the hooks look for.
     pub(crate) const QUERY: &'static str = "supervisor.rs";
 
@@ -202,5 +224,28 @@ mod tests {
         assert_eq!(OpenHook::parse("select"), Some(OpenHook::Select));
         assert_eq!(OpenHook::parse("CopyCode"), Some(OpenHook::CopyCode));
         assert_eq!(FindHook::parse("select"), None);
+    }
+
+    #[test]
+    fn every_hook_word_parses_back_to_its_hook() {
+        for hook in [
+            OpenHook::Thread,
+            OpenHook::Folds,
+            OpenHook::Render,
+            OpenHook::Stream,
+            OpenHook::Latest,
+            OpenHook::Select,
+            OpenHook::CopyCode,
+        ] {
+            assert_eq!(OpenHook::parse(hook.word()), Some(hook));
+        }
+        for hook in [
+            FindHook::Find,
+            FindHook::Enter,
+            FindHook::Enter3,
+            FindHook::Escape,
+        ] {
+            assert_eq!(FindHook::parse(hook.word()), Some(hook));
+        }
     }
 }

@@ -67,6 +67,11 @@ pub(super) struct Select {
     /// How far the list moves each step while the pointer is held past its edge (negative: up).
     scroll: f32,
     task: Option<Task<()>>,
+    /// The walk's hooks: when the renderers last settled something, whether the selection was
+    /// copied and the clipboard read, and whether the view was taken off the tail.
+    pub(super) demo_gen: Option<(u64, std::time::Instant)>,
+    pub(super) demo_copied: bool,
+    pub(super) demo_scrolled_up: bool,
 }
 
 /// Where a text of a row is, for painting and tracking it.
@@ -448,11 +453,18 @@ impl RunScreen {
     }
 
     /// `RENO_DRAFT33_OPEN=select|copycode`: the walk's step 8 or 9, then the clipboard's text on
-    /// stdout as `clipboard: ...` with line breaks written `\n`.
+    /// stdout as `clipboard: ...` with line breaks written `\n`. Whether it went ahead: the
+    /// prompt and the reply must be in, and for `select` the selection must hold text before
+    /// ⌘C is sent; the clipboard is emptied first, so what is printed is what the copy put there.
     #[allow(clippy::print_stdout)]
-    pub(crate) fn demo_copy(&mut self, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn demo_copy(
+        &mut self,
+        select: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if select {
-            let first_text = |at: usize, text: &str| {
+            let boundary = |at: usize, text: &str| {
                 let mut at = at.min(text.len());
                 while !text.is_char_boundary(at) {
                     at -= 1;
@@ -463,25 +475,24 @@ impl RunScreen {
             let user = entries.iter().find(|e| matches!(e.row, Row::User { .. }));
             let prose = entries.iter().find(|e| matches!(e.row, Row::Prose { .. }));
             let (Some(user), Some(prose)) = (user, prose) else {
-                println!("clipboard: (no prompt and reply to select)");
-                return;
+                return false;
             };
             let (Row::User { text: asked, .. }, Row::Prose { text: reply, .. }) =
                 (user.row, prose.row)
             else {
-                return;
+                return false;
             };
             // The middle of the first paragraph of the reply.
             let tree = reno_markdown::parse_full(reply);
             let atoms = crate::vm::anchor::atoms(reply, &tree);
             let middle = atoms.first().map_or(reply.len() / 2, |a| {
-                first_text((a.src.start + a.src.end) / 2, reply)
+                boundary((a.src.start + a.src.end) / 2, reply)
             });
             self.select.current = Some(Selection {
                 anchor: Pos {
                     ordinal: user.ordinal,
                     slot: Slot::WHOLE,
-                    off: first_text(asked.len() / 2, asked),
+                    off: boundary(asked.len() / 2, asked),
                 },
                 head: Pos {
                     ordinal: prose.ordinal,
@@ -489,7 +500,12 @@ impl RunScreen {
                     off: middle,
                 },
             });
+            if self.selected_text().is_none() {
+                self.select.current = None;
+                return false;
+            }
             // The same path as the key: the transcript holds focus and ⌘C is dispatched to it.
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
             window.focus(&self.transcript_focus, cx);
             cx.notify();
             window.on_next_frame(|window, cx| {
@@ -511,23 +527,34 @@ impl RunScreen {
                         }),
                     _ => None,
                 });
-            match code {
-                Some(code) => crate::ui::markdown_view::chrome::copy(&code, "code", cx),
-                None => println!("clipboard: (no Rust code block)"),
-            }
+            let Some(code) = code else {
+                return false;
+            };
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            crate::ui::markdown_view::chrome::copy(&code, "code", cx);
         }
-        cx.spawn_in(window, async move |_, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(500))
-                .await;
-            let text = cx
-                .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            println!("clipboard: {}", text.replace('\n', "\\n"));
+        cx.spawn_in(window, async move |this, cx| {
+            // Until the copy has put its text there; the clipboard was emptied first.
+            for _ in 0..40 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let text = cx
+                    .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    println!("clipboard: {}", text.replace('\n', "\\n"));
+                    this.update(cx, |this, _| this.select.demo_copied = true)
+                        .ok();
+                    return;
+                }
+            }
+            println!("clipboard: (nothing was copied)");
         })
         .detach();
+        true
     }
 }
 

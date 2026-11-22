@@ -69,6 +69,8 @@ pub(super) struct Find {
     opened_outputs: Vec<(String, Key)>,
     demo: Option<Demo>,
     demo_close: Option<Task<()>>,
+    /// The demo hook reached its end: it went to its hit, and closed search if it had to.
+    demo_done: bool,
     #[cfg(test)]
     pub(super) recounts: usize,
 }
@@ -238,7 +240,13 @@ impl RunScreen {
             .map_or_else(String::new, |(f, _)| f.read(cx).text().to_owned());
         self.find.query = text;
         let hits = find::find_all(&self.rows, &self.find.query);
-        self.find.found = self.find.found.recounted(hits);
+        // Until a hit was gone to, the current match is the first in reading order, also when
+        // earlier runs arrive after the query was typed; after that it stays put.
+        self.find.found = if self.find.navigated {
+            self.find.found.recounted(hits)
+        } else {
+            Found::new(hits)
+        };
         self.find_reindex();
         #[cfg(test)]
         {
@@ -451,6 +459,7 @@ impl RunScreen {
         self.find.found.go_to(demo.goto);
         self.find.navigated = true;
         self.find_reveal(cx);
+        self.find.demo_done = !demo.then_close;
         if demo.then_close {
             self.find.demo_close = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(DEMO_CLOSE_AFTER).await;
@@ -464,6 +473,7 @@ impl RunScreen {
         if self.find.open {
             self.end_find(cx);
         }
+        self.find.demo_done = true;
     }
 
     /// `RENO_DRAFT33_OPEN=latest`: once the reply is long enough to scroll, the view is taken off
@@ -473,8 +483,68 @@ impl RunScreen {
             return false;
         }
         self.list.scroll_by(px(-1800.0));
+        self.select.demo_scrolled_up = true;
         cx.notify();
         true
+    }
+
+    /// Whether the state the hook `word` names is fully reached (it prints `ready <word>` then):
+    /// the thread's turns are in; the folds open; the query typed and counted; the hit gone to;
+    /// the render check at its top with its diagram and picture landed and still; the selection
+    /// copied; the long reply streaming and the view taken off its tail.
+    pub(crate) fn demo_ready(&mut self, word: &str, cx: &gpui::App) -> bool {
+        use reno_client::fake::transcript::{NEEDLE_HITS, TURNS};
+        let folds: Vec<Key> = self
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Worked { .. }))
+            .map(Row::key)
+            .collect();
+        let drawn = !self.select.registry.borrow().is_empty();
+        let thread = folds.len() == TURNS && drawn;
+        let counted = self.find.open
+            && self.find.query == crate::vm::draft33::FindHook::QUERY
+            && self.find.found.hits.len() == NEEDLE_HITS;
+        let current = self.find.found.current;
+        match word {
+            "thread" => thread,
+            "folds" => thread && folds.iter().all(|k| self.open.contains(k)),
+            "find" => counted && current == Some(0) && !self.find.navigated,
+            "enter" => counted && self.find.demo_done && current == Some(0),
+            "enter3" => counted && self.find.demo_done && current == Some(2),
+            "escape" => thread && !self.find.open && self.find.demo_done,
+            "render" | "select" | "copycode" => {
+                if matches!(word, "select" | "copycode") {
+                    return self.select.demo_copied;
+                }
+                self.render_is_still(cx)
+            }
+            "stream" => self.rows.iter().any(|r| matches!(r, Row::Prose { .. })) && drawn,
+            "latest" => self.select.demo_scrolled_up && !self.list.is_following_tail(),
+            _ => false,
+        }
+    }
+
+    /// The Render check at the top of the thread, its prompt and reply drawn, and nothing the
+    /// renderers load (the diagram, the pictures) has settled for a moment.
+    pub(crate) fn render_is_still(&mut self, cx: &gpui::App) -> bool {
+        let top = self.list.logical_scroll_top();
+        let rows_in = self.rows.iter().any(|r| matches!(r, Row::User { .. }))
+            && self.rows.iter().any(|r| matches!(r, Row::Prose { .. }));
+        if !rows_in || self.select.registry.borrow().is_empty() || top.item_ix != 0 {
+            return false;
+        }
+        let seen = crate::ui::markdown_view::settled_generation(cx);
+        let now = std::time::Instant::now();
+        match self.select.demo_gen {
+            Some((gen_seen, since)) if gen_seen == seen => {
+                seen > 0 && now.duration_since(since) >= Duration::from_millis(1500)
+            }
+            _ => {
+                self.select.demo_gen = Some((seen, now));
+                false
+            }
+        }
     }
 
     // --- jump to latest ------------------------------------------------------------------------
