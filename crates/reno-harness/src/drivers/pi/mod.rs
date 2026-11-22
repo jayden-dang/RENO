@@ -35,8 +35,10 @@
 //!   directory of the run.
 //! - Extension dialogs (`select`, `confirm`, `input`, `editor`) become `NeedsInput`, answered
 //!   through `ExecHandle::answer_input`. One that is declined, that Pi gives up on, or that is
-//!   open when the run ends is dismissed. Pi has no tool-approval protocol: this executor honours
-//!   full access only, like Grok and Devin, and refuses any other mode before spawning.
+//!   open when the run ends is dismissed. Pi can block each tool call through an extension, and
+//!   Reno uses that only for `reno`, whose gate extension asks Reno before every call. `pi` has no
+//!   approval of its own and asks nothing: it honours full access only, like Grok and Devin, and
+//!   refuses any other mode before spawning.
 //! - Isolation from the owner's personal tools (ARCH-15): unless `inherit_user_config`, Pi is
 //!   started with `--no-extensions --no-skills --no-prompt-templates --no-mcp`. Not covered: the
 //!   owner's settings and credentials (they are how Pi signs in), the global context file
@@ -284,6 +286,9 @@ fn is_default_model(model: Option<&str>) -> bool {
 ///
 /// # Access modes
 ///
+/// For `reno`: the gate extension asks Reno before every tool call, so a run may be supervised or
+/// full access, and the unrestricted sandbox only.
+///
 /// For `pi`: Pi asks for no approval before a tool call, so there is nothing for Reno to decide: the
 /// executor honours [`AccessMode::FullAccess`] and the unrestricted sandbox only, and `start`
 /// refuses anything else before spawning (ARCH-15), like Grok and Devin. Pi's own tool allowlist
@@ -521,7 +526,7 @@ impl Executor for PiExecutor {
                 plan_mode: false,
                 models,
                 model_switch: false,
-                // Enforced at launch: see the module docs for what it leaves.
+                // Both flavors: enforced at launch, see the module docs for what it leaves.
                 isolates_user_config: true,
                 model_aliases: vec![],
             },

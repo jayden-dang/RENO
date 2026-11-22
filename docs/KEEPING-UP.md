@@ -31,6 +31,20 @@ RENO_PI_LIVE=1 cargo test -p reno-harness --test pi -- --ignored --nocapture
 
 and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/pi/mod.rs` by hand.
 
+The `reno` executor runs the same Pi behind a gate extension, so a Pi bump also re-runs the gate
+matrix and its live test, which drives a real Pi behind the gate (it spends paid API tokens, so
+run it on purpose):
+
+```
+RENO_PI_LIVE=1 cargo test -p reno-harness --test pi a_real_pi_behind -- --ignored --nocapture
+```
+
+Then re-check, against the new Pi, the two things the gate's safety rests on, both written up in
+`docs/specs/2026-11-22-reno-harness/design.md`: the reload paths (what in RPC mode can reload
+settings or extensions, so that nothing can displace the gate mid-attempt: "Reload paths in RPC
+mode") and the ambient credential paths (the file-based credentials Pi's providers find under
+`HOME`, which the launch environment blanks: "Ambient cloud credentials").
+
 Muse Code (`muse serve`, `cli_verified` 1.4.23) is covered the same way: the counters, the version
 gate, and not the live conformance suite. A newer Muse runs and shows `untested`. To clear it,
 export the new CLI's own schema and compare it with the tables in `wire/muse/known.rs` (the

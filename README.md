@@ -55,7 +55,7 @@ open, and the logins you already have.
 | opencode | `opencode serve`, HTTP and SSE (not ACP) |
 | Grok, Devin, Hermes, Antigravity and other ACP agents | Agent Client Protocol |
 
-Reno uses your installed CLIs and your own sign-ins or API keys. It never runs a model itself.
+Reno uses your installed CLIs and your own sign-ins or API keys, and has a harness of its own for bots that runs on your API keys.
 
 ## How it works
 

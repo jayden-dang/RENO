@@ -1561,3 +1561,11 @@ fn a_blank_or_malformed_model_is_refused() {
     }
     assert!(bot_errors(&bot_with("model = \"gpt-5.5-codex\"")).is_empty());
 }
+
+#[test]
+fn readme_says_reno_has_a_harness_of_its_own_on_your_api_keys() {
+    let readme = include_str!("../../../../README.md");
+    assert!(!readme.contains("It never runs a model itself"));
+    assert!(readme.contains("a harness of its own for bots"));
+    assert!(readme.contains("API keys"));
+}
