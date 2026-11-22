@@ -397,11 +397,6 @@ impl PiExecutor {
         resolve_executable(self.executable.as_deref()).is_ok()
     }
 
-    /// The models Pi lists, and so whether it holds a credential for any provider
-    /// (`get_available_models` lists only the models of providers Pi has one for). One
-    /// short-lived `pi --mode rpc --no-session`, reaped before this returns, in a scratch
-    /// session: no prompt is sent, no model is asked anything. It runs offline and without
-    /// telemetry, so the probe makes no network call of its own.
     /// Runs the attempt on the tracker and remembers when it is over, for `run_closed`.
     fn spawn_attempt(&self, run: Run) {
         let id = run.spec.run_id.clone();
@@ -417,6 +412,11 @@ impl PiExecutor {
         });
     }
 
+    /// The models Pi lists, and so whether it holds a credential for any provider
+    /// (`get_available_models` lists only the models of providers Pi has one for). One
+    /// short-lived `pi --mode rpc --no-session`, reaped before this returns, in a scratch
+    /// session: no prompt is sent, no model is asked anything. It runs offline and without
+    /// telemetry, so the probe makes no network call of its own.
     async fn query_models(
         &self,
         exe: &Path,
@@ -990,9 +990,21 @@ fn lay_out(temp: &Path) -> std::io::Result<(ScratchDir, GateFiles)> {
 }
 
 /// The run's session directory under `root`, owner-only, created when it is missing. The same
-/// for every attempt of the run.
+/// for every attempt of the run. A `root` that exists as a link or as anything but a directory is
+/// refused, so nothing is created through it.
 fn open_session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
     let dir = session_dir(root, run)?;
+    match std::fs::symlink_metadata(root) {
+        Ok(found) if found.is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(format!(
+                "the sessions directory {} is a link or not a directory",
+                root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     create_private_dir(&dir)?;
     Ok(dir)
 }
@@ -1012,14 +1024,27 @@ fn session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
     Ok(root.join(run))
 }
 
-/// Whether `path` itself is a directory and not a link to one. A sessions root that is a link
-/// is never removed from, so nothing outside the place Reno made goes.
-fn is_real_dir(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|found| found.is_dir())
+/// Whether `root` itself is a directory and not a link to one. A sessions root that is not is
+/// never removed from, so nothing outside the place Reno made goes; one that exists and is not a
+/// directory is said so in the log.
+fn is_real_dir(root: &Path) -> bool {
+    match std::fs::symlink_metadata(root) {
+        Ok(found) if found.is_dir() => true,
+        Ok(_) => {
+            tracing::warn!(
+                target: "reno_harness::pi",
+                root = %root.display(),
+                "the sessions directory is a link or not a directory: no session is removed from it"
+            );
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 /// Removes the run's session directory. A link there is removed itself and never followed, so
-/// nothing outside `root` goes; a `root` that is itself a link is left alone. Already gone is done.
+/// nothing outside `root` goes; a `root` that is itself a link is left alone. What is neither a
+/// directory nor a link is left alone, as the sweep does. Already gone is done.
 fn remove_session_dir(root: &Path, run: &str) -> std::io::Result<()> {
     let dir = session_dir(root, run)?;
     if !is_real_dir(root) {
@@ -1027,7 +1052,8 @@ fn remove_session_dir(root: &Path, run: &str) -> std::io::Result<()> {
     }
     let removed = match std::fs::symlink_metadata(&dir) {
         Ok(found) if found.is_dir() => std::fs::remove_dir_all(&dir),
-        Ok(_) => std::fs::remove_file(&dir),
+        Ok(found) if found.is_symlink() => std::fs::remove_file(&dir),
+        Ok(_) => Ok(()),
         Err(error) => Err(error),
     };
     match removed {
@@ -1036,9 +1062,11 @@ fn remove_session_dir(root: &Path, run: &str) -> std::io::Result<()> {
     }
 }
 
-/// Removes every session directory (or link) under `root` whose name is not in `keep`. Only the
-/// entries of a `root` that is a real directory are touched, and none is followed: what is not a directory or a link
-/// is left alone. A failure on one entry is logged and does not stop the others.
+/// Removes every session directory (or link) under `root` that names a run and is not in `keep`.
+/// Only the entries of a `root` that is a real directory are touched, and none is followed: what
+/// is not a directory or a link, or does not have a run's name, is left alone. Each removal is
+/// logged, and so is each entry that cannot be read or removed; one failure does not stop the
+/// others.
 fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
     if !is_real_dir(root) {
         return;
@@ -1052,13 +1080,27 @@ fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
             return;
         }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(target: "reno_harness::pi", %error, "could not read a session entry");
+                continue;
+            }
+        };
         let name = entry.file_name();
-        if name.to_str().is_some_and(|name| keep.contains(name)) {
+        let Some(run) = name.to_str().filter(|name| name.parse::<RunId>().is_ok()) else {
+            continue;
+        };
+        if keep.contains(run) {
             continue;
         }
-        let Ok(kind) = entry.file_type() else {
-            continue;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                tracing::warn!(target: "reno_harness::pi", run, %error, "could not tell what a session entry is");
+                continue;
+            }
         };
         let removed = if kind.is_dir() {
             std::fs::remove_dir_all(entry.path())
@@ -1067,8 +1109,13 @@ fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
         } else {
             continue;
         };
-        if let Err(error) = removed {
-            tracing::warn!(target: "reno_harness::pi", %error, "could not remove an unneeded session");
+        match removed {
+            Ok(()) => {
+                tracing::info!(target: "reno_harness::pi", run, "removed a session no run can resume");
+            }
+            Err(error) => {
+                tracing::warn!(target: "reno_harness::pi", run, %error, "could not remove an unneeded session");
+            }
         }
     }
 }

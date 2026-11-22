@@ -2185,6 +2185,70 @@ async fn reno_session_a_sessions_root_that_is_a_link_is_not_swept_or_closed_thro
 }
 
 #[tokio::test]
+async fn reno_session_a_sessions_root_that_is_a_link_or_not_a_directory_fails_the_launch() {
+    for plant in ["link", "file"] {
+        let bench = Bench::new();
+        let elsewhere = bench.dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        if plant == "link" {
+            std::os::unix::fs::symlink(&elsewhere, bench.sessions()).unwrap();
+        } else {
+            std::fs::write(bench.sessions(), "not a directory").unwrap();
+        }
+        let mut live = start(&reno_executor(&bench), bot_spec_for(&bench, "hello")).await;
+        let events = drive(&mut live).await;
+        let (stop, _, diagnostic) = done(&events);
+        assert_eq!(stop, StopReason::Error, "{plant}");
+        assert!(
+            diagnostic.unwrap().contains("sessions"),
+            "{plant}: names the cause"
+        );
+        assert!(bench.logged().is_empty(), "{plant}: no Pi was spawned");
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "{plant}: nothing was created through it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reno_session_the_sweep_leaves_what_is_not_a_run_alone() {
+    let bench = Bench::new();
+    let exec = reno_executor(&bench);
+    let gone = run_named("01HZXJ");
+    std::fs::create_dir_all(session_dir_of(&bench, &gone)).unwrap();
+    for other in ["notes", "run", "run_", "run_a-b", "thr_01HZXK", ".hidden"] {
+        std::fs::create_dir_all(bench.sessions().join(other).join("inner")).unwrap();
+    }
+
+    exec.retain_runs(&Default::default()).await;
+
+    assert!(!session_dir_of(&bench, &gone).exists());
+    for other in ["notes", "run", "run_", "run_a-b", "thr_01HZXK", ".hidden"] {
+        assert!(
+            bench.sessions().join(other).join("inner").is_dir(),
+            "{other} is not a run's session"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reno_session_a_regular_file_at_a_runs_path_is_left_by_the_sweep_and_by_closing() {
+    let bench = Bench::new();
+    let exec = reno_executor(&bench);
+    let run = run_named("01HZXL");
+    std::fs::create_dir_all(bench.sessions()).unwrap();
+    std::fs::write(session_dir_of(&bench, &run), "not a session").unwrap();
+
+    exec.retain_runs(&Default::default()).await;
+    assert!(session_dir_of(&bench, &run).is_file(), "the sweep");
+
+    exec.run_closed(&run).await;
+    assert!(session_dir_of(&bench, &run).is_file(), "closing the run");
+}
+
+#[tokio::test]
 async fn reno_session_the_owners_executor_closes_and_sweeps_nothing() {
     let bench = Bench::new();
     let run = run_named("01HZXH");
