@@ -732,10 +732,10 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-5.1, RENOHARNESS-5.4, RENOHARNESS-8.
 
 **Depends-on:** Task 12
 
-- [ ] Write a failing test: `README.md` does not contain "It never runs a model itself", and does contain "a harness
+- [x] Write a failing test: `README.md` does not contain "It never runs a model itself", and does contain "a harness
   of its own for bots" and "API keys".
-- [ ] Run `cargo test -p reno-proto readme`, and expect it to fail on the old line.
-- [ ] Rewrite:
+- [x] Run `cargo test -p reno-proto readme`, and expect it to fail on the old line.
+- [x] Rewrite:
   - the README line;
   - the renod executor list;
   - the Pi driver docs: Pi can block each call through an extension; Reno gates it only as `reno`; `pi` still asks
@@ -743,9 +743,9 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-5.1, RENOHARNESS-5.4, RENOHARNESS-8.
   - the `protect.rs` header: `pi` stays among the harnesses that cannot ask; `reno` asks before every call;
   - the `inherit_user_config` docs: which executors isolate, as their descriptors declare it, Pi and `reno` included;
   - the `KEEPING-UP.md` checklist.
-- [ ] Check by reading that the Pi driver docs and the `protect.rs` header say what RENOHARNESS-9.2 says, and the
+- [x] Check by reading that the Pi driver docs and the `protect.rs` header say what RENOHARNESS-9.2 says, and the
   `inherit_user_config` docs what 9.3 says (manual acceptance step).
-- [ ] Run the test, and expect a pass. Then run the close: the full verify list in `docs/agents/project.md`.
-- [ ] `git commit -m "docs: Reno has a harness of its own for bots, on your API keys"`
+- [x] Run the test, and expect a pass. Then run the close: the full verify list in `docs/agents/project.md`.
+- [x] `git commit -m "docs: Reno has a harness of its own for bots, on your API keys"`
 
 _Requirements: RENOHARNESS-9.1, RENOHARNESS-9.2, RENOHARNESS-9.3_
