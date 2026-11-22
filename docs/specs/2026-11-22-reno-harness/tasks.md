@@ -404,7 +404,7 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
 
 **Depends-on:** Task 4, Task 5
 
-- [ ] Write failing tests through `start` (`with_arming_budget(Duration::from_millis(500))`, with the mode set by
+- [x] Write failing tests through `start` (`with_arming_budget(Duration::from_millis(500))`, with the mode set by
   `FAKE_PI_GATE` in `spec.env` and `RENO_BOT` set):
   - `ok` arms and the prompt is sent.
   - `no-hello` (connects, then closes) gives `NoHello`; `never-connect` gives `Timeout`; `wrong-nonce` gives
@@ -416,17 +416,17 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
     prompt frame, with a reason naming `OPENAI` and `OPENAI_API_KEY` and never the secret's value.
   - A bot naming a model the fake does not list still fails before any prompt (today's `set_up`).
   - An attempt that fails to arm (`no-hello`) leaves no scratch behind.
-- [ ] Write a failing unit test in `gate.rs`: a peer of another uid is refused, tested by injecting the uid
+- [x] Write a failing unit test in `gate.rs`: a peer of another uid is refused, tested by injecting the uid
   comparison.
-- [ ] Write a failing kernel test in `tests/routing.rs`: with `executors = ["reno", "pi"]` and a `MockExecutor` for
+- [x] Write a failing kernel test in `tests/routing.rs`: with `executors = ["reno", "pi"]` and a `MockExecutor` for
   `reno` whose stream ends `Done{stop: Error}` before any prompt, the dispatcher records no fallback step and the run
   ends failed.
-- [ ] Run `cargo test -p reno-harness --test pi reno_arm && cargo test -p reno-harness --lib drivers::pi::gate && cargo test -p reno-kernel routing`.
+- [x] Run `cargo test -p reno-harness --test pi reno_arm && cargo test -p reno-harness --lib drivers::pi::gate && cargo test -p reno-kernel routing`.
   Expect "not armed in this build", or `GateHost` unresolved.
-- [ ] Implement `GateHost::bind` and `arm`, and wire arming into `Run::start_up` for `Reno` (failures become
+- [x] Implement `GateHost::bind` and `arm`, and wire arming into `Run::start_up` for `Reno` (failures become
   `Startup::Failed`). Remove the Task 1 refusal.
-- [ ] Run `cargo test -p reno-harness --test pi`, and expect a pass.
-- [ ] `git commit -m "feat(harness): arm the Reno gate before the first prompt, failing the run otherwise"`
+- [x] Run `cargo test -p reno-harness --test pi`, and expect a pass.
+- [x] `git commit -m "feat(harness): arm the Reno gate before the first prompt, failing the run otherwise"`
 
 _Requirements: RENOHARNESS-2.8, RENOHARNESS-2.9, RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.5, RENOHARNESS-11.1, RENOHARNESS-11.3_
 
