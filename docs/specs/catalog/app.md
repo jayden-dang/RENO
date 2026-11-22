@@ -9,3 +9,12 @@ nobody is notified.
 
 | Code | Feature | Spec | Status | Owner | Roadmap item | Match terms | Surface roots |
 |---|---|---|---|---|---|---|---|
+| APPBENCH | App budgets and profiling | — | Implemented |  | ROAD-29 | bench, budgets, frame time, idle wakeups | `xtask/src/bench.rs`, `docs/BENCHMARKS.md` |
+| APPSHELL | App shell: rail, sidebar, canvas, conversation | — | Implemented |  | ROAD-30 | shell, rail, canvas, logo | `apps/reno-app/src/app.rs`, `apps/reno-app/assets/app-icon/` |
+| COMPOSER | Composer: place sentence, completions, queue | — | Implemented |  | ROAD-31 | composer, completions, queue, place | `apps/reno-app/src/ui/composer/` |
+| SIDEBAR | Sidebar: thread menu, Pinned, Archived, resize | — | Implemented |  | ROAD-32 | sidebar, pinned, archived, thread menu | `apps/reno-app/src/ui/sidebar/` |
+| PALETTE | ⌘K command palette | — | Implemented |  | ROAD-34 | palette, command, ⌘K | `apps/reno-app/src/ui/palette.rs`, `apps/reno-app/src/vm/palette.rs` |
+| RUNACTIVITY | Following a run: plan and background trays, subagent chips | — | Implemented |  | ROAD-35 | run activity, plan tray, subagent | `apps/reno-app/src/panel/`, `apps/reno-app/src/vm/activity.rs` |
+| SETTINGS | Settings: General, Appearance, Accounts | — | In-progress |  | ROAD-37 | settings, appearance, accounts | `apps/reno-app/src/screens/settings_pages.rs`, `apps/reno-app/src/prefs.rs` |
+| FIRSTRUN | First run: setup wizard, folder import, connecting gate | — | Implemented |  | ROAD-38 | first run, setup, wizard, onboarding | `apps/reno-app/src/ui/setup/` |
+| MOCKDESK | Mocked daemon contracts (`--fake`) | — | In-progress |  | ROAD-52 | fake, mock, contract, desk | `crates/reno-client/src/fake/` |
