@@ -184,6 +184,7 @@ pub(crate) fn card(
     body: AnyElement,
 ) -> AnyElement {
     let id = ElementId::Name(format!("md-card-{}", card.key).into());
+    let surface = theme.surface.opacity(0.92);
     match variant {
         Variant::A => frame(theme)
             .id(id)
@@ -197,7 +198,7 @@ pub(crate) fn card(
                     .gap(px(2.0))
                     .p(px(1.0))
                     .rounded(px(9.0))
-                    .bg(theme.surface.opacity(0.9))
+                    .group_hover("md-card", move |s| s.bg(surface))
                     .children(controls(card, theme, true)),
             )
             .into_any_element(),

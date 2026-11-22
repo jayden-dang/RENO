@@ -201,7 +201,11 @@ fn appearance_has_typeset_math_and_its_size_beside_the_existing_controls(cx: &mu
     click(vcx, "math-size-120");
     assert_eq!(saved(vcx).math_size, 120);
     click(vcx, "reduce-motion-on");
-    assert_eq!(saved(vcx).reduce_motion, Motion::On, "the old controls still apply");
+    assert_eq!(
+        saved(vcx).reduce_motion,
+        Motion::On,
+        "the old controls still apply"
+    );
     click(vcx, "typeset-math");
     assert!(!saved(vcx).typeset_math);
     draw(vcx);

@@ -194,9 +194,17 @@ pub(crate) fn init_directive(theme: &Theme) -> String {
         "activationBorderColor": hex(theme.faint),
         "sequenceNumberColor": hex(theme.text),
     });
+    // Tight spacing: a chain of five nodes has to fit the transcript's column without shrinking
+    // its labels to specks.
+    let flowchart = serde_json::json!({
+        "nodeSpacing": 24,
+        "rankSpacing": 28,
+        "padding": 8,
+        "diagramPadding": 8,
+    });
     format!(
         "%%{{init: {}}}%%\n",
-        serde_json::json!({ "theme": "base", "themeVariables": vars })
+        serde_json::json!({ "theme": "base", "themeVariables": vars, "flowchart": flowchart })
     )
 }
 

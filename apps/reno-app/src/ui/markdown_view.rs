@@ -555,21 +555,39 @@ fn display_math(tex: &str, env: &Env, cx: &mut App) -> AnyElement {
     let Some(size) = env.math else {
         return source_block(tex, env);
     };
-    match math::typeset(tex, true, size, env.base.color, env.scale, cx) {
+    // Display style reads a little larger than the line it stands between.
+    match math::typeset(tex, true, size * 1.15, env.base.color, env.scale, cx) {
         Some(set) => div()
             .debug_selector(|| "md-math-display".to_owned())
             .w_full()
             .flex()
-            .justify_center()
             .py(px(4.0))
             .child(Picture {
                 image: set.image.clone(),
                 width: set.width,
                 height: set.height(),
+                min_scale: 0.0,
             })
             .into_any_element(),
         None => source_block(tex, env),
     }
+}
+
+/// A drawn diagram: fit to the column, but never smaller than three quarters of its size, so its
+/// labels stay legible; a wider diagram scrolls sideways.
+pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElement {
+    div()
+        .debug_selector(|| "md-diagram".to_owned())
+        .id(("md-diagram-scroll", key as usize))
+        .w_full()
+        .overflow_x_scroll()
+        .child(div().w_full().flex().p(px(12.0)).child(Picture {
+            image: diagram.image.clone(),
+            width: diagram.width,
+            height: diagram.height,
+            min_scale: 0.75,
+        }))
+        .into_any_element()
 }
 
 /// A Mermaid block: the drawing in the diagram frame, its source with "Rendering\u{2026}" while it is
@@ -591,20 +609,7 @@ fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
         )
     };
     match mermaid::drawing(source, env.theme, env.scale, cx) {
-        mermaid::Drawing::Ready(diagram) => frame(
-            div()
-                .debug_selector(|| "md-diagram".to_owned())
-                .w_full()
-                .flex()
-                .justify_center()
-                .p(px(12.0))
-                .child(Picture {
-                    image: diagram.image.clone(),
-                    width: diagram.width,
-                    height: diagram.height,
-                })
-                .into_any_element(),
-        ),
+        mermaid::Drawing::Ready(diagram) => frame(diagram_picture(&diagram, key)),
         mermaid::Drawing::Rendering => frame(
             div()
                 .child(code_body(source, None, false, key, env))

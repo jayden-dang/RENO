@@ -12,7 +12,6 @@ use std::sync::Arc;
 use super::chrome::{self, Card};
 use super::image::{self, ImageSource, Shown};
 use super::link::clean_path;
-use super::picture::Picture;
 use super::{Host, mermaid};
 use crate::ui::theme::Theme;
 use crate::vm::draft33::Variant;
@@ -92,18 +91,7 @@ fn body(
                     },
                     variant,
                     theme,
-                    div()
-                        .debug_selector(|| "md-diagram".to_owned())
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .p(px(12.0))
-                        .child(Picture {
-                            image: diagram.image.clone(),
-                            width: diagram.width,
-                            height: diagram.height,
-                        })
-                        .into_any_element(),
+                    super::diagram_picture(&diagram, chrome::key_of(Some("mermaid"), source)),
                 ),
                 mermaid::Drawing::Rendering => {
                     image::note(theme, "Drawing\u{2026}").into_any_element()

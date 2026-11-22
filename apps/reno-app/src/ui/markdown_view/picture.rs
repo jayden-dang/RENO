@@ -24,6 +24,9 @@ pub(crate) struct Picture {
     /// Natural size in logical pixels: the widest the box gets.
     pub(crate) width: f32,
     pub(crate) height: f32,
+    /// The least share of its natural width the box shrinks to; narrower columns scroll. `0.0`
+    /// shrinks to any column.
+    pub(crate) min_scale: f32,
 }
 
 impl Element for Picture {
@@ -43,13 +46,27 @@ impl Element for Picture {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, ()) {
+        // The box is the column wide, or the least width it may shrink to when the column is
+        // narrower (the scroller around it then scrolls). The picture is drawn centred in it.
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
-        style.max_size.width = px(self.width).into();
-        style.aspect_ratio = Some(self.width / self.height.max(1.0));
-        (window.request_layout(style, [], cx), ())
+        style.min_size.width = px(self.width * self.min_scale).into();
+        let (natural, min_scale, ratio) = (
+            self.width,
+            self.min_scale,
+            self.width / self.height.max(1.0),
+        );
+        let id = window.request_measured_layout(style, move |known, available, _, _| {
+            let column = known.width.map(f32::from).or(match available.width {
+                gpui::AvailableSpace::Definite(w) => Some(f32::from(w)),
+                _ => None,
+            });
+            let drawn = shown_width(column.unwrap_or(natural), natural, min_scale);
+            size(px(column.unwrap_or(drawn)), px(drawn / ratio))
+        });
+        (id, ())
     }
 
     fn prepaint(
@@ -73,11 +90,24 @@ impl Element for Picture {
         window: &mut Window,
         _cx: &mut App,
     ) {
+        let drawn = px(shown_width(
+            f32::from(bounds.size.width),
+            self.width,
+            self.min_scale,
+        ));
+        let height = drawn * (self.height / self.width.max(1.0));
+        let at = Bounds::new(
+            point(
+                bounds.origin.x + ((bounds.size.width - drawn) / 2.0).max(px(0.0)),
+                bounds.origin.y,
+            ),
+            size(drawn, height),
+        );
         // A picture that cannot be painted leaves its box empty; nothing here may fail a frame.
         window
             .paint_image(
-                bounds,
-                bounds,
+                at,
+                at,
                 gpui::Corners::default(),
                 self.image.clone(),
                 0,
@@ -85,6 +115,12 @@ impl Element for Picture {
             )
             .ok();
     }
+}
+
+/// How wide a picture of natural width `natural` is drawn in a column `column` wide: the column,
+/// but never wider than itself and never narrower than `min_scale` of its size.
+pub(crate) fn shown_width(column: f32, natural: f32, min_scale: f32) -> f32 {
+    column.clamp(natural * min_scale, natural)
 }
 
 /// A formula to paint over `range` of the text.
@@ -217,6 +253,26 @@ impl Element for Overlays {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_fits_its_column_down_to_its_least_scale_and_never_grows() {
+        assert_eq!(
+            shown_width(500.0, 1000.0, 0.75),
+            750.0,
+            "not below three quarters"
+        );
+        assert_eq!(shown_width(900.0, 1000.0, 0.75), 900.0, "fit to the column");
+        assert_eq!(
+            shown_width(2000.0, 1000.0, 0.75),
+            1000.0,
+            "never larger than itself"
+        );
+        assert_eq!(
+            shown_width(100.0, 200.0, 0.0),
+            100.0,
+            "a formula shrinks to any column"
+        );
+    }
 
     #[test]
     fn a_formula_sits_on_the_baseline_centred_in_its_gap() {
