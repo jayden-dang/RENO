@@ -736,3 +736,139 @@ fn a_query_typed_while_the_thread_loads_ends_on_one_of_seven(cx: &mut TestAppCon
     });
     assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
 }
+
+/// What the owner's own order does on the seed: every fold open, ⌘F, `supervisor.rs`, Enter, Esc.
+#[gpui::test]
+fn the_cards_own_order_with_every_fold_open(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    screen.update(vcx, |s, cx| s.open_all_folds(cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    vcx.simulate_keystrokes("cmd-a");
+    type_query(vcx, "supervisor.rs");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    // The first hit: the fold it is in and the call whose output holds it.
+    let (fold, call) = screen.read_with(vcx, |s, _| {
+        let hit = s
+            .find_found()
+            .current_hit()
+            .cloned()
+            .expect("a current hit");
+        let Part::Output(n) = hit.part else {
+            panic!("the first hit is in an output: {:?}", hit.part)
+        };
+        let call = s
+            .rows()
+            .iter()
+            .flat_map(|r| match r {
+                Row::Worked { rows, .. } => rows.iter().collect::<Vec<_>>(),
+                other => vec![other],
+            })
+            .find_map(|r| match r {
+                Row::Tools { key, calls } if *key == hit.key => Some(calls[n].id.clone()),
+                _ => None,
+            })
+            .expect("the call");
+        (hit.fold.expect("inside a fold"), call)
+    });
+    // (the hit's fold open, its output open, every fold open, search holds something open)
+    let state = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            let all = folds(vcx, &screen).iter().all(|(k, _)| s.is_open(*k));
+            (
+                s.is_open(fold),
+                s.output_is_open(&call),
+                all,
+                s.search_holds(),
+            )
+        })
+    };
+    let typed = state(vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    let entered = state(vcx);
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    let escaped = state(vcx);
+    // Typing opens nothing: turn 3's fold is the owner's, the step's output is closed.
+    assert_eq!(typed, (true, false, true, false), "after typing");
+    // Enter opens the `cargo test` step's output (search holds it); the fold was already the
+    // owner's, so search opens nothing else.
+    assert_eq!(entered, (true, true, true, true), "after Enter");
+    // Esc closes the output search opened and nothing more: every fold the owner opened stays
+    // open, turn 3's included.
+    assert_eq!(escaped, (true, false, true, false), "after Esc");
+}
+
+/// The ledger's match ticks are the operator's pick for the quiet strip too (variants A and B);
+/// the results variant keeps its Find tab. They show while the bar holds a query.
+#[gpui::test]
+fn match_ticks_show_on_the_rail_in_a_and_b_while_find_holds_a_query(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let ticked = |vcx: &mut VisualTestContext| {
+        draw(vcx);
+        painted(vcx, "find-tick") || painted(vcx, "find-tick-current")
+    };
+    assert!(!ticked(vcx), "no query, no ticks");
+    for variant in [Variant::A, Variant::B, Variant::C] {
+        vcx.simulate_keystrokes("cmd-f");
+        draw(vcx);
+        vcx.simulate_keystrokes("cmd-a");
+        type_query(vcx, "supervisor.rs");
+        assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+        assert_eq!(ticked(vcx), variant != Variant::C, "{variant:?}");
+        if variant != Variant::C {
+            assert!(
+                painted(vcx, "find-tick-current"),
+                "{variant:?} marks the current one"
+            );
+        }
+        vcx.simulate_keystrokes("escape");
+        assert!(
+            !ticked(vcx),
+            "{variant:?}: the ticks go when the bar closes"
+        );
+        vcx.simulate_keystrokes("cmd-alt-right");
+        draw(vcx);
+    }
+}
+
+/// Cycling the draft's variants with find open keeps the count, the current hit and, in the
+/// results variant, the seven results.
+#[gpui::test]
+fn cycling_a_b_c_with_find_open_keeps_one_of_seven_and_the_current_hit(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    vcx.simulate_keystrokes("cmd-a");
+    type_query(vcx, "supervisor.rs");
+    vcx.simulate_keystrokes("enter enter");
+    draw(vcx);
+    let current = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            let found = s.find_found();
+            (found.current, found.hits.len(), s.find_count_label())
+        })
+    };
+    let before = current(vcx);
+    assert_eq!(before.2.as_deref(), Some("2 of 7"));
+    for _ in 0..3 {
+        vcx.simulate_keystrokes("cmd-alt-right");
+        draw(vcx);
+        assert_eq!(
+            current(vcx),
+            before,
+            "the same hit and count after a switch"
+        );
+        assert!(screen.read_with(vcx, |s, _| s.find_is_open()));
+    }
+    // Back on A after three steps; go to C and see its results.
+    vcx.simulate_keystrokes("cmd-alt-left");
+    draw(vcx);
+    assert_eq!(current(vcx), before);
+    for n in 0..7 {
+        assert!(painted(vcx, &format!("find-result-{n}")), "result {n} in C");
+    }
+    assert!(!painted(vcx, "find-result-7"));
+}

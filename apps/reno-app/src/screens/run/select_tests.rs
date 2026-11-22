@@ -396,3 +396,22 @@ fn a_file_link_in_a_reply_opens_the_files_tab_at_its_line(cx: &mut TestAppContex
     assert_eq!(active, crate::panel::surface::Surface::Files);
     assert_eq!(doc, Some(("src/supervisor.rs".to_owned(), Some(42))));
 }
+
+#[gpui::test]
+fn a_selection_survives_switching_the_draft_variant(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (from, to) = centres(vcx, &screen);
+    drag(vcx, from, to);
+    let copied = screen
+        .read_with(vcx, |s, _| s.selected_text())
+        .expect("selected");
+    for _ in 0..3 {
+        vcx.simulate_keystrokes("cmd-alt-right");
+        draw(vcx);
+        assert!(screen.read_with(vcx, |s, _| s.has_selection()));
+        assert_eq!(
+            screen.read_with(vcx, |s, _| s.selected_text()).as_deref(),
+            Some(copied.as_str())
+        );
+    }
+}

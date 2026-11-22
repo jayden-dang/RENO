@@ -880,8 +880,9 @@ impl RunScreen {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
                 }))
-                // Ledger: where the matches are, beside the prompt ticks.
-                .children(if variant == crate::vm::draft33::Variant::B {
+                // Where the matches are, beside the prompt ticks: the ledger's (variant B), and the
+                // operator's pick of it for the quiet strip (variant A).
+                .children(if variant != crate::vm::draft33::Variant::C {
                     self.find_rail_ticks(theme)
                 } else {
                     Vec::new()
@@ -1067,9 +1068,13 @@ impl Render for RunScreen {
             .min_h_0()
             .w_full()
             .max_w(px(COLUMN))
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .size_full()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
                     .pl(px(RAIL))
                     .on_mouse_down(
                         gpui::MouseButton::Left,

@@ -85,6 +85,21 @@ impl RunScreen {
             }
             None => (Vec::new(), hits),
         };
+        // A run of edits says only "Edited 2 files": where a match is in a file's path, the line
+        // names that file, with the match painted.
+        let edits = (line.icon == convo::StepIcon::Edit)
+            .then(|| convo::line_calls(calls).get(ln).cloned())
+            .flatten()
+            .and_then(|run| {
+                let verb = line.text.split(' ').next().unwrap_or("Edited");
+                convo::edit_line_with_hits(calls, run, verb, &|n| {
+                    self.find_highlights(key, find::Part::Label(n))
+                })
+            });
+        let (line_text, painted, unpainted) = match edits {
+            Some((text, shown)) => (text, shown, Vec::new()),
+            None => (line.text.clone(), painted, unpainted),
+        };
         let output = call.filter(|c| c.output.is_some());
         let shown = output.is_some_and(|c| self.outputs_open.contains(&c.id));
         let glyph = match line.icon {
@@ -154,7 +169,7 @@ impl RunScreen {
                             len: 0,
                             total: None,
                         },
-                        &line.text,
+                        &line_text,
                         &painted,
                     )),
             )

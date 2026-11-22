@@ -604,6 +604,34 @@ pub(crate) fn open_window(
                         cx.background_executor()
                             .timer(Duration::from_millis(500))
                             .await;
+                        if hook == Draft33Find::CardOrder {
+                            // The owner opens every fold first: once all the turns are in.
+                            root.update_in(cx, |root, window, cx| {
+                                root.draft33_hook(Draft33Hook::Thread, window, cx);
+                            })
+                            .ok();
+                            for _ in 0..240 {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(250))
+                                    .await;
+                                let all = root
+                                    .update(cx, |root, cx| {
+                                        root.run_screen().cloned().is_some_and(|screen| {
+                                            screen.update(cx, |s, cx| {
+                                                let in_ = s.demo_ready("thread", cx);
+                                                if in_ {
+                                                    s.open_all_folds(cx);
+                                                }
+                                                in_
+                                            })
+                                        })
+                                    })
+                                    .unwrap_or(true);
+                                if all {
+                                    break;
+                                }
+                            }
+                        }
                         root.update_in(cx, |root, window, cx| {
                             root.draft33_find_hook(hook, window, cx);
                         })
@@ -616,7 +644,10 @@ pub(crate) fn open_window(
                     cx.spawn_in(window, async move |root, cx| {
                         let run = match hook {
                             Draft33Hook::Thread | Draft33Hook::Folds => Some(draft33_thread_run()),
-                            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode => {
+                            Draft33Hook::Render
+                            | Draft33Hook::Select
+                            | Draft33Hook::CopyCode
+                            | Draft33Hook::RenderTail => {
                                 Some(reno_client::fake::transcript::RENDER_RUN)
                             }
                             Draft33Hook::Stream | Draft33Hook::Latest => None,
@@ -664,7 +695,7 @@ pub(crate) fn open_window(
                                         .await;
                                     let still = screen(&root, cx, &|s, cx| {
                                         s.demo_scroll_top(cx);
-                                        s.render_is_still(cx)
+                                        s.render_is_still(cx, true)
                                     });
                                     if still {
                                         break;
@@ -692,6 +723,21 @@ pub(crate) fn open_window(
                                         cx.background_executor()
                                             .timer(Duration::from_millis(500))
                                             .await;
+                                    }
+                                }
+                            }
+                            Draft33Hook::RenderTail => {
+                                // The end of the thread; what lands in it moves the end.
+                                for _ in 0..120 {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(500))
+                                        .await;
+                                    let still = screen(&root, cx, &|s, cx| {
+                                        s.jump_to_latest(cx);
+                                        s.demo_ready("rendertail", cx)
+                                    });
+                                    if still {
+                                        break;
                                     }
                                 }
                             }
@@ -1553,7 +1599,10 @@ impl RootView {
                     self.open_run(run, window, cx);
                 }
             }
-            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode => {
+            Draft33Hook::Render
+            | Draft33Hook::Select
+            | Draft33Hook::CopyCode
+            | Draft33Hook::RenderTail => {
                 if let Some(run) = open(reno_client::fake::transcript::RENDER_RUN) {
                     self.open_run(run, window, cx);
                 }

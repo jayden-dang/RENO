@@ -847,8 +847,12 @@ fn display_math(tex: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
     }
 }
 
-/// A drawn diagram: fit to the column, but never smaller than three quarters of its size, so its
-/// labels stay legible; a wider diagram scrolls sideways.
+/// The least share of its size a diagram is drawn at (TRANSCRIPT-10.4): it is fitted to the
+/// column whole, and only one that would need its labels smaller than this to fit scrolls.
+const DIAGRAM_MIN_SCALE: f32 = 0.5;
+
+/// A drawn diagram: fit to the column, but never smaller than half its size, so its labels stay
+/// legible; a wider diagram scrolls sideways.
 pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElement {
     div()
         .debug_selector(|| "md-diagram".to_owned())
@@ -859,7 +863,7 @@ pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElemen
             image: diagram.image.clone(),
             width: diagram.width,
             height: diagram.height,
-            min_scale: 0.75,
+            min_scale: DIAGRAM_MIN_SCALE,
         }))
         .into_any_element()
 }
@@ -1287,6 +1291,33 @@ mod tests {
             assert_eq!(layers[1].1, hit(true));
             assert_ne!(layers[0].1, layers[1].1);
         });
+    }
+
+    #[test]
+    fn the_render_checks_flowchart_is_drawn_whole_in_the_column_by_default() {
+        use crate::ui::theme::{Appearance, Theme};
+        let source = reno_client::fake::transcript::RENDER_REPLY
+            .split("```mermaid\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the reply holds a flowchart");
+        let theme = Theme::for_appearance(Appearance::Dark);
+        let svg = mermaid::render_svg(source, &theme).expect("it draws");
+        let drawn = mermaid::rasterize(&svg, 1.0).expect("it rasterises");
+        // The transcript's column inside a diagram's frame and padding.
+        let column = 560.0;
+        assert!(
+            drawn.width > column,
+            "it is wider than the column: {}",
+            drawn.width
+        );
+        // Fit to width: the whole diagram, scaled down, with no sideways scroll.
+        assert_eq!(
+            picture::shown_width(column, drawn.width, DIAGRAM_MIN_SCALE),
+            column,
+            "natural width {}",
+            drawn.width
+        );
     }
 
     #[test]

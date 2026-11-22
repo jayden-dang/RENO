@@ -106,6 +106,67 @@ pub(crate) fn has_steps(calls: &[ToolEntry]) -> bool {
         .any(|c| !(c.kind == ToolKind::Other && is_input_tool(&c.label)))
 }
 
+/// The calls each line of [`step_lines`] stands for: one for a command or other tool, the whole run
+/// for a run of edits. Lines and ranges are in the same order.
+pub(crate) fn line_calls(calls: &[ToolEntry]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < calls.len() {
+        let call = &calls[at];
+        if call.kind == ToolKind::Other && is_input_tool(&call.label) {
+            at += 1;
+            continue;
+        }
+        let len = if call.kind == ToolKind::Edit {
+            calls[at..]
+                .iter()
+                .take_while(|c| c.kind == ToolKind::Edit)
+                .count()
+        } else {
+            1
+        };
+        out.push(at..at + len);
+        at += len;
+    }
+    out
+}
+
+/// A run of edits says only "Edited 3 files", which hides where a find match is. When the match
+/// is in the path of some of the run's edits, the line names those files instead: the text to
+/// show and the matches in it. `hits_in(n)` are the matches (bytes of the call's label, with
+/// whether each is the current one) of the group's `n`th call.
+pub(crate) fn edit_line_with_hits(
+    calls: &[ToolEntry],
+    run: std::ops::Range<usize>,
+    verb: &str,
+    hits_in: &dyn Fn(usize) -> Vec<(std::ops::Range<usize>, bool)>,
+) -> Option<(String, Vec<(std::ops::Range<usize>, bool)>)> {
+    let mut text = verb.to_owned();
+    let mut shown = Vec::new();
+    let mut any = false;
+    for n in run {
+        let call = calls.get(n)?;
+        let path_at = call.label.find(' ').map_or(0, |i| i + 1);
+        let inside: Vec<_> = hits_in(n)
+            .into_iter()
+            .filter(|(r, _)| r.start >= path_at)
+            .collect();
+        if inside.is_empty() {
+            continue;
+        }
+        text.push_str(if any { ", " } else { " " });
+        let start = text.len();
+        text.push_str(&call.label[path_at..]);
+        shown.extend(
+            inside
+                .into_iter()
+                .map(|(r, cur)| (r.start - path_at + start..r.end - path_at + start, cur)),
+        );
+        any = true;
+    }
+    any.then_some((text, shown))
+}
+
 /// One line for each step; a run of edits is one line, "Edited 3 files".
 pub(crate) fn step_lines(calls: &[ToolEntry]) -> Vec<StepLine> {
     let mut lines = Vec::new();
@@ -870,5 +931,34 @@ mod tests {
         assert!(starts.windows(2).all(|w| w[0] <= w[1]));
         assert_eq!(starts[2], marks[1].at);
         assert!(row_starts(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_run_of_edits_names_the_files_that_hold_a_match() {
+        let calls = [
+            call("1", ToolKind::Command, "ls", ok()),
+            call("2", ToolKind::Edit, "Edit src/a.rs", ok()),
+            call("3", ToolKind::Edit, "Edit crates/x/supervisor.rs", ok()),
+        ];
+        assert_eq!(line_calls(&calls), vec![0..1, 1..3]);
+        let hits = |n: usize| match n {
+            // "Edit crates/x/supervisor.rs": the match is in the path.
+            2 => vec![(14..22, true)],
+            _ => Vec::new(),
+        };
+        let (text, shown) = edit_line_with_hits(&calls, 1..3, "Edited", &hits).unwrap();
+        assert_eq!(text, "Edited crates/x/supervisor.rs");
+        assert_eq!(&text[shown[0].0.clone()], "supervis");
+        assert!(shown[0].1);
+        // No match in any path: the line stays as it was.
+        assert_eq!(
+            edit_line_with_hits(&calls, 1..3, "Edited", &|_| Vec::new()),
+            None
+        );
+        // A match in the word "Edit" is not in the path.
+        assert_eq!(
+            edit_line_with_hits(&calls, 1..2, "Edited", &|_| vec![(0..2, false)]),
+            None
+        );
     }
 }

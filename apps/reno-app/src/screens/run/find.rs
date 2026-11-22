@@ -509,7 +509,21 @@ impl RunScreen {
         match word {
             "thread" => thread,
             "folds" => thread && folds.iter().all(|k| self.open.contains(k)),
-            "find" => counted && current == Some(0) && !self.find.navigated,
+            "find" => {
+                // The rail's match ticks need the rail: the transcript tall enough to scroll.
+                let ticks = crate::vm::convo::rail_visible(f32::from(
+                    self.list.max_offset_for_scrollbar().y,
+                ));
+                counted && current == Some(0) && !self.find.navigated && ticks
+            }
+            "cardorder" => {
+                counted
+                    && self.find.demo_done
+                    && current == Some(0)
+                    && thread
+                    && folds.iter().all(|k| self.open.contains(k))
+            }
+            "rendertail" => self.list.is_following_tail() && self.render_is_still(cx, false),
             "enter" => counted && self.find.demo_done && current == Some(0),
             "enter3" => counted && self.find.demo_done && current == Some(2),
             "escape" => thread && !self.find.open && self.find.demo_done,
@@ -517,7 +531,7 @@ impl RunScreen {
                 if matches!(word, "select" | "copycode") {
                     return self.select.demo_copied;
                 }
-                self.render_is_still(cx)
+                self.render_is_still(cx, true)
             }
             "stream" => self.rows.iter().any(|r| matches!(r, Row::Prose { .. })) && drawn,
             "latest" => self.select.demo_scrolled_up && !self.list.is_following_tail(),
@@ -525,13 +539,28 @@ impl RunScreen {
         }
     }
 
+    /// Whether a row in view is drawn over the one below it.
+    pub(crate) fn rows_overlap(&self) -> bool {
+        let top = self.list.logical_scroll_top().item_ix;
+        let bounds: Vec<_> = (top..(top + 40).min(self.items.len()))
+            .filter_map(|ix| self.list.bounds_for_item(ix))
+            .collect();
+        bounds
+            .windows(2)
+            .any(|w| w[0].bottom() > w[1].top() + px(0.5))
+    }
+
     /// The Render check at the top of the thread, its prompt and reply drawn, and nothing the
     /// renderers load (the diagram, the pictures) has settled for a moment.
-    pub(crate) fn render_is_still(&mut self, cx: &gpui::App) -> bool {
+    pub(crate) fn render_is_still(&mut self, cx: &gpui::App, at_top: bool) -> bool {
         let top = self.list.logical_scroll_top();
         let rows_in = self.rows.iter().any(|r| matches!(r, Row::User { .. }))
             && self.rows.iter().any(|r| matches!(r, Row::Prose { .. }));
-        if !rows_in || self.select.registry.borrow().is_empty() || top.item_ix != 0 {
+        if !rows_in
+            || self.select.registry.borrow().is_empty()
+            || (at_top && top.item_ix != 0)
+            || self.rows_overlap()
+        {
             return false;
         }
         let seen = crate::ui::markdown_view::settled_generation(cx);
@@ -550,7 +579,7 @@ impl RunScreen {
     // --- jump to latest ------------------------------------------------------------------------
 
     /// The control that takes the view back to the end and follows the tail again.
-    pub(super) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         self.list.set_follow_mode(gpui::FollowMode::Tail);
         cx.notify();
     }
@@ -587,10 +616,10 @@ impl RunScreen {
             Variant::B => div()
                 .id("jump-latest")
                 .debug_selector(|| "jump-latest".to_owned())
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_0()
+                // Its own row under the list, not over its last line.
+                .relative()
+                .flex_none()
+                .w_full()
                 .h(px(28.0))
                 .flex()
                 .items_center()
@@ -957,7 +986,7 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// Match ticks on the prompt rail (variant B): one for each row that holds a match, the
+    /// Match ticks on the prompt rail (variants A and B): one for each row that holds a match, the
     /// current one longer. Each is a place on the same scale as the prompt ticks.
     pub(super) fn find_rail_ticks(&self, theme: &Theme) -> Vec<AnyElement> {
         if !self.find.open {
@@ -986,6 +1015,14 @@ impl RunScreen {
                 let start = *self.row_starts.get(top)?;
                 Some(
                     div()
+                        .debug_selector(move || {
+                            if lit {
+                                "find-tick-current"
+                            } else {
+                                "find-tick"
+                            }
+                            .to_owned()
+                        })
                         .absolute()
                         .top(gpui::relative(start))
                         .right(px(1.0))

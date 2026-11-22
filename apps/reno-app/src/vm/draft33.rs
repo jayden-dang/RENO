@@ -82,6 +82,9 @@ pub(crate) enum OpenHook {
     Select,
     /// Open "Render check", press the Rust code block's Copy and print the clipboard text.
     CopyCode,
+    /// Open "Render check" at its end: the file link, the pictures and the agent-posted
+    /// visuals, once everything has settled.
+    RenderTail,
 }
 
 impl OpenHook {
@@ -95,6 +98,7 @@ impl OpenHook {
             Self::Latest => "latest",
             Self::Select => "select",
             Self::CopyCode => "copycode",
+            Self::RenderTail => "rendertail",
         }
     }
 
@@ -107,6 +111,7 @@ impl OpenHook {
             "latest" => Some(Self::Latest),
             "select" => Some(Self::Select),
             "copycode" => Some(Self::CopyCode),
+            "rendertail" => Some(Self::RenderTail),
             _ => None,
         }
     }
@@ -124,6 +129,8 @@ pub(crate) enum FindHook {
     Enter3,
     /// As `Enter`, then Escape: the fold search opened closes again.
     Escape,
+    /// The card's own order: every fold opened first, then find, `supervisor.rs`, Enter.
+    CardOrder,
 }
 
 impl FindHook {
@@ -133,6 +140,7 @@ impl FindHook {
             Self::Enter => "enter",
             Self::Enter3 => "enter3",
             Self::Escape => "escape",
+            Self::CardOrder => "cardorder",
         }
     }
 
@@ -145,6 +153,7 @@ impl FindHook {
             "enter" => Some(Self::Enter),
             "enter3" => Some(Self::Enter3),
             "escape" => Some(Self::Escape),
+            "cardorder" => Some(Self::CardOrder),
             _ => None,
         }
     }
@@ -153,7 +162,7 @@ impl FindHook {
     pub(crate) const fn goto(self) -> Option<(usize, bool)> {
         match self {
             Self::Find => None,
-            Self::Enter => Some((0, false)),
+            Self::Enter | Self::CardOrder => Some((0, false)),
             Self::Enter3 => Some((2, false)),
             Self::Escape => Some((0, true)),
         }
@@ -236,6 +245,7 @@ mod tests {
             OpenHook::Latest,
             OpenHook::Select,
             OpenHook::CopyCode,
+            OpenHook::RenderTail,
         ] {
             assert_eq!(OpenHook::parse(hook.word()), Some(hook));
         }
@@ -244,6 +254,7 @@ mod tests {
             FindHook::Enter,
             FindHook::Enter3,
             FindHook::Escape,
+            FindHook::CardOrder,
         ] {
             assert_eq!(FindHook::parse(hook.word()), Some(hook));
         }
