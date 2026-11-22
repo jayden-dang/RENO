@@ -109,7 +109,7 @@ fn math_size_choice(theme: &Theme, current: u8, cx: &mut Context<SettingsScreen>
             kit::segment(
                 theme,
                 format!("math-size-{size}"),
-                format!("{size}"),
+                format!("{size} %"),
                 size == current,
             )
             .on_click(cx.listener(move |_, _, _, cx| prefs::update(cx, |p| p.math_size = size)))

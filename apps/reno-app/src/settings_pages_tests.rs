@@ -178,3 +178,36 @@ fn a_pinned_reduce_motion_holds_from_launch(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn appearance_has_typeset_math_and_its_size_beside_the_existing_controls(cx: &mut TestAppContext) {
+    let store = fake(cx);
+    let (_root, vcx) = settings_at(cx, &store, Category::Appearance);
+    vcx.update(|_, cx| motion::init(ReduceMotion::System, false, cx));
+    for id in [
+        "mode-system",
+        "theme-vercel",
+        "accent-blue",
+        "reduce-motion-system",
+        "typeset-math",
+        "math-size-90",
+        "math-size-100",
+        "math-size-150",
+    ] {
+        assert!(painted(vcx, id), "{id}");
+    }
+    assert_eq!(saved(vcx).math_size, 100);
+    assert!(saved(vcx).typeset_math);
+    click(vcx, "math-size-120");
+    assert_eq!(saved(vcx).math_size, 120);
+    click(vcx, "reduce-motion-on");
+    assert_eq!(saved(vcx).reduce_motion, Motion::On, "the old controls still apply");
+    click(vcx, "typeset-math");
+    assert!(!saved(vcx).typeset_math);
+    draw(vcx);
+    assert!(
+        !painted(vcx, "math-size-120"),
+        "no size to choose while math is off"
+    );
+    assert_eq!(saved(vcx).math_size, 120, "the size is kept");
+}
