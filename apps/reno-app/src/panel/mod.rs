@@ -26,6 +26,14 @@ impl PanelKey {
     }
 }
 
+/// Where a thread was left: the entry at the top of the view (its row key) and how far into it,
+/// in whole points, so that [`Descriptors`] stays `Eq`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Place {
+    pub(crate) key: u64,
+    pub(crate) offset_pt: i32,
+}
+
 /// What the panel needs to know about a run to choose its first tabs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RunFacts {
@@ -46,6 +54,9 @@ pub(crate) struct PanelState {
     active: Surface,
     mru: Vec<Surface>,
     closed: Vec<Surface>,
+    /// The transcript's reading place, kept with the tabs so that both are saved and carried
+    /// over together.
+    place: Option<Place>,
 }
 
 impl Default for PanelState {
@@ -55,6 +66,7 @@ impl Default for PanelState {
             active: Surface::Session,
             mru: Vec::new(),
             closed: Vec::new(),
+            place: None,
         }
     }
 }
@@ -66,6 +78,16 @@ pub(crate) struct Descriptors {
     pub(crate) active: Option<Descriptor>,
     #[serde(default)]
     pub(crate) closed: Vec<Descriptor>,
+    /// Absent in a file from before places were saved, and not written when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) place: Option<Place>,
+}
+
+impl Descriptors {
+    /// Whether any tab was saved: a thread left with only a place has no panel to restore.
+    pub(crate) fn has_panel(&self) -> bool {
+        !self.tabs.is_empty() || self.active.is_some() || !self.closed.is_empty()
+    }
 }
 
 impl PanelState {
@@ -89,6 +111,14 @@ impl PanelState {
 
     pub(crate) fn active(&self) -> &Surface {
         &self.active
+    }
+
+    pub(crate) fn place(&self) -> Option<Place> {
+        self.place
+    }
+
+    pub(crate) fn set_place(&mut self, place: Option<Place>) {
+        self.place = place;
     }
 
     #[cfg(test)]
@@ -202,6 +232,7 @@ impl PanelState {
             tabs: self.tabs.iter().map(Surface::descriptor).collect(),
             active: Some(self.active.descriptor()),
             closed: self.closed.iter().map(Surface::descriptor).collect(),
+            place: self.place,
         }
     }
 
@@ -235,6 +266,7 @@ impl PanelState {
             active,
             mru,
             closed,
+            place: saved.place,
         }
     }
 }
@@ -362,6 +394,7 @@ mod tests {
             tabs: vec![file("a.rs").descriptor()],
             active: Some(file("a.rs").descriptor()),
             closed: vec![],
+            place: None,
         });
         // Session is open but a restored panel's mru order is by tab order; drop it to model an
         // exhausted mru.
@@ -551,12 +584,14 @@ mod tests {
             tabs: vec![],
             active: Some(Surface::Home.descriptor()),
             closed: vec![],
+            place: None,
         };
         assert_eq!(PanelState::restore(&home).active(), &Surface::Home);
         let stray = Descriptors {
             tabs: vec![],
             active: Some(file("x.rs").descriptor()),
             closed: vec![],
+            place: None,
         };
         assert_eq!(PanelState::restore(&stray).active(), &Surface::Session);
     }
@@ -577,6 +612,7 @@ mod tests {
             tabs: vec![],
             active: None,
             closed,
+            place: None,
         });
         assert_eq!(r.recently_closed(100).len(), CLOSED_CAP);
         assert_eq!(
@@ -591,6 +627,7 @@ mod tests {
             tabs: vec![file("a.rs").descriptor()],
             active: Some(file("a.rs").descriptor()),
             closed: vec![],
+            place: None,
         });
         r.close(&file("a.rs"));
         assert_eq!(r.active(), &Surface::Session);

@@ -563,6 +563,7 @@ impl RunScreen {
     /// The control that takes the view back to the end and follows the tail again.
     pub(crate) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         self.list.set_follow_mode(gpui::FollowMode::Tail);
+        self.note_place(cx);
         cx.notify();
     }
 

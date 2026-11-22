@@ -60,6 +60,16 @@ impl Key {
         Self(first.0 | (1 << 39))
     }
 
+    /// Where the entry sits in a thread: its run, then its first event (a fold sits where its
+    /// first row does). `None` for a key no event gave: the routing card, a divider, a visual.
+    pub(crate) fn order(self) -> Option<(u64, u64)> {
+        const SEQ: u64 = (1 << 39) - 1;
+        let divider = self.0 & 0xff_ffff_ffff == 0xff_ffff_ffff;
+        let routing = self.0 >= u64::MAX - 0xffff;
+        let visual = self.0 >> 56 == 0xfd;
+        (!(divider || routing || visual)).then_some((self.0 >> 40, self.0 & SEQ))
+    }
+
     /// The key of the `n`th agent-posted visual of a thread: not a row's, and no row can have it.
     pub(crate) const fn visual(n: usize) -> Self {
         Self(0xfd00_0000_0000_0000 | n as u64)

@@ -167,11 +167,11 @@ impl PanelStore {
     }
 
     /// Store `saved` for `key` as the most recent, cleaned and capped. A panel with nothing
-    /// left after cleaning is not stored.
+    /// left after cleaning (no tab, no place) is not stored.
     pub(crate) fn put(&mut self, key: PanelKey, saved: Descriptors) {
         self.order.retain(|k| *k != key);
         let saved = clean(saved);
-        if saved.tabs.is_empty() && saved.active.is_none() && saved.closed.is_empty() {
+        if !saved.has_panel() && saved.place.is_none() {
             self.keys.remove(&key);
             return;
         }
@@ -343,6 +343,7 @@ impl Saver {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    use super::super::Place;
     use super::super::surface::Surface;
     use super::*;
 
@@ -361,6 +362,7 @@ mod tests {
             active: tabs.last().cloned(),
             tabs,
             closed: vec![],
+            place: None,
         }
     }
 
@@ -418,6 +420,67 @@ mod tests {
         let (s, loaded) = PanelStore::load(&d.path().join("nope.json"));
         assert_eq!(loaded, Loaded::Missing);
         assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn a_file_from_before_reads_with_no_place_and_version_stays_one() {
+        let d = dir();
+        let p = d.path().join("old.json");
+        fs::write(
+            &p,
+            r#"{"version":1,"keys":{"thr_a":{
+                "tabs":[{"kind":"session"},{"kind":"file","key":"a.rs"}],
+                "active":{"kind":"file","key":"a.rs"}}},
+                "order":["thr_a"]}"#,
+        )
+        .expect("write");
+        let (mut s, loaded) = PanelStore::load(&p);
+        assert_eq!(loaded, Loaded::Read);
+        let key = PanelKey("thr_a".into());
+        assert_eq!(s.get(&key).expect("key").place, None);
+        assert_eq!(s.get(&key).expect("key").tabs.len(), 2);
+
+        // Writing it back adds no place, and a place is written once there is one.
+        s.save(&p).expect("save");
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(&p).expect("read")).unwrap();
+        assert_eq!(v["version"], 1);
+        assert!(v["keys"]["thr_a"].get("place").is_none());
+        let mut with = s.get(&key).expect("key").clone();
+        with.place = Some(Place {
+            key: 9,
+            offset_pt: -4,
+        });
+        s.put(key, with);
+        s.save(&p).expect("save");
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(&p).expect("read")).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(
+            v["keys"]["thr_a"]["place"],
+            serde_json::json!({"key": 9, "offset_pt": -4})
+        );
+    }
+
+    #[test]
+    fn a_key_with_only_a_place_is_kept() {
+        let d = dir();
+        let p = d.path().join("p.json");
+        let only = Descriptors {
+            place: Some(Place {
+                key: 7,
+                offset_pt: 12,
+            }),
+            ..Descriptors::default()
+        };
+        let mut s = PanelStore::default();
+        s.put(key(1), only.clone());
+        s.put(key(2), Descriptors::default());
+        assert_eq!(s.get(&key(1)), Some(&only));
+        assert_eq!(s.get(&key(2)), None, "nothing at all is still dropped");
+        s.save(&p).expect("save");
+        let (back, loaded) = PanelStore::load(&p);
+        assert_eq!(loaded, Loaded::Read);
+        assert_eq!(back.get(&key(1)), Some(&only));
+        assert_eq!(back.order(), [key(1)]);
     }
 
     #[test]

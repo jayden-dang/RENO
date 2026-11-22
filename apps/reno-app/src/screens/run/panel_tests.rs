@@ -351,3 +351,50 @@ fn a_live_run_has_stop_in_the_composer_and_an_ended_one_does_not(cx: &mut TestAp
     click(vcx, "composer-stop");
     wait_drawn(vcx, |vcx| !painted(vcx, "composer-stop"));
 }
+
+#[test]
+fn the_place_survives_snapshot_persist_and_the_terminal_round_trip() {
+    use crate::panel::persist::{Loaded, PanelStore};
+    use crate::panel::surface::{Descriptor, Kind};
+    use crate::panel::{Descriptors, PanelKey, PanelState, Place};
+
+    let place = Place {
+        key: (1 << 40) | 9,
+        offset_pt: 37,
+    };
+    let mut state = PanelState::default();
+    state.open(Surface::File("a.rs".into()));
+    state.set_place(Some(place));
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.place, Some(place));
+
+    // Through the terminals' slots and back to ids, as the screen writes it.
+    let (terms, slots) = super::terminal::Terms::restore(Descriptors {
+        tabs: vec![
+            Surface::Session.descriptor(),
+            Descriptor {
+                kind: Kind::Terminal,
+                key: "term_a1".to_owned(),
+            },
+        ],
+        ..snapshot
+    });
+    assert_eq!(slots.place, Some(place), "reading a file keeps the place");
+    let written = terms.to_saved(slots);
+    assert_eq!(written.place, Some(place), "writing one keeps it too");
+
+    // Through the file.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("panel-state.json");
+    let key = PanelKey("thr_a".to_owned());
+    let mut store = PanelStore::default();
+    store.put(key.clone(), written);
+    store.save(&file).unwrap();
+    let (back, loaded) = PanelStore::load(&file);
+    assert_eq!(loaded, Loaded::Read);
+    let saved = back.get(&key).unwrap();
+    assert_eq!(saved.place, Some(place));
+
+    // And into a panel again.
+    assert_eq!(PanelState::restore(saved).place(), Some(place));
+}

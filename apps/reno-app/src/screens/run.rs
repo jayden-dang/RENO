@@ -26,7 +26,7 @@ use reno_proto::{
 
 use super::ScreenEvent;
 use crate::panel::saved::Saved;
-use crate::panel::{PanelKey, PanelState};
+use crate::panel::{Descriptors, PanelKey, PanelState, Place};
 use crate::prefs::{Prefs, ThinkingMode};
 use crate::store::{RunRouting, Store};
 use crate::summary;
@@ -215,6 +215,10 @@ pub(crate) struct RunScreen {
     /// person has opened or closed a tab since (which stops that choice).
     panel_seeded: bool,
     panel_touched: bool,
+    /// The place the thread was left at, until the transcript has come far enough to show it,
+    /// and whether the owner has moved the view since this screen opened.
+    place_pending: Option<Place>,
+    place_moved: bool,
     /// Focus for the panel, so its letters and its keys do not reach the steer input.
     panel_focus: FocusHandle,
     /// The panel was drawn on the last frame (it is not hidden or closed).
@@ -296,7 +300,12 @@ impl RunScreen {
         store.update(cx, |store, cx| store.open_run(run.clone(), cx));
         let steer = cx.new(|cx| Composer::steer(store.clone(), run.clone(), cx));
         let key = panel_key_for(store.read(cx), &run);
-        let saved = Saved::get(&key, cx).or_else(|| migrated(store.read(cx), &key, cx));
+        let own = Saved::get(&key, cx);
+        let own_place = own.as_ref().and_then(|d| d.place);
+        let saved = own
+            .filter(Descriptors::has_panel)
+            .or_else(|| migrated(store.read(cx), &key, cx));
+        let place = own_place.or(saved.as_ref().and_then(|d| d.place));
         // What was saved names terminals by id; the panel names them by slot.
         let (terms, saved) = match saved {
             Some(saved) => {
@@ -305,18 +314,25 @@ impl RunScreen {
             }
             None => (terminal::Terms::default(), None),
         };
-        let (panel, panel_seeded) = match saved {
+        let (mut panel, panel_seeded) = match saved {
             // What the person left: the first-tabs choice must not undo it.
             Some(saved) => (PanelState::restore(&saved), true),
             None => (PanelState::default(), false),
         };
+        panel.set_place(place);
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
         // A scroll may have brought the view back to the tail (or taken it off): the "jump to
         // latest" control reads that on the next frame, once the list has settled.
         let this = cx.entity_id();
+        let screen = cx.weak_entity();
         list.set_scroll_handler(move |_, window, _| {
-            window.on_next_frame(move |_, cx| cx.notify(this));
+            let screen = screen.clone();
+            // The list has settled by then: the place is read from where it rests.
+            window.on_next_frame(move |_, cx| {
+                cx.notify(this);
+                screen.update(cx, |this, cx| this.note_place(cx)).ok();
+            });
         });
         let mut screen = Self {
             _store: cx.observe(&store, |this, _, cx| {
@@ -358,6 +374,8 @@ impl RunScreen {
             panel,
             panel_seeded,
             panel_touched: false,
+            place_pending: place,
+            place_moved: false,
             panel_focus: cx.focus_handle(),
             panel_shown: false,
             files: None,
@@ -723,6 +741,7 @@ impl RunScreen {
         self.measure_activity_chips(cx);
         self.keep_menu(&pending);
         self.resolve_panel_key(cx);
+        self.follow_place();
         self.follow_changes(cx);
         self.follow_thread(cx);
     }
@@ -1151,6 +1170,7 @@ impl RunScreen {
             item_ix: self.items.item_of_top(ix),
             offset_in_item: px(0.0),
         });
+        self.note_place(cx);
         cx.notify();
     }
 
@@ -1231,22 +1251,104 @@ impl RunScreen {
     }
 
     /// The panel's key is the thread once the daemon says which it is. Until then (a run just
-    /// started) it is the run; the tabs the person has carry over.
+    /// started) it is the run; the tabs the person has carry over, and so does the place: the
+    /// view the owner moved, else the one the thread was left at.
     fn resolve_panel_key(&mut self, cx: &mut Context<Self>) {
         let want = panel_key_for(self.store.read(cx), &self.run);
         if want == self.panel_key {
             return;
         }
         self.panel_key = want;
-        match Saved::get(&self.panel_key, cx) {
+        let saved = Saved::get(&self.panel_key, cx);
+        let carried = self.panel.place();
+        let place = if self.place_moved {
+            carried
+        } else {
+            saved.as_ref().and_then(|d| d.place).or(carried)
+        };
+        match saved.filter(Descriptors::has_panel) {
             // The thread's tabs are already known (an earlier run of it): they win, unless the
             // person has changed this panel since it opened.
             Some(saved) if !self.panel_touched => {
                 self.panel = PanelState::restore(&saved);
                 self.panel_seeded = true;
+                self.panel.set_place(place);
+                if self.place_moved {
+                    self.persist_panel(cx);
+                }
             }
-            _ => self.persist_panel(cx),
+            _ => {
+                self.panel.set_place(place);
+                self.persist_panel(cx);
+            }
         }
+        if !self.place_moved {
+            self.place_pending = place;
+        }
+    }
+
+    /// The owner moved the view: where it rests now is the place to keep, saved soon. A view at
+    /// the tail has no place.
+    pub(super) fn note_place(&mut self, cx: &mut Context<Self>) {
+        let place = self.saved_place();
+        self.place_moved = true;
+        self.place_pending = None;
+        if place != self.panel.place() {
+            self.panel.set_place(place);
+            self.persist_place(cx);
+        }
+    }
+
+    /// Where the view rests: the entry at its top and how far into it. `None` while it follows
+    /// the tail, so the thread reopens there. A posted visual has no key of its own to come back
+    /// to: the entry it follows stands in for it, at that entry's top.
+    pub(crate) fn saved_place(&self) -> Option<Place> {
+        let top = self.list.logical_scroll_top();
+        if self.list.is_following_tail() || top.item_ix >= self.items.len() {
+            return None;
+        }
+        let at = self.items.items[..=top.item_ix]
+            .iter()
+            .rposition(|item| item.visual.is_none())?;
+        let offset_pt = if at == top.item_ix {
+            f32::from(top.offset_in_item).round() as i32
+        } else {
+            0
+        };
+        Some(Place {
+            key: self.items.items[at].key.0,
+            offset_pt,
+        })
+    }
+
+    /// Puts the view where `place` says.
+    pub(crate) fn restore_place(&mut self, place: Place) {
+        self.list.scroll_to(place.resolve(&self.items, &self.rows));
+    }
+
+    /// Shows the saved place once the list has laid out and the transcript has come as far as it.
+    /// After a restart the entries arrive after the screen opens, and one that is not there yet
+    /// is not gone. A place saved off the tail rests above the bottom, so one that would rest at
+    /// the bottom means the thread has not come far enough: the view stays at the tail, which
+    /// the list would return to anyway, and the place waits.
+    fn follow_place(&mut self) {
+        let Some(place) = self.place_pending else {
+            return;
+        };
+        if !self.list_has_laid_out() || !place.is_reached(&self.items, &self.rows) {
+            return;
+        }
+        self.restore_place(place);
+        let rests_at = -self.list.scroll_px_offset_for_scrollbar().y;
+        if rests_at + px(1.0) >= self.list.max_offset_for_scrollbar().y {
+            self.list.set_follow_mode(FollowMode::Tail);
+        } else {
+            self.place_pending = None;
+        }
+    }
+
+    fn list_has_laid_out(&self) -> bool {
+        self.list.viewport_bounds().size.height > px(0.0)
     }
 
     /// Keeps what the run changed current: read when the run opens and when it ends, and about
@@ -1376,6 +1478,14 @@ impl Render for RunScreen {
         self.follow_thinking_setting(cx);
         // The texts file themselves again as the list paints them.
         self.begin_paint();
+        if self.place_pending.is_some() {
+            self.follow_place();
+            if !self.list_has_laid_out() {
+                // The place waits for the list's first layout; the frame after it asks again.
+                let this = cx.entity_id();
+                window.on_next_frame(move |_, cx| cx.notify(this));
+            }
+        }
         let rail = self.tick_rail(&theme, cx);
         let transcript = div()
             .id("transcript")
@@ -1453,6 +1563,52 @@ fn tool_calls(rows: &[Row]) -> Box<dyn Iterator<Item = &ToolEntry> + '_> {
         Row::Worked { rows, .. } => tool_calls(rows),
         _ => Box::new(std::iter::empty()),
     }))
+}
+
+impl Place {
+    /// Where the list goes for this place: the entry itself, at its offset; else the fold that
+    /// holds it or spans where it was; else the next entry after it in the thread; else the end,
+    /// which is the tail.
+    pub(crate) fn resolve(&self, items: &Projection, rows: &[Row]) -> ListOffset {
+        let (item_ix, offset_pt) = self.landing(items, rows).unwrap_or((items.len(), 0));
+        ListOffset {
+            item_ix,
+            offset_in_item: px(offset_pt as f32),
+        }
+    }
+
+    /// Whether the thread has come as far as this place: the entry is there, or its own run has
+    /// an entry after it. An entry of a later run does not say so, because the runs of a thread
+    /// arrive one by one.
+    pub(crate) fn is_reached(&self, items: &Projection, rows: &[Row]) -> bool {
+        let key = Key(self.key);
+        let Some((at, _)) = self.landing(items, rows) else {
+            return false;
+        };
+        items.item_of(key).is_some()
+            || key
+                .order()
+                .zip(items.items[at].key.order())
+                .is_some_and(|(wanted, found)| wanted.0 == found.0)
+    }
+
+    fn landing(&self, items: &Projection, rows: &[Row]) -> Option<(usize, i32)> {
+        let key = Key(self.key);
+        if let Some(at) = items.item_of(key) {
+            return Some((at, self.offset_pt));
+        }
+        let wanted = key.order()?;
+        items.items.iter().enumerate().find_map(|(at, item)| {
+            // A fold spans its rows: an entry gone from inside it lands on its head.
+            let last = match items.row(rows, at) {
+                Some(Row::Worked { rows: inner, .. }) => inner.last().map_or(item.key, Row::key),
+                _ => item.key,
+            };
+            last.order()
+                .is_some_and(|end| end >= wanted)
+                .then_some((at, 0))
+        })
+    }
 }
 
 /// The panel key of `run`: its thread when the daemon has threads and has named it, else the run.
