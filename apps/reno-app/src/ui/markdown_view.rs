@@ -586,13 +586,24 @@ fn source_block(tex: &str, env: &Env) -> AnyElement {
         .into_any_element()
 }
 
+/// Display math is drawn this much larger than the text around it (then by the owner's math size),
+/// so its limits and fractions stay easy to read; inline math is the text's own size.
+const DISPLAY_MATH_EM: f32 = 1.2;
+
 /// Display math on its own line, centred; its source when typesetting is off or fails
 /// (TRANSCRIPT-9.1, 9.3, 9.5).
 fn display_math(tex: &str, env: &Env, cx: &mut App) -> AnyElement {
     let Some(size) = env.math else {
         return source_block(tex, env);
     };
-    match math::typeset(tex, true, size, env.base.color, env.scale, cx) {
+    match math::typeset(
+        tex,
+        true,
+        size * DISPLAY_MATH_EM,
+        env.theme.text,
+        env.scale,
+        cx,
+    ) {
         Some(set) => div()
             .debug_selector(|| "md-math-display".to_owned())
             .w_full()
@@ -748,7 +759,7 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
         }
         if style.math
             && let Some(size) = env.math
-            && let Some(set) = math::typeset(&run.text, false, size, base.color, env.scale, cx)
+            && let Some(set) = math::typeset(&run.text, false, size, theme.text, env.scale, cx)
         {
             let unit = gap_unit(&font, font_size, env.window);
             let count = ((set.width / unit).ceil() as usize).max(1);
