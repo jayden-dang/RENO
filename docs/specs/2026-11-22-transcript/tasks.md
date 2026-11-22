@@ -240,15 +240,15 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_pinned_entry_is_never_evicted`;
   - `the_parsed_trees_stop_at_their_bound_and_keep_the_live_reply`;
   - `the_directory_probes_stop_at_their_bound`;
   - `hits_stop_at_ten_thousand_and_the_count_says_so`.
   Run: `cargo test -p reno-app bound` — expect: fails.
-- [ ] **Step 2:** Implement `pin` and the three bounded maps, and cap `find_all`. Run: `cargo test -p reno-app` — expect:
+- [x] **Step 2:** Implement `pin` and the three bounded maps, and cap `find_all`. Run: `cargo test -p reno-app` — expect:
   pass.
-- [ ] **Step 3:** Commit `transcript: bounded parse, probe and directory caches; find stops at 10,000 hits`.
+- [x] **Step 3:** Commit `transcript: bounded parse, probe and directory caches; find stops at 10,000 hits`.
 
 _Requirements: TRANSCRIPT-16.4_
 
