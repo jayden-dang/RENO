@@ -560,7 +560,7 @@ _Requirements: RENOHARNESS-2.7, RENOHARNESS-6.6, RENOHARNESS-7.2, RENOHARNESS-10
 
 **Depends-on:** Task 5
 
-- [ ] Write table-driven tests, at `full_access` and at `supervised`:
+- [x] Write table-driven tests, at `full_access` and at `supervised`:
   - A policy deny, a standing deny and a repeat denial refuse.
   - A policy allow and a standing allow allow.
   - `mcp__reno__report` is allowed and recorded in the approval history with no journal pair.
@@ -574,9 +574,9 @@ _Requirements: RENOHARNESS-2.7, RENOHARNESS-6.6, RENOHARNESS-7.2, RENOHARNESS-10
   - A bot's `max_wall_time` still stops a run.
   - A bot that lists `reno` and a secret that is not set is refused at start, naming the secret
     (`dispatcher.rs:444-492`).
-- [ ] Run `cargo test -p reno-kernel approvals && cargo test -p reno-kernel protect && cargo test -p reno-kernel secrets`,
+- [x] Run `cargo test -p reno-kernel approvals && cargo test -p reno-kernel protect && cargo test -p reno-kernel secrets`,
   and expect a pass (these are guards). Record any failure as a design finding.
-- [ ] `git commit -m "test(kernel): pin how the ladder and the built-in protection answer Reno-harness calls"`
+- [x] `git commit -m "test(kernel): pin how the ladder and the built-in protection answer Reno-harness calls"`
 
 _Requirements: RENOHARNESS-2.5, RENOHARNESS-3.6, RENOHARNESS-3.7, RENOHARNESS-4.2, RENOHARNESS-4.3, RENOHARNESS-6.3, RENOHARNESS-7.1, RENOHARNESS-7.4, RENOHARNESS-8.3, RENOHARNESS-10.3_
 
