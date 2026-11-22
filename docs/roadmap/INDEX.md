@@ -215,7 +215,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Members:**
 - ~~**ROAD-61**~~ reno-harness-spike — delivered 2026-11-22: ADR-0002 picks Pi — Notes: [ROAD-61](roads/ROAD-61.notes.md)
 - **ROAD-62** reno-harness-driver-and-gate — After: none — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/bot.rs`, `README.md`
-- **ROAD-63** per-bot-tool-and-domain-policy — After: ROAD-62 — Surfaces: `crates/reno-proto/src/defs/`, `crates/reno-kernel/`
+- **ROAD-63** per-bot-tool-and-domain-policy — After: ROAD-62 — Surfaces: `crates/reno-proto/src/defs/`, `crates/reno-kernel/` — Card: [ROAD-63](roads/ROAD-63.md) — Notes: [ROAD-63](roads/ROAD-63.notes.md)
 - **ROAD-64** runs-uncapped-by-default — After: none — Surfaces: `crates/reno-proto/src/defs/bot.rs`, `crates/reno-kernel/src/budget.rs`, `docs/ROADMAP.md`
 **Depends-on:** MILE-10
 **Commitment:** Planned
