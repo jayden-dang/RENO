@@ -131,6 +131,9 @@ pub(crate) fn line_calls(calls: &[ToolEntry]) -> Vec<std::ops::Range<usize>> {
     out
 }
 
+/// Matches in a text: byte ranges and whether each is the current one.
+pub(crate) type Matches = Vec<(std::ops::Range<usize>, bool)>;
+
 /// A run of edits says only "Edited 3 files", which hides where a find match is. When the match
 /// is in the path of some of the run's edits, the line names those files instead: the text to
 /// show and the matches in it. `hits_in(n)` are the matches (bytes of the call's label, with
@@ -139,8 +142,8 @@ pub(crate) fn edit_line_with_hits(
     calls: &[ToolEntry],
     run: std::ops::Range<usize>,
     verb: &str,
-    hits_in: &dyn Fn(usize) -> Vec<(std::ops::Range<usize>, bool)>,
-) -> Option<(String, Vec<(std::ops::Range<usize>, bool)>)> {
+    hits_in: &dyn Fn(usize) -> Matches,
+) -> Option<(String, Matches)> {
     let mut text = verb.to_owned();
     let mut shown = Vec::new();
     let mut any = false;
