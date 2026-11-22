@@ -94,6 +94,14 @@ Every task follows these sources, by reference:
 | `apps/renod/README.md` | Modify | The executor list (line 119) names `reno` |
 | `README.md` | Modify | Rewrites line 58 |
 | `docs/KEEPING-UP.md` | Modify | The Pi bump checklist: re-run the gate matrix, the reload-path check and the ambient-credential check |
+| `CONTEXT.md` | Modify | Terms the spec settled: Reno harness, Gate, Arming (added while specifying; recorded here after the build) |
+| `docs/adr/0003-the-reno-harness-is-its-own-executor.md` | Create | The decision record the spec cites (accepted with the spec; recorded here after the build) |
+| `docs/architecture/runtime.md` | Modify | Says Pi is the chosen harness and the gate is built (build-found: the section still called the choice pending) |
+| `crates/reno-harness/src/proc/scratch.rs` | Modify | `ScratchDir::new_in` and `ScratchDir::at`, needed for the short-path socket directory and the 90-byte `TMPDIR` test (build-found, Task 3) |
+| `crates/reno-harness/src/conformance/mod.rs` | Modify | `Profile::refuses_inherited_config`: an executor that refuses `inherit_user_config` cannot supply the suite's inherit leg (build-found, Task 12) |
+| `crates/reno-harness/src/conformance/cases.rs` | Modify | The user-config case skips only when the target refuses inherited config and supplies no plan (build-found, Task 12) |
+| `crates/reno-harness/tests/conformance/broken.rs` | Modify | Pins both directions of that profile flag (build-found, Task 12) |
+| `crates/reno-proto/tests/snapshots/schema__protocol_schema.snap` | Modify | One doc-only line: the `inherit_user_config` description embeds the doc comment Task 13 rewrote (build-found; no type or wire change) |
 
 ---
 
