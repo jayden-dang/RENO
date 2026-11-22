@@ -158,7 +158,7 @@ Lock tests (each seen red, then green):
   - `match_ticks_show_on_the_rail_while_find_holds_a_query`;
   - `the_cards_own_order_with_every_fold_open`;
   - `find_goes_to_hits_opens_what_hides_them_and_closes_only_that` ("1 of 7").
-- `vm/find.rs`: `the_count_reads_one_of_n_…`.
+- `vm/find.rs`: `the_count_reads_one_of_n_and_says_when_nothing_matches`.
 - The list test `the_flat_list_keeps_the_anchor_and_follows_the_tail` (jump to latest; the fold head is the single line
   "Worked for <duration>").
 - `ui/markdown_view/chrome.rs`: `the_controls_are_hidden_at_rest_on_a_code_block_and_a_diagram`.
