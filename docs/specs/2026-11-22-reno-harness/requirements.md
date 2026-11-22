@@ -1,7 +1,7 @@
 # Requirements: Bots run on Reno's own harness, with every tool call seen by Reno
 
 Feature code: RENOHARNESS
-Status: In-progress
+Status: Implemented
 Approval: Approved by the operator (Jayden Đặng), 2026-11-22, after reading the spec sheet at 02afd14: "approve"
 Date: 2026-11-22
 Roadmap item: ROAD-62 (claim: `.scratch/reno-harness/issues/01-reno-harness.md`)

@@ -12,6 +12,7 @@ Status: Approved
 Approval: Approved by the operator (Jayden Đặng), 2026-11-22, after reading the spec sheet at 02afd14: "approve"
 Date: 2026-11-22
 Execution-mode: continuous
+Delivered-by: PR #2
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
