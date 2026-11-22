@@ -276,8 +276,10 @@ follow a live run without it jumping.
 - **TRANSCRIPT-13.5** WHEN a tool call edits one file THE SYSTEM SHALL show the file's badge with "Go to file", and its
   diff inline when expanded; WHEN a call applies a patch to several files THE SYSTEM SHALL show one hunk block per file.
   (Weigh: reference #40, #41)
-- **TRANSCRIPT-13.6** WHEN a tool call shows a command THE SYSTEM SHALL show the command with its own Copy, its elapsed time
-  and its exit status. (Weigh)
+- **TRANSCRIPT-13.6** WHEN a tool call shows a command THE SYSTEM SHALL show the command with its own Copy, its exit status
+  (succeeded or failed, with the daemon's summary), and its elapsed time for a call the app watched run. A call restored
+  from history shows no time, because the wire carries no per-event time (crates/reno-proto/src/exec.rs:438-457). (Weigh;
+  elapsed time for watched calls only: agent-decided, fork-order step 4)
 - **TRANSCRIPT-13.7** WHEN a file-read call's output has line numbers THE SYSTEM SHALL show it as a numbered code block with
   Copy, and WHEN the owner opens "Raw input" on a call THE SYSTEM SHALL show the call's input. (Weigh)
 - **TRANSCRIPT-13.8** WHEN a turn ends in an error THE SYSTEM SHALL show the error in a callout with "Copy error". (Weigh)

@@ -138,7 +138,9 @@ Surface:
   they scroll and open over items; the hooks named in 1.11 keep their names.
 Interface: `Projection { items, … }` with `item_of(Key)`, `item_of_top(row)`, `top_of(item)`, `reproject(rows, from,
 is_open)`, `diff(old, new, at) -> Plan { splice, remeasure }`; `RunScreen` keeps `rows()`; a `TurnBuilder` exposes
-`push(event)` and `finish() -> Option<FoldedTurn>`.
+`push(seq, event) -> Change { Grew(Key) | Added(Key) | Folded { turn, fold } }`, `rows()`, and a call index
+`call(id) -> Option<CallInfo { input: &ToolCall, result_seq: Option<Seq> }>` over the run's events, which the store
+already holds.
 Depth: if `vm/items.rs` vanished, callers would still need to know only that a list item maps to (row, inner index) and
 back by `Key`; the folding rules stay in `transcript.rs`.
 Locality: extend `run.rs` (refresh path) and `transcript.rs` (an incremental builder beside `build_rows`, sharing its row
@@ -175,7 +177,8 @@ The strip's toggles (case, whole word, regex) feed one `Query`. A regex that doe
 strip shows its error state with no count (3.10). The recount is a 150 ms throttle, armed by a store change or an
 open/close; changes inside the window ride the armed deadline (3.11).
 
-**Scan cost.** A recount rescans only the latest run. Hits in older runs are kept per segment, keyed by the same
+**Scan cost.** A recount rescans only the latest run. Hits in older runs are kept in a bounded `Lru` of 64 entries
+(agent-decided), keyed by (segment index, `Segment.signature` at `screens/run.rs:82`, `Query`). That is the same
 signature that already caches their rows (1.10, `older_builds`). Each recount is therefore bounded by one run's text, not
 the thread's. Plan task 1's bench adds a check that streams with a query held in the strip. Reopen trigger: if that check
 misses 16.7 ms p95, the recount moves to an owned background task (ARCH-11).
@@ -249,7 +252,7 @@ the first layout; with none, the view opens at the tail and follows it (4.5).
 ### Navigation and jump to latest
 
 Satisfies: TRANSCRIPT-5.1, TRANSCRIPT-5.2, TRANSCRIPT-5.3, TRANSCRIPT-5.4, TRANSCRIPT-5.5, TRANSCRIPT-6.1, TRANSCRIPT-6.2
-Reuse: rung 2 — the `Transcript` key context and focus node (`run/select.rs:27`), the tick rail (`run.rs` `tick_rail`,
+Reuse: rung 2 — the `Transcript` key context and focus node (`run/select.rs:33`), the tick rail (`run.rs` `tick_rail`,
 `convo::tick_marks`/`row_starts`), `kit::icon_button`, the kept `jump_control`; rung 4 — GPUI list `scroll_by`/`scroll_to`
 and its scrollbar hooks (`set_offset_from_scrollbar`, `max_offset_for_scrollbar`, `scrollbar_drag_started`); new (rung 7) —
 `ui/scrollbar.rs`, a scrollbar element over those hooks, because neither GPUI's `list()` nor the app has one.
@@ -377,6 +380,18 @@ Interface: `StreamReveal { shown: usize }` (named apart from `vm::find::Reveal`)
 a delta; `ThinkingMode`; `Prefs::{thinking,
 expand_new_edits, expand_new_commands}`.
 Depth: n/a — extends the existing row views and prefs.
+
+Where each tool card's data comes from. The wire is `ExecEvent::Tool { id, call: ToolCall { name, input, class } }` and
+`ToolResult { id, ok, summary, output }` (`crates/reno-proto/src/exec.rs:269-281`, `:438-457`), with no per-event time:
+- An edit's badge, inline diff and per-file hunks come from `call.input`: the edit's path and old/new text, or the patch
+  text, read per `ActionClass`. An input shape the app does not know shows the raw input instead.
+- A command, its Copy and the raw input come from `call.input`.
+- The exit status is `ok`, with `summary`.
+- Elapsed time: the app records when it saw the `Tool` and the `ToolResult` arrive, on GPUI's executor clock (the test
+  clock in tests), for calls it watched live. Calls restored from history show none (TRANSCRIPT-13.6 as corrected).
+- A call canceled before output is a `Tool` with no `ToolResult` when its turn's `Done` or the run's end arrives.
+- A resource link is a worktree path in the result's output text, resolved like file links (`run/links.rs`).
+- The `TurnBuilder` call index (Row projection) gives each card its `ToolCall`. `ToolEntry` and `Row` stay unchanged.
 Locality: extend `run/transcript.rs`:
 - reasoning open while streaming in Auto, capped at 16 lines in Preview;
 - empty replies and tool calls canceled before any output are hidden.
