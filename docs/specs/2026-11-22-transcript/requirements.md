@@ -121,9 +121,10 @@ that I paste exactly that text in order.
 **Story:** As the owner, I want to leave a thread and come back to it in the same session and find the view where I left
 it, so that I keep my place in a long conversation.
 
-- **TRANSCRIPT-4.1** WHEN the owner leaves a thread's run screen THE SYSTEM SHALL save, for that thread, the entry at the
-  top of the view and the offset into it, in the app's own state under the data dir, as an additive key that a file
-  without it reads as "no saved place". (frame default, operator-confirmed 2026-11-22)
+- **TRANSCRIPT-4.1** WHEN the owner leaves a thread's run screen, or quits the app, THE SYSTEM SHALL save, for that
+  thread, the entry at the top of the view and the offset into it, with that thread's panel state under the data dir, as
+  an additive key that a file without it reads as "no saved place", so that the saved places share the panel state's
+  bound of 100 threads and its carry-over from a run's key to its thread's key (4.4). (frame default, operator-confirmed 2026-11-22)
 - **TRANSCRIPT-4.2** WHEN the owner returns to that thread, in the same session or after the app restarts, THE SYSTEM SHALL
   show the saved entry at the saved offset (Weigh: W3; across a restart: frame default, operator-confirmed 2026-11-22).
 - **TRANSCRIPT-4.3** IF the remembered entry is gone, or now sits inside a closed fold, THEN THE SYSTEM SHALL restore to
@@ -198,9 +199,11 @@ formulas as formulas.
 - **TRANSCRIPT-9.4** THE SYSTEM SHALL size math to the surrounding text by default and colour it from the theme
   (agent-decided).
 - **TRANSCRIPT-9.5** WHERE the owner turns "Typeset math" off in Settings › Appearance THE SYSTEM SHALL show math as its TeX
-  source in code style; it is on by default, and the setting is an additive app-local key (frame default, operator-confirmed 2026-11-22).
+  source in code style; it is on by default, and the setting is an additive app-local key (frame default,
+  operator-confirmed 2026-11-22; the name "Typeset math": agent-decided).
 - **TRANSCRIPT-9.6** WHEN the owner sets the math size in Settings › Appearance (90 % to 150 % of the text size, in 10 %
-  steps, default 100 %) THE SYSTEM SHALL draw math at that size; the setting is an additive app-local key (frame default, operator-confirmed 2026-11-22).
+  steps, default 100 %) THE SYSTEM SHALL draw math at that size; the setting is an additive app-local key (frame default, operator-confirmed 2026-11-22; the
+  90–150 % range and its steps: agent-decided).
 
 ## 10. See diagrams
 
@@ -265,10 +268,11 @@ follow a live run without it jumping.
   (Weigh: reference #39; inside a group: agent-decided)
 - **TRANSCRIPT-13.17** WHERE the owner sets "Thinking" in Settings › General to Auto (the default), Preview (open while
   streaming at most 16 lines high), Always open or Always closed THE SYSTEM SHALL show reasoning blocks that way; the
-  setting is an additive app-local key (Weigh: reference #38; frame default, operator-confirmed 2026-11-22).
+  setting is an additive app-local key (Weigh: reference #38, built under the conductor's clarification of 2026-11-22;
+  the 16-line Preview height: agent-decided).
 - **TRANSCRIPT-13.18** WHERE the owner turns off "Expand new edits" or "Expand new commands" in Settings › General (both
   on by default) THE SYSTEM SHALL show that kind of new call collapsed; each is an additive app-local key (Weigh:
-  reference #38; frame default, operator-confirmed 2026-11-22).
+  reference #38, built under the conductor's clarification of 2026-11-22).
 - **TRANSCRIPT-13.5** WHEN a tool call edits one file THE SYSTEM SHALL show the file's badge with "Go to file", and its
   diff inline when expanded; WHEN a call applies a patch to several files THE SYSTEM SHALL show one hunk block per file.
   (Weigh: reference #40, #41)
