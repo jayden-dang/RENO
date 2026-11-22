@@ -44,12 +44,13 @@ ARCH-18.
    added.
 3. Arming happens inside the driver's start-up, before the first prompt. Pi must list the gate's command, and the
    socket's one connection must say hello with the attempt's nonce. A failure is the attempt's own
-   `Done{stop: Error}`, which the dispatcher never falls back from (`dispatcher.rs:487-502` today's path) [Weigh S1].
+   `Done{stop: Error}` (today's launch-failure path, `drivers/pi/mod.rs:517-529`), which the dispatcher never falls
+   back from [Weigh S1].
 4. Run-owned files live under a `.reno` path component, so the existing built-in protection
    (`crates/reno-proto/src/defs/protect.rs:52,131-146`) denies edits and recognised writes to them before any allow,
    in every mode. No proto change is needed [Weigh S3].
 5. Pi's session lives in `<data_dir>/harness/.reno/pi-sessions/<run_id>/` (0700), passed with `--session-dir`. It
-   is removed when the run is `done` or `cancelled`, and swept at start [Weigh W6-W8].
+   is removed when the run is `succeeded` or `cancelled`, and swept at start [Weigh W6-W8].
 6. Two default-no-op methods on the `Executor` trait let the kernel tell an executor that a run is closed, and at
    start which runs to keep. Only `reno` overrides them, so the kernel stays free of I/O (ARCH-7).
 7. `inherit_user_config = true` excludes `reno` at routing with the existing `RejectReason::Excluded { why }`. A
@@ -86,7 +87,12 @@ Respects: ARCH-15
 Surface:
 - `PiExecutor::new()` and its callers in `executors.rs`, tests and conformance: **replace**. It keeps returning the
   `Owner` flavor, so callers need no edit.
-- `discover(hold_mock, stream_mock, harnesses)` and its callers in `apps/renod/src/daemon.rs` and its tests:
+- The persisted `runs.executor` value and the routing JSON: **frozen**. The design builds around them: `reno` is a
+  new value in a string column that already holds any executor id, and old readers show the id as written.
+- Bot definitions that list `reno`: **frozen**. They are read only by a daemon that has `reno` in
+  `BUILTIN_EXECUTORS`. An older daemon reports an unknown executor, as it does today for any id it lacks.
+- `discover(hold_mock, stream_mock, harnesses)` and its callers in `apps/renod/src/daemon.rs` (the call site changes)
+  and its tests:
   **replace**. It gains `data_dir: &Path`; every call site in the repo is updated in this change.
 - `BUILTIN_EXECUTORS` readers (`ValidationContext::with_builtin`/`offline`, `defs/mod.rs:338-353`): **replace**.
   The list gains one id, and the readers are unchanged.
@@ -118,8 +124,9 @@ Reuse: rung 2, in three places:
 - `ExecError::InvalidSpec`, which maps to `StartRefusal::Invalid` with no fallback (`dispatcher.rs:639`), gives 1.6.
 Respects: ARCH-15, ARCH-13
 Surface:
-- `RouteRequest` (`router.rs:59-76`) and its builders, `plan_route` (`kernel.rs:1586-1597`) and the router tests
-  (`router.rs:345`): **replace**. It gains `unfit_config: Vec<(ExecutorId, String)>`, and every builder sets it.
+- `RouteRequest` (`router.rs:59-76`) and all ten of its construction sites (`plan_route` at `kernel.rs:1586-1597`,
+  and the router and kernel tests, `router.rs:345` and others; the list is a `rg 'RouteRequest \{'` at build time):
+  **replace**. It gains `unfit_config: Vec<(ExecutorId, String)>`, and every site sets it.
 - The excluded-only failure text (`dispatcher.rs:828-845`): **replace**. For a run with a bot, it reads
   `no executor this bot lists can take the task (<explain_verbose>)`. The "name an executor or use a bot" advice
   stays only for a run with no bot.
@@ -129,7 +136,8 @@ Surface:
 Interface:
 ```
 // plan_route: if def.inherit_user_config { unfit_config.push((reno, "bot <name> sets inherit_user_config = true, which the Reno harness never loads")) }
-// router: unfit_config hit -> RejectReason::Excluded { why }
+// router: unfit_config hit -> RejectReason::Excluded { why }, for a listed executor and for an explicit `--executor reno`
+//         alike; the failure text then names the setting
 // PiExecutor{Reno}.start: no RENO_BOT in spec.env -> ExecError::InvalidSpec("the Reno harness runs bots only: name a bot")
 //                         spec.inherit_user_config -> ExecError::InvalidSpec(...)   // for resumed runs, which skip routing
 ```
@@ -153,6 +161,8 @@ Reuse: rung 2, in four places:
   (`wire/pi/launch.rs:35-58`).
 Respects: ARCH-6, ARCH-15
 Surface:
+- `Launch` construction sites, `launch_pi` and the `Owner` probe (`drivers/pi/mod.rs:285`): **replace**, with the
+  new fields left at their defaults.
 - `Launch` and `args` (`wire/pi/launch.rs`) and the pinned flag test (`tests/pi.rs`
   `the_command_line_isolates_the_owners_tools_and_trusts_nothing`): **replace**. `Launch` gains
   `session_dir: Option<&Path>`, `builtins: bool` and `gate: Option<&Path>`. With `Owner` they are `None`/`false`,
@@ -166,6 +176,9 @@ Interface:
 //               --session-dir <sessions_root>/<run_id> [--session-id <id>] [--append-system-prompt <file>]
 //               -e builtin:mcp -e builtin:codemode [--extension <bridge>] --extension <gate>      (gate last)
 // env (Reno):   restrict(RENO)  — BASE only: no PI_* and no provider variable from the daemon
+//               then the ambient-credential blanks: GOOGLE_APPLICATION_CREDENTIALS, AWS_SHARED_CREDENTIALS_FILE and
+//               AWS_CONFIG_FILE, each pointed at a missing file in <scratch>/.reno/agent/ (a bot secret of the
+//               same name, set next, wins)
 //               then apply_run_env(spec.env)  — the bot's secrets, RENO_RUN_ID, RENO_BOT
 //               then PI_CODING_AGENT_DIR=<scratch>/.reno/agent, RENO_GATE_SOCKET, RENO_GATE_NONCE (set last, so a
 //               secret cannot override them)
@@ -179,7 +192,9 @@ Details:
   agent dir, socket and nonce (a uuid v4). The 5.5 re-arm comes for free.
 - **Session dir (8.4).** It is created by the launch if absent, with mode 0700. The run id is the same across
   attempts (`dispatcher.rs:393`), so a resume's `--session-id` finds the session.
-- **Project trust.** `--no-approve` makes Pi ignore the working folder's `.pi/` resources (Pi `cli/args.js:232,335`;
+- **Project trust.** Even without the flag, Pi treats a project as untrusted in RPC mode, and built-in MCP reads
+  config only at `session_start` (Pi `extensions/mcp/index.js:971`). `--no-approve` makes Pi ignore the working
+  folder's `.pi/` resources (Pi `cli/args.js:232,335`;
   `docs/security.md:37-42`). The explicit `--session-dir` outranks a project `sessionDir` setting, which Pi reads before
   trust (`docs/security.md:31`). `AGENTS.md` context files still load (`launch.rs:20-22`), as they do for `pi`.
 - **Built-in MCP.** `--no-mcp` is not passed on `Reno`. With an agent dir that holds no `mcp.json`, Pi's built-in
@@ -189,8 +204,22 @@ Details:
 - **Removal (11.3).** `ScratchDir`'s drop removes the per-attempt files at the attempt's end, however it ends,
   including when Pi is killed. A daemon crash leaves them for the OS temp cleaner, and they hold no secret: the key
   is only in Pi's environment.
-- **Socket path.** It is about 82 bytes on this machine (design-scan §5). The launch fails the attempt when the
-  path is 104 bytes or more (the macOS `sun_path` limit), and never truncates it.
+- **Socket path.** It is about 82 bytes on this machine (design-scan §5), against the macOS `sun_path` limit of
+  104. When `<scratch>/.reno/gate.sock` would be 104 bytes or more (a long `TMPDIR`), the socket goes to a short
+  owner-only directory, `/tmp/reno-gate-<uuid>/.reno/gate.sock` (0700, removed with the attempt). If even that is
+  too long, the attempt fails. The path is never truncated.
+- **Ambient cloud credentials (2.1).** `BASE` keeps `HOME`, and Pi's providers find file-based credentials under it:
+  Vertex through `GOOGLE_APPLICATION_CREDENTIALS`, else `~/.config/gcloud/application_default_credentials.json`
+  (pi-ai `env-api-keys.js:56-67`), and Bedrock through the AWS shared files under `~/.aws`. The blanks above point
+  each at a missing file, so Pi finds none, and a bot that wants one lists it as a secret. A model-run `aws` or
+  `gcloud` command sees the same blanks. Other ambient paths in a future Pi are re-checked when `cli_verified`
+  moves.
+- **Extension order (5.4).** Pi loads `builtin:` extensions first, whatever their place on the command line
+  (Pi `core/package-manager.js:776-780`), and then each `--extension` in argument order. So the gate, the last
+  `--extension`, is the last loaded. The live test asserts the order.
+- **`rg` and `fd`.** Pi's `grep` and `find` use the system `rg` and `fd` when they are on `PATH` (Pi
+  `utils/tools-manager.js:63-79`), and `PATH` passes through `BASE`. Only when they are missing does Pi download them
+  into the attempt's fresh agent dir, once per attempt.
 
 ### The gate extension
 
@@ -241,8 +270,8 @@ Reuse: rung 2 and rung 5:
 Respects: ARCH-6, ARCH-9, ARCH-10, ARCH-11, ARCH-18
 Surface:
 - `rpc::Client::send` (`drivers/pi/rpc.rs:41`) and the `no_run_ever_sends_a_command_that_writes_pis_settings` test:
-  **replace**. The client gains a per-run `refuse_host_bash` flag, set only for `Reno` (7.2). `Owner` runs send
-  exactly what they send today.
+  **replace**. The client gains a per-run `refuse_host_bash` flag, set only for `Reno` (7.2). The settings deny-list
+  itself is unchanged (10.2), and `Owner` runs send exactly what they send today.
 - `wire/pi/frames.rs`: **replace**. It gains a `get_commands()` builder and a reply parser. No existing builder
   changes.
 
@@ -256,7 +285,8 @@ GateHost::next(&mut self) -> Option<GateCall>       // None = connection gone
 GateHost::decide(&mut self, id, Decision, Option<String>)
 ```
 Depth: deletion test. If the gate host vanished, the driver would still need only "bind, arm, next call, decide".
-The host hides the socket, the uid check, the nonce, the bound and the line framing.
+The host hides the socket, the uid check, the nonce, the listener's one-time accept, the open-call bound and the line
+framing.
 Locality: new module `crates/reno-harness/src/drivers/pi/gate.rs`, owned by `Run` (`mod.rs:721`). The extensions
 to `Run::start_up` and `Player::play` are listed below.
 
@@ -267,7 +297,10 @@ Flow:
     awaited as events, never polled (ARCH-10), within `ARMING_BUDGET` (30 s, inside `STARTUP_BUDGET` of 120 s).
   - A failure is `Startup::Failed("Reno's gate did not arm: <check>")`, which becomes `Done{stop: Error}` (5.2). The
     dispatcher sees a stream, not an `ExecError`, so it never falls back (5.3).
-  - The wrong-nonce and second-connection cases close the offending stream (11.1).
+  - The gate says hello once, at `session_start` with reason `startup`. The listener accepts until the first
+    connection with a valid hello. Then it is dropped and the socket file unlinked, before the first prompt, so no
+    later connection exists to accept. A connection before that with a wrong or missing nonce is closed, and arming
+    fails (11.1).
 - **Calls, in `Player::play`.**
   - A new select arm reads `GateHost::next()`. Each call becomes `subject()` (next section), then
     `OpenRequests::open_approval`, then `emit(NeedsApproval{request_id: "gate-<id>", subject})` (3.1).
@@ -282,8 +315,10 @@ Flow:
   with `Done{stop: Error, diagnostic: "a credential file appeared in the run's Pi agent directory (auth.json)"}`. The
   check is in the driver rather than in `gate.mjs`, because the driver is out of the run's reach. This keeps the
   semantics of the interpret pick (Weigh) and moves only where it runs.
-- **Bound (11.2).** More than `MAX_OPEN_GATE_CALLS` (16) open requests means a broken gate. The excess call is
-  denied with a reason, and the connection is closed, which is 6.6.
+- **Bound (11.2).** `GateHost` counts open calls. More than `MAX_OPEN_GATE_CALLS` (16) means a broken gate:
+  `next()` returns the excess call already denied, and the host closes the connection, which is 6.6. `decide` never
+  blocks (a bounded per-connection writer task), and `next()` is cancel-safe, because it sits in `Player::play`'s
+  `select!`.
 - **Lost connection (6.6).** `GateHost::next() == None` while the run goes on ends it as
   `Done{stop: Error, diagnostic: "Reno lost its watch over the run: the gate's connection closed"}`. A person may
   resume it, and resume re-arms.
@@ -356,11 +391,24 @@ Interface: none new.
 Depth: n/a. This reuses the shipped ladder.
 Locality: leave. No edit lands in these files. `supervisor/protect.rs` gets a doc change only (9.2).
 
+Notes:
+- **Reno's own MCP tools.** Step 6 records them in the approval history, not as a journal pair (`approval.rs:418-426`),
+  which is RENOHARNESS-4.3's exception to 4.1.
+- **Inherited behavior.** When the journal write after a decision fails, the run is cancelled, but an allow already
+  committed to the approval history may reach the gate (`approval.rs:526-535`). The decision is on record in the
+  store; this road does not change it.
+- **Event order.** Pi emits `tool_execution_start` before its hook runs (Pi `agent-loop.js:385-426`), so a call's
+  `Tool` event is journaled just before its `NeedsApproval`. A blocked call then gets an error `ToolResult` with the
+  gate's reason. The call still has its decision on record before it runs (4.1).
+
 ### Session directories
 
 Satisfies: RENOHARNESS-8.5, RENOHARNESS-11.4, RENOHARNESS-11.5, RENOHARNESS-11.6
-Reuse: rung 2. It follows the kernel's run-end hook (`workspaces::run_ended` in `conclude`, `dispatcher.rs:1036-1060`)
-and recovery's per-run file clearing through a port (`recovery.rs:16-17`, `RunLink`).
+Reuse: rung 2. It hooks the kernel's one run-end seam, `workspaces::run_ended` (`crates/reno-kernel/src/workspaces.rs:179`),
+which every end path calls: a supervised run's finish (`supervisor.rs:1006`), a cancel of a queued or interrupted run
+(`kernel.rs:641`), and a run that never got a supervisor (`dispatcher.rs:1059`). Its sibling `close_if_unattended`
+already reads whether the run ended for good. The sweep follows recovery's per-run file clearing through a port
+(`recovery.rs:16-17`, `RunLink`).
 Respects: ARCH-7, ARCH-8
 Surface:
 - `Executor` trait (`crates/reno-harness/src/exec/mod.rs:96-190`) and every implementation (`claude`, `codex`, `pi`,
@@ -371,23 +419,28 @@ Surface:
 Interface:
 ```
 trait Executor {
-  async fn run_closed(&self, run: &RunId) {}                 // the kernel calls it when the run is done or cancelled
-  async fn retain_runs(&self, keep: &HashSet<RunId>) {}       // the kernel calls it once at start, after recovery
+  async fn run_closed(&self, run: &RunId) {}                 // the kernel calls it when the run is succeeded or cancelled
+  async fn retain_runs(&self, keep: &HashSet<RunId>) {}       // the kernel awaits it once in recovery, before any claim
 }
-// PiExecutor{Reno}: run_closed removes <sessions_root>/<run>;
+// PiExecutor{Reno}: run_closed first awaits the end of that run's attempt task (its teardown, so Pi is gone and the
+//                   ScratchDir is dropped), then removes <sessions_root>/<run>;
 //                   retain_runs removes every <sessions_root>/<dir> whose name is not in keep
-// kernel: conclude() -> if final status ∈ {Done, Cancelled} { executor.run_closed(run) };
-//         recovery    -> keep = runs with status ∈ {Failed, Interrupted, queued with a session}
-//                        -> each executor.retain_runs(&keep)
+// kernel: workspaces::run_ended() -> if status ∈ {Succeeded, Cancelled} { executor_of(run).run_closed(run) } (own task)
+//         recovery (after step 2, before step 5's re-queue and before the dispatcher claims)
+//                  -> keep = runs with status ∈ {Failed, Interrupted} ∪ {Queued with a session_ref}
+//                  -> each executor.retain_runs(&keep).await
 ```
 Depth: deletion test. If this vanished, the kernel would still need only "tell the executor when a run is closed,
 and at start which runs to keep". Where the directories live and how they are removed stay inside the driver.
-Locality: extend `exec/mod.rs` (two defaults), `dispatcher.rs` (`conclude`), `recovery.rs` (one step) and
-`drivers/pi/mod.rs`. Other drivers: leave.
+Locality: extend `exec/mod.rs` (two defaults), `workspaces.rs` (`run_ended`), `recovery.rs` (one awaited step) and
+`drivers/pi/mod.rs` (a per-run handle on the attempt task). Other drivers: leave.
 
 Keep set:
-- It holds every run that can still be resumed: `failed`, `interrupted`, and `queued` runs with a session (a
-  resumed run waiting for its claim). Everything else is removed, including a directory whose run is unknown.
+- It holds every run that can still be resumed: `failed` and `interrupted` (a person may resume either,
+  `resume.rs:163`), and `queued` runs with a session (one recovery re-queued for auto-resume). Everything else is
+  removed, including a directory whose run is unknown.
+- Ordering. Recovery awaits `retain_runs` before it re-queues and before the dispatcher claims anything
+  (`recovery.rs:1-2`). So no run created after the sweep can lose its directory to it.
 - A person's resume of a run whose directory is gone falls back to Pi's existing "did not find session" notice
   (`drivers/pi/mod.rs:785-803`).
 
@@ -407,7 +460,7 @@ Locality: leave. Text only.
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
+| `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 7.1 (files laid out under `.reno`), 11.4 (driver-level `run_closed` removal), 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
 | `gate.mjs` under node, against a scripted socket (new, beside `pi-mcp-test.mjs`) | unit | RENOHARNESS-3.2, 3.3, 3.4, 3.5, 6.1, 6.2 |
 | Kernel with `MockExecutor` (`crates/reno-kernel/src/tests/{approvals,protect,routing,resume}.rs` and recovery) | integration | RENOHARNESS-1.4, 1.5, 1.6, 2.5, 3.6, 3.7, 4.2, 4.3, 5.3, 6.3, 6.4, 6.5, 7.1, 7.4, 8.3, 8.5, 10.3, 10.4, 10.5, 11.4, 11.6 |
 | Proto definitions (`crates/reno-proto/src/defs/tests.rs`) | unit | RENOHARNESS-1.7, 10.7, 10.8 |
@@ -423,7 +476,8 @@ an existing seam. ARCH-16 holds throughout: the socket lives in a tempdir, time 
 
 ## Coverage check
 
-Every requirement ID appears in exactly one `Satisfies:` line above. The mapping by section:
+Every requirement ID appears in exactly one `Satisfies:` line above, except the four listed as unmapped below. The
+mapping by section:
 
 | Section | IDs |
 |---|---|

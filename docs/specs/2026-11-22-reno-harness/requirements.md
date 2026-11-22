@@ -59,7 +59,7 @@ run whose executor is the Reno harness.
 
 **Story:** As the owner, I want to read in a run's journal each call its bot made, with its arguments and Reno's decision, so that I can see everything the bot did.
 
-- **RENOHARNESS-4.1** WHEN a call on `reno` is raised to the ladder THE SYSTEM SHALL journal it as `NeedsApproval` before the call runs, with a subject that keeps the gate's request verbatim: tool name, call id, parent call id and arguments, redacted of the run's secret values. [Lock L1, L19]
+- **RENOHARNESS-4.1** WHEN a call on `reno` is raised to the ladder, other than one RENOHARNESS-4.3 covers, THE SYSTEM SHALL journal it as `NeedsApproval` before the call runs, with a subject that keeps the gate's request verbatim: tool name, call id, parent call id and arguments, redacted of the run's secret values. [Lock L1, L19]
 - **RENOHARNESS-4.2** WHEN the ladder answers a call on `reno` THE SYSTEM SHALL commit the decision, what made it and its reason to the approval history before Pi is told, and then journal it as `ApprovalResolved`, as the ladder does for every executor. [Lock L19]
 - **RENOHARNESS-4.3** (guard) WHERE a call is to a tool of Reno's own MCP server THE SYSTEM SHALL CONTINUE TO record it in the approval history (its approvals row and that row's event) rather than as a journal pair.
 - **RENOHARNESS-4.4** (guard) WHILE a Pi run goes on THE SYSTEM SHALL CONTINUE TO journal Pi's tool executions, their results and its per-turn token usage, on `reno` as on `pi`.
@@ -133,7 +133,7 @@ Files the change touches, and what each guards:
 | `crates/reno-kernel/src/budget.rs` (read, not changed) | RENOHARNESS-8.3 |
 | `crates/reno-proto/src/defs/mod.rs` (`BUILTIN_EXECUTORS`) | RENOHARNESS-10.8 |
 | `crates/reno-proto/src/defs/eval.rs`, `protect.rs` (read; changed only if design puts RENOHARNESS-7.1 there) | RENOHARNESS-7.4 |
-| `apps/renod/src/daemon.rs` (read, not changed) | RENOHARNESS-10.6, RENOHARNESS-6.5 |
+| `apps/renod/src/daemon.rs` (its `discover` call site gains the data directory) | RENOHARNESS-10.6, RENOHARNESS-6.5 |
 | `crates/reno-kernel/src/dispatcher.rs` and `router.rs` | RENOHARNESS-10.5 |
 | `apps/renod/src/executors.rs` (`discover` gains the data directory) | RENOHARNESS-10.6 |
 | `crates/reno-proto/src/defs/bot.rs` (docs only) | RENOHARNESS-10.7 |
@@ -161,10 +161,10 @@ System-doc consult: `docs/product/metrics.md`, `docs/ops/reliability.md` and `do
 - **Performance:** None. There is no standing target: no metrics or reliability doc defines one, and no number for the real path (one `synchronous=FULL` commit plus a journal write per call) has been measured. The spike's figure was for a path without either. The `--ignored` live Pi test reports gated-call latency over 200 policy-allowed calls as a measurement, with no pass or fail bound. A target, if one is wanted, is set from that first measurement.
 - **Security:** **RENOHARNESS-11.1** THE SYSTEM SHALL make each run's gate socket reachable only by the owner's user, and accept on it only the one connection whose hello carries that run's nonce, closing any other with no decision given, verified by a unit test that connects a second client. [agent-decided]
 - **Reliability:** **RENOHARNESS-11.2** THE SYSTEM SHALL hold at most a bounded number of unanswered gate requests per run, and deny each request beyond the bound, verified by a test that floods the socket. [agent-decided; ARCH-11]
-- **Reliability:** **RENOHARNESS-11.3** WHEN an attempt of a run on `reno` ends, however it ends, THE SYSTEM SHALL remove that attempt's socket, gate extension and Pi agent directory, verified by a test that ends attempts as done, failed, cancelled and with Pi killed. [agent-decided]
-- **Reliability:** **RENOHARNESS-11.4** WHEN a run on `reno` reaches `done` or `cancelled` THE SYSTEM SHALL remove its session directory, verified by a test over each final state. [Weigh W7]
+- **Reliability:** **RENOHARNESS-11.3** WHEN an attempt of a run on `reno` ends, however it ends, THE SYSTEM SHALL remove that attempt's socket, gate extension and Pi agent directory, verified by a test that ends attempts as succeeded, failed, cancelled and with Pi killed. [agent-decided]
+- **Reliability:** **RENOHARNESS-11.4** WHEN a run on `reno` reaches `succeeded` or `cancelled` THE SYSTEM SHALL remove its session directory, verified by a test over each final state. [Weigh W7]
 - **Security:** **RENOHARNESS-11.5** THE SYSTEM SHALL make a run's session directory reachable only by the owner's user, verified by a test of its mode. [Weigh W8]
-- **Reliability:** **RENOHARNESS-11.6** WHEN the daemon starts THE SYSTEM SHALL remove each session directory whose run is `done`, `cancelled` or unknown, and keep those of `failed` and `interrupted` runs, verified by a test with one directory per state. [Weigh W7]
+- **Reliability:** **RENOHARNESS-11.6** WHEN the daemon starts THE SYSTEM SHALL remove each session directory whose run is `succeeded`, `cancelled` or unknown, and keep those of `failed` and `interrupted` runs and of `queued` runs that have a session, verified by a test with one directory per state. [Weigh W7]
 - **Accessibility:** None — this feature adds no screen. The app names the executor by its generic rule (`apps/reno-app/src/summary.rs:272-287`).
 
 ## Out of Scope
@@ -176,7 +176,7 @@ System-doc consult: `docs/product/metrics.md`, `docs/ops/reliability.md` and `do
 - The bot's computer, VM, egress allowlist and browser: MILE-12.
 - Runs the owner starts on other harnesses deciding their own permissions (ROAD-4), and harness questions in general (ROAD-1).
 - Argument rewrite by the gate, `auto_accept_edits` on `reno`, a new wire method, a migration or new persisted format, a new variant of a persisted or wire enum (`RejectReason`, `StartRefusal`, `ExecEvent`), and any new screen.
-- Redaction of Pi's own session files. Pi writes its session JSONL itself, and it never passes Reno's redactor, so a secret a tool printed stays in the run's session directory until the run is `done` or `cancelled`. [S10]
+- Redaction of Pi's own session files. Pi writes its session JSONL itself, and it never passes Reno's redactor, so a secret a tool printed stays in the run's session directory until the run is `succeeded` or `cancelled`. [S10]
 - A retention limit for kept sessions. The session directories of runs left `failed` or `interrupted` are kept with no bound, so that a person can still resume them, until a retention rule exists. No time-based retention is added. [S11; agent-decided]
 - Writes that the built-in protection cannot recognise. A permitted command can still write by other means, for example through an interpreter script, because the gate is not a sandbox (L15). Such a write can reach:
   - the run's own files. It reaches no later attempt (RENOHARNESS-7.5), but it can reach the session directory that a resume reads;
