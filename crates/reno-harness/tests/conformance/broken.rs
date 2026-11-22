@@ -322,6 +322,28 @@ async fn a_claimed_isolation_that_is_not_applied_fails_the_user_config_case() {
 }
 
 #[tokio::test]
+async fn an_executor_that_never_inherits_the_owners_config_skips_the_comparison_it_cannot_make() {
+    let mut descriptor = MockExecutor::default_descriptor("mock".parse().unwrap());
+    descriptor.caps.isolates_user_config = true;
+    let executor = Arc::new(ScriptedMock::with_descriptor(Some(descriptor)));
+    let mut target = crate::targets::mock_target_for(executor);
+    target.plan.user_config = None;
+    target.profile.refuses_inherited_config = true;
+    let report = run_suite(&target).await;
+    assert!(
+        matches!(status(&report, CaseId::UserConfig), Status::Skip(_)),
+        "{:?}",
+        report.labels()
+    );
+    assert!(report.is_green(), "{:?}", report.failures());
+
+    // The fact is not a way to skip the case for a claim the suite can check.
+    target.profile.refuses_inherited_config = false;
+    let report = run_suite(&target).await;
+    assert!(failed(&report, CaseId::UserConfig), "{:?}", report.labels());
+}
+
+#[tokio::test]
 async fn a_claimed_plan_mode_is_a_failure_because_nothing_can_exercise_it() {
     let mut descriptor = MockExecutor::default_descriptor("mock".parse().unwrap());
     descriptor.caps.plan_mode = true;

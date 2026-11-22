@@ -496,6 +496,10 @@ pub struct Profile {
     /// has no way to take the answer back (Cursor's SDK has no answer channel for
     /// `askQuestion`, so the tool is not offered).
     pub asks_questions: bool,
+    /// It refuses a run that asks for the owner's personal config rather than running it, so the
+    /// run that shows the config reaching the harness does not exist. The refusal is covered by
+    /// the executor's own tests; the user-config case is skipped.
+    pub refuses_inherited_config: bool,
 }
 
 impl Profile {
@@ -506,6 +510,7 @@ impl Profile {
             deny_message_on_wire: false,
             counts_unknown_frames: true,
             asks_questions: true,
+            refuses_inherited_config: false,
         }
     }
 
@@ -516,6 +521,7 @@ impl Profile {
             deny_message_on_wire: false,
             counts_unknown_frames: false,
             asks_questions: true,
+            refuses_inherited_config: false,
         }
     }
 }

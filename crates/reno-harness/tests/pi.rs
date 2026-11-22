@@ -8,7 +8,12 @@
 
 #![cfg(unix)]
 // Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.
-#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    unsafe_code
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -2298,6 +2303,319 @@ async fn a_real_pi_plays_a_run_against_its_mock_provider() {
             assert!(text(&events).contains("MOCK:hello"), "{events:?}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Live: a real Pi behind Reno's gate (the mock provider of the probe; no model, no API spend)
+// ---------------------------------------------------------------------------------------------
+
+/// The live tests below drive a real `pi` as a Reno run, in the shape of the first live test: a
+/// wrapper exports only `PI_OFFLINE` and `PI_TELEMETRY` and loads the probe with `-e` ahead of
+/// the driver's own arguments, so the gate is still the last extension loaded. The wrapper never
+/// sets `PI_CODING_AGENT_DIR`: the run's own agent directory is what is under test, so nothing
+/// under `~/.pi` is read or written. Opt in with `RENO_PI_LIVE=1` and `--ignored`; never run by
+/// default.
+fn live_reno_is_enabled() -> bool {
+    if std::env::var("RENO_PI_LIVE").as_deref() == Ok("1") {
+        return true;
+    }
+    eprintln!("RENO_PI_LIVE is not set to 1: skipped");
+    false
+}
+
+fn live_reno_executor(bench: &Bench) -> PiExecutor {
+    use std::os::unix::fs::PermissionsExt;
+    let real = reno_harness::pi::resolve_pi_executable().expect("Pi installed");
+    let wrapper = bench.dir.path().join("pi-reno-probe");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexport PI_OFFLINE=1 PI_TELEMETRY=0\nexec '{}' -e '{}' \"$@\"\n",
+            real.display(),
+            fixture_dir().join("pi-rpc-probe.ts").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    PiExecutor::reno(bench.sessions()).with_executable(wrapper)
+}
+
+/// A bot's run of the probe's `prompt`, on the mock model, in a directory with files to act on.
+fn live_reno_spec(bench: &Bench, prompt: &str) -> ExecSpec {
+    std::fs::write(bench.dir.path().join("a.txt"), "needle in a haystack\n").unwrap();
+    std::fs::write(bench.dir.path().join("edit-me.txt"), "before\n").unwrap();
+    let mut spec = bench.spec(prompt);
+    spec.env.clear();
+    spec.env.insert("RENO_BOT".to_owned(), "keeper".to_owned());
+    spec.model = Some("reno-probe/mock".into());
+    spec
+}
+
+/// How long each call took from its `NeedsApproval` to its `ToolResult`, with every call allowed
+/// the moment it is raised.
+struct Allowed {
+    events: Vec<ExecEvent>,
+    latencies: Vec<Duration>,
+}
+
+async fn drive_allowing(live: &mut Live) -> Allowed {
+    let mut events = Vec::new();
+    let mut asked = std::collections::HashMap::new();
+    let mut latencies = Vec::new();
+    let run = async {
+        while let Some(event) = live.stream.next().await {
+            match &event {
+                ExecEvent::NeedsApproval {
+                    request_id,
+                    subject,
+                } => {
+                    asked.insert(call_id(subject).to_owned(), std::time::Instant::now());
+                    live.handle
+                        .decide_with_message(request_id.clone(), Decision::Allow, None)
+                        .await
+                        .unwrap();
+                }
+                ExecEvent::ToolResult { id, .. } => {
+                    if let Some(at) = asked.remove(id) {
+                        latencies.push(at.elapsed());
+                    }
+                }
+                _ => {}
+            }
+            events.push(event);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(120), run)
+        .await
+        .expect("the run ends");
+    Allowed { events, latencies }
+}
+
+fn probe_lines(bench: &Bench, file: &str) -> Vec<Value> {
+    std::fs::read_to_string(bench.dir.path().join(file))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs a Pi >= 1.5.0 on this machine and RENO_PI_LIVE=1"]
+async fn a_real_pi_behind_the_gate_arms_and_every_kind_of_call_reaches_a_decision() {
+    if !live_reno_is_enabled() {
+        return;
+    }
+    let bench = Bench::new();
+    let exec = live_reno_executor(&bench);
+    let mut live = start(&exec, live_reno_spec(&bench, "script-tools")).await;
+    let allowed = drive_allowing(&mut live).await;
+    let events = allowed.events;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert!(text(&events).contains("SCRIPTED-DONE"), "{events:?}");
+
+    // Armed against Pi's own agent directory, holding its own `{}` auth file.
+    let agent = &probe_lines(&bench, "probe-agent.jsonl")[0];
+    let agent_dir = agent["agentDir"]
+        .as_str()
+        .expect("Pi has an agent directory");
+    let home = std::env::var("HOME").unwrap();
+    assert!(
+        !Path::new(agent_dir).starts_with(Path::new(&home).join(".pi")),
+        "the run used the owner's Pi directory: {agent_dir}"
+    );
+    let auth = agent["auth"]
+        .as_str()
+        .expect("Pi wrote no auth.json of its own before the prompt");
+    assert_eq!(serde_json::from_str::<Value>(auth).unwrap(), json!({}));
+
+    // Every scripted kind reached a decision, in the class the ladder reads it by.
+    let calls: Vec<_> = raised(&events);
+    let find = |name: &str| {
+        calls
+            .iter()
+            .find(|(_, subject)| subject.tool == name && subject.raw["parentToolCallId"].is_null())
+            .unwrap_or_else(|| panic!("no {name} call was raised: {calls:?}"))
+            .1
+    };
+    for (name, class) in [
+        ("read", ActionClass::Read),
+        ("grep", ActionClass::Read),
+        ("find", ActionClass::Read),
+        ("ls", ActionClass::Read),
+        ("edit", ActionClass::Edit),
+        ("write", ActionClass::Edit),
+        ("bash", ActionClass::Command),
+        ("mcp__probe__ping", ActionClass::McpTool),
+        ("codemode", ActionClass::Other),
+    ] {
+        assert_eq!(find(name).action, class, "{name}");
+    }
+
+    // The nested calls of the codemode script, each made by it.
+    let script = call_id(find("codemode")).to_owned();
+    let nested: Vec<&str> = calls
+        .iter()
+        .filter(|(_, subject)| subject.raw["parentToolCallId"] == script.as_str())
+        .map(|(_, subject)| subject.tool.as_str())
+        .collect();
+    assert!(nested.contains(&"read"), "{nested:?}");
+    assert!(nested.contains(&"mcp__probe__ping"), "{nested:?}");
+
+    // Each was raised after its start and before its result, and ended.
+    assert_each_call_is_raised_between_its_tool_and_its_result(&events);
+    assert_eq!(allowed.latencies.len(), calls.len());
+
+    // The gate is the last `tool_call` handler: it judged the command as the probe's handler
+    // before it left it, and that is what ran.
+    assert_eq!(
+        find("bash").command.as_deref(),
+        Some("echo MUTATED > bash-ran.txt")
+    );
+    assert_eq!(
+        std::fs::read_to_string(bench.dir.path().join("bash-ran.txt")).unwrap(),
+        "MUTATED\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bench.dir.path().join("edit-me.txt")).unwrap(),
+        "after\n"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs a Pi >= 1.5.0 on this machine and RENO_PI_LIVE=1"]
+async fn a_real_pi_behind_the_gate_ends_the_run_when_a_credential_is_planted() {
+    if !live_reno_is_enabled() {
+        return;
+    }
+    let bench = Bench::new();
+    let exec = live_reno_executor(&bench);
+    let mut live = start(&exec, live_reno_spec(&bench, "script-plant")).await;
+    let events = drive_allowing(&mut live).await.events;
+    let (stop, result, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(result.is_none());
+    assert_eq!(diagnostic.unwrap(), CREDENTIAL_ENDING);
+    let tools: Vec<&str> = raised(&events)
+        .into_iter()
+        .map(|(_, subject)| subject.tool.as_str())
+        .collect();
+    assert_eq!(
+        tools,
+        ["probe_plant_credential"],
+        "the call after the plant never reached the ladder"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs a Pi >= 1.5.0 on this machine and RENO_PI_LIVE=1"]
+async fn a_real_pi_behind_the_gate_continues_its_session_after_pi_is_killed() {
+    if !live_reno_is_enabled() {
+        return;
+    }
+    let bench = Bench::new();
+    let exec = live_reno_executor(&bench);
+    let mut live = start(&exec, live_reno_spec(&bench, "script-hold")).await;
+    let record = tokio::time::timeout(Duration::from_secs(30), live.records.recv())
+        .await
+        .expect("pi is reported")
+        .expect("a process record");
+    let pid = record.pid as i32;
+
+    // Run until the second model call is held, which is after the first call's result.
+    let held = bench.dir.path().join("probe-hold-started");
+    let mut events = Vec::new();
+    let run = async {
+        while !held.exists() {
+            tokio::select! {
+                event = live.stream.next() => {
+                    let event = event.expect("the run goes on until Pi is killed");
+                    if let ExecEvent::NeedsApproval { request_id, .. } = &event {
+                        live.handle
+                            .decide_with_message(request_id.clone(), Decision::Allow, None)
+                            .await
+                            .unwrap();
+                    }
+                    events.push(event);
+                }
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("the model call is held");
+    let session = events
+        .iter()
+        .find_map(|event| match event {
+            ExecEvent::Started { session, .. } => Some(session.clone()),
+            _ => None,
+        })
+        .expect("a started session");
+
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0, "Pi was alive");
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(30), live.stream.next())
+        .await
+        .expect("the killed run ends")
+    {
+        events.push(event);
+    }
+    assert_ne!(done(&events).0, StopReason::Completed);
+    assert!(until_gone(pid).await, "Pi was left running");
+
+    // A daemon that started again has no memory of the first attempt.
+    let exec = live_reno_executor(&bench);
+    let mut resumed = live_reno_spec(&bench, "resume-check");
+    resumed.resume = Some(session.clone());
+    let events = drive_allowing(&mut start(&exec, resumed).await)
+        .await
+        .events;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert!(text(&events).contains("MOCK:resume-check"), "{events:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ExecEvent::Started { session: again, .. } if *again == session
+        )),
+        "the same session: {events:?}"
+    );
+    let contexts = probe_lines(&bench, "probe-contexts.jsonl");
+    let model_call = contexts
+        .iter()
+        .find(|line| line["text"] == "resume-check")
+        .expect("the resumed prompt reached the model");
+    assert!(
+        model_call["messages"].as_u64().unwrap() > 1,
+        "the model saw the first attempt's history: {contexts:?}"
+    );
+}
+
+/// A measurement, not a check: it states no bound on the time a call takes to come back.
+#[tokio::test]
+#[ignore = "needs a Pi >= 1.5.0 on this machine and RENO_PI_LIVE=1"]
+async fn a_real_pi_behind_the_gate_reports_how_long_two_hundred_allowed_calls_take() {
+    if !live_reno_is_enabled() {
+        return;
+    }
+    let bench = Bench::new();
+    let exec = live_reno_executor(&bench);
+    let mut live = start(&exec, live_reno_spec(&bench, "script-200")).await;
+    let allowed = drive_allowing(&mut live).await;
+    let (stop, _, diagnostic) = done(&allowed.events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert_eq!(raised(&allowed.events).len(), 200);
+    let mut latencies = allowed.latencies;
+    assert_eq!(latencies.len(), 200, "every call ended");
+    latencies.sort();
+    let at = |per_cent: usize| latencies[(latencies.len() - 1) * per_cent / 100];
+    eprintln!(
+        "NeedsApproval to ToolResult over 200 allowed calls: min {:?}, median {:?}, p95 {:?}, max {:?}",
+        latencies[0],
+        at(50),
+        at(95),
+        latencies[latencies.len() - 1]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

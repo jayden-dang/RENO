@@ -32,6 +32,8 @@ Scenarios:
 - `gate-auth-empty`: calls made with no `auth.json`, then with Pi's own `{}` in two spellings.
 - `gate-auth-garbled`: an `auth.json` that is not JSON appears, then a call is made.
 - `gate-flood`: a broken gate that sends 17 calls without waiting.
+- `approval-subjects`: one call per class (bash, edit, mcp, read, other); the result text says how
+  each was decided (`allow`, or `deny:<reason>`), as the Claude fake's does.
 """
 import json
 import os
@@ -370,6 +372,21 @@ def gated_tool(call_id, name, args, parent=None, inside=None):
         tool_end(call_id, name, decision.get("reason") or "blocked", error=True, parent=parent)
 
 
+def decided_as(call_id, name, args):
+    """Ask the gate about one call and say how it was decided, ending the tool as Pi would."""
+    tool_start(call_id, name, args)
+    gate_send(name, args, call_id)
+    decision = gate_decision()
+    if decision is None:
+        sys.exit(3)
+    if decision["decision"] == "allow":
+        tool_end(call_id, name, "ran " + name)
+        return "allow"
+    reason = decision.get("reason") or "blocked"
+    tool_end(call_id, name, reason, error=True)
+    return "deny:" + reason
+
+
 def drain_gate():
     """Log every decision that still arrives, until the daemon closes the connection."""
     while gate_decision() is not None:
@@ -406,6 +423,13 @@ def play_gate(prompt, cmd):
 
         gated_tool("g-code", "codemode", {"code": "await ping(); await read()"}, inside=nested)
         assistant("gate-covered")
+    elif prompt == "scenario:approval-subjects":
+        bash = decided_as("s-bash", "bash", {"command": "cargo test --workspace"})
+        edit = decided_as("s-edit", "edit", {"path": "src/lib.rs", "edits": [{"oldText": "a", "newText": "b"}]})
+        mcp = decided_as("s-mcp", "mcp__x__y", {"q": "bug"})
+        read = decided_as("s-read", "read", {"path": "/etc/hosts"})
+        other = decided_as("s-other", "subagent", {"task": "look around"})
+        assistant("bash=%s edit=%s mcp=%s read=%s other=%s" % (bash, edit, mcp, read, other))
     elif prompt == "scenario:gate-200":
         for n in range(200):
             gated_tool("g200-%d" % n, "read", {"path": "f%d.txt" % n})
@@ -467,7 +491,7 @@ def play_gate(prompt, cmd):
 
 def play(cmd):
     prompt = cmd["message"]
-    if GATE_READER is not None and prompt.startswith("scenario:gate-"):
+    if GATE_READER is not None and (prompt.startswith("scenario:gate-") or prompt == "scenario:approval-subjects"):
         return play_gate(prompt, cmd)
     if prompt == "scenario:conf-happy":
         start(cmd)

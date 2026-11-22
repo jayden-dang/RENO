@@ -118,6 +118,9 @@ impl Cx<'_> {
             CaseId::UserConfig if !caps.isolates_user_config => {
                 Some("claims no isolation from the owner's personal config")
             }
+            CaseId::UserConfig if self.target.profile.refuses_inherited_config => {
+                Some("refuses a run that inherits the owner's config, so there is none to compare")
+            }
             CaseId::UnknownFrames if !self.target.profile.counts_unknown_frames => {
                 Some("does not count unrecognised frames")
             }
@@ -779,7 +782,7 @@ impl Cx<'_> {
             claims.push(("approvals (allow)".into(), CaseId::ApprovalAllow));
             claims.push(("approvals (deny)".into(), CaseId::ApprovalDeny));
         }
-        if caps.isolates_user_config {
+        if caps.isolates_user_config && !self.target.profile.refuses_inherited_config {
             claims.push(("user-config isolation".into(), CaseId::UserConfig));
         }
         if !caps.models.is_empty() {
