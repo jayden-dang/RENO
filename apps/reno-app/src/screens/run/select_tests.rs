@@ -420,3 +420,137 @@ fn a_selection_is_highlighted_over_the_words_it_covers(cx: &mut TestAppContext) 
     drag(vcx, from, to);
     assert!(highlighted(vcx), "the selected words carry a highlight");
 }
+
+/// `n` presses in a row at `at`, each a click on its own (down, then up), as the platform counts them.
+fn press(vcx: &mut VisualTestContext, at: Point<gpui::Pixels>, n: usize, modifiers: Modifiers) {
+    for count in 1..=n {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers,
+            button: MouseButton::Left,
+            click_count: count,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers,
+            button: MouseButton::Left,
+            click_count: count,
+        });
+    }
+    draw(vcx);
+}
+
+/// The place in the middle of the word `needle` starts (four characters in), as painted.
+fn on_text(
+    vcx: &VisualTestContext,
+    screen: &Entity<RunScreen>,
+    needle: &str,
+) -> Point<gpui::Pixels> {
+    screen
+        .read_with(vcx, |s, _| s.painted_point(needle, 4))
+        .unwrap_or_else(|| panic!("{needle:?} is painted"))
+}
+
+fn copy_with_the_keyboard(vcx: &mut VisualTestContext) -> String {
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()));
+    vcx.simulate_keystrokes("cmd-c");
+    clipboard(vcx).expect("a clipboard")
+}
+
+#[gpui::test]
+fn double_triple_and_quadruple_click_select_a_word_a_line_and_a_block(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let in_prompt = on_text(vcx, &screen, "transcript has");
+    let in_reply = on_text(vcx, &screen, "transcript draws");
+
+    press(vcx, in_prompt, 2, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "transcript",
+        "a word, not its neighbours"
+    );
+
+    // The prompt wraps in the test window: a line is the row the click is on, not the message.
+    press(vcx, in_prompt, 3, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "Show every kind of content the transcript has to",
+        "the row the click is on"
+    );
+    press(vcx, on_text(vcx, &screen, "draw."), 3, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "draw.",
+        "the row it wrapped onto"
+    );
+
+    press(vcx, in_prompt, 4, Modifiers::none());
+    assert_eq!(copy_with_the_keyboard(vcx), PROMPT, "the whole message");
+
+    // In a reply a block is the paragraph, not every paragraph of the reply.
+    press(vcx, in_reply, 2, Modifiers::none());
+    assert_eq!(copy_with_the_keyboard(vcx), "transcript");
+    press(vcx, in_reply, 4, Modifiers::none());
+    assert_eq!(copy_with_the_keyboard(vcx), FIRST_PARAGRAPH);
+}
+
+#[gpui::test]
+fn shift_click_extends_the_selection(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let in_prompt = on_text(vcx, &screen, "transcript has");
+    let in_reply = on_text(vcx, &screen, "transcript draws");
+
+    // With nothing selected a shift-click selects nothing.
+    press(vcx, in_reply, 1, Modifiers::shift());
+    assert!(!screen.read_with(vcx, |s, _| s.has_selection()));
+
+    press(vcx, in_prompt, 2, Modifiers::none());
+    press(vcx, in_reply, 1, Modifiers::shift());
+    let copied = copy_with_the_keyboard(vcx);
+    let (head, tail) = copied.split_once("\n\n").expect("two entries");
+    assert_eq!(head, "transcript has to draw.", "the word stays selected");
+    assert!(
+        FIRST_PARAGRAPH.starts_with(tail) && tail.len() > "Here is every kind of c".len(),
+        "up to the click: {copied:?}"
+    );
+
+    // A shift-click before the selection extends it backwards, to the click.
+    let before = on_text(vcx, &screen, "every kind");
+    press(vcx, before, 1, Modifiers::shift());
+    let copied = copy_with_the_keyboard(vcx);
+    let head = copied.split_once("\n\n").expect("two entries").0;
+    let from = PROMPT.find("every kind").unwrap() + 4;
+    assert_eq!(head, &PROMPT[from..], "{copied:?}");
+}
+
+#[gpui::test]
+fn copy_as_markdown_gives_the_source_with_its_math_delimiters(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let reply = screen.read_with(vcx, |s, _| {
+        s.rows()
+            .iter()
+            .find(|r| matches!(r, Row::Prose { .. }))
+            .map(Row::key)
+            .unwrap()
+    });
+    screen.update(vcx, |s, _| s.select_source(reply, 0..RENDER_REPLY.len()));
+    let seen = copy_with_the_keyboard(vcx);
+    assert!(
+        !seen.contains("[supervisor]("),
+        "what is seen has no link markup"
+    );
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()));
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    assert_eq!(clipboard(vcx).as_deref(), Some(RENDER_REPLY));
+    let source = clipboard(vcx).unwrap();
+    assert!(
+        source.contains("$$\\int_0^1 x^2\\,dx = \\tfrac13$$"),
+        "{source}"
+    );
+    assert!(source.contains("area under $x^2$ on"), "{source}");
+    assert!(
+        source.contains("[supervisor](src/supervisor.rs:42)"),
+        "{source}"
+    );
+}

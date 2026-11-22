@@ -15,6 +15,7 @@ use reno_markdown::{Block, BlockTree, InlineRun};
 
 use crate::links;
 use crate::ui::markdown_view::link::file_target;
+use crate::vm::selection::{self, Entry, Selection, Shown};
 
 /// What separates an atom from the one before it when both are copied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +160,19 @@ pub(crate) fn copy(atoms: &[Atom], sel: Range<usize>) -> String {
         any = true;
     }
     out
+}
+
+/// What "Copy as Markdown" puts on the clipboard: the source bytes of what `sel` covers, math
+/// delimiters and markup as the owner wrote them. A text with no source (a fold head, a step
+/// line) is given as shown.
+pub(crate) fn source_of(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>) -> String {
+    selection::joined(sel, entries, shown, |t, range| {
+        if t.sourced {
+            t.source.get(range).unwrap_or_default().to_owned()
+        } else {
+            t.copy_all()
+        }
+    })
 }
 
 /// The runs, code lines, formulas and diagrams of `tree` (parsed from `source`), in drawing
@@ -455,6 +469,8 @@ fn walk(source: &str, text: &str) -> Option<(usize, Vec<(usize, usize)>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::{Key, Row};
+    use crate::vm::selection::{self, Pos, Selection, Shown, Slot};
     use reno_markdown::parse_full;
 
     fn atoms_of(source: &str) -> Vec<Atom> {
@@ -589,5 +605,84 @@ mod tests {
             .unwrap();
         assert_eq!(m.src_at(0), m.src.start);
         assert_eq!(m.src_at(m.text.len()), m.src.end);
+    }
+
+    fn source_between(rows: &[Row], open: &[Key], from: Pos, to: Pos) -> String {
+        let is_open = |k: Key| open.contains(&k);
+        let entries = selection::reading(rows, &is_open);
+        let never = |_: &str| false;
+        let tree = |_: Key, text: &str| parse_full(text);
+        let shown = Shown {
+            open: &is_open,
+            output_open: &never,
+            output_full: &never,
+            tree: &tree,
+        };
+        let sel = Selection {
+            anchor: from,
+            head: to,
+        };
+        source_of(&sel, &entries, &shown)
+    }
+
+    fn whole(ordinal: usize, off: usize) -> Pos {
+        Pos {
+            ordinal,
+            slot: Slot::WHOLE,
+            off,
+        }
+    }
+
+    fn reply(n: u64, text: &str) -> Row {
+        Row::Prose {
+            key: Key(n),
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_source_keeps_the_markup_and_the_delimiters_the_owner_wrote() {
+        let src = "see **bold** and \\(a+b\\) and [sup](src/s.rs:4)\n\n\\[x=y\\]";
+        let rows = [reply(0, src)];
+        let got = source_between(&rows, &[], whole(0, 0), whole(0, src.len()));
+        assert_eq!(got, src);
+        assert_ne!(all(src), src, "what is seen is not the source");
+    }
+
+    #[test]
+    fn the_source_of_a_range_is_those_bytes_and_entries_are_a_blank_line_apart() {
+        let rows = [
+            Row::User {
+                key: Key(0),
+                text: "héllo **wörld**".to_owned(),
+                steer: false,
+                at_ms: None,
+            },
+            reply(2, "tail with `code` and more"),
+        ];
+        let got = source_between(&rows, &[], whole(0, "héllo ".len()), whole(1, 16));
+        assert_eq!(got, "**wörld**\n\ntail with `code`");
+    }
+
+    #[test]
+    fn a_closed_fold_gives_its_head_line_as_shown() {
+        let rows = [
+            reply(0, "before"),
+            Row::Worked {
+                key: Key::fold(Key(2)),
+                secs: Some(192),
+                rows: vec![reply(2, "hidden **inside**")],
+            },
+            reply(8, "after"),
+        ];
+        let range = (whole(0, 0), whole(3, 5));
+        assert_eq!(
+            source_between(&rows, &[], range.0, range.1),
+            "before\n\nWorked for 3m 12s\n\nafter"
+        );
+        assert_eq!(
+            source_between(&rows, &[Key::fold(Key(2))], range.0, range.1),
+            "before\n\nWorked for 3m 12s\n\nhidden **inside**\n\nafter"
+        );
     }
 }

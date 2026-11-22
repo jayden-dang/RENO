@@ -13,13 +13,14 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, HighlightStyle,
-    InspectorElementId, LayoutId, Pixels, Point, TextLayout, TextRun, Window,
+    InspectorElementId, LayoutId, Pixels, Point, TextLayout, TextRun, Window, point, px,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::transcript::Key;
 use crate::ui::theme::{Appearance, Theme};
 use crate::vm::anchor::Atom;
-use crate::vm::selection::Slot;
+use crate::vm::selection::{SelectUnit, Slot};
 
 /// How a laid-out text's bytes relate to its source.
 #[derive(Clone, Debug)]
@@ -71,6 +72,33 @@ impl Map {
                 }
             }
         }
+    }
+
+    /// The source bytes a laid-out range is, for selecting it: a run that is not text (a
+    /// formula, an image) is taken whole, and the markers around a run's text are left out.
+    pub(crate) fn source_range(&self, layout: Range<usize>) -> Range<usize> {
+        let Self::Atoms { atoms, segs } = self else {
+            return self.source_at(layout.start)..self.source_at(layout.end);
+        };
+        let first = segs.iter().find(|s| s.layout.end > layout.start);
+        let last = segs.iter().rev().find(|s| s.layout.start < layout.end);
+        let first = first.and_then(|s| Some((s, atoms.get(s.atom)?)));
+        let last = last.and_then(|s| Some((s, atoms.get(s.atom)?)));
+        let start = first.map_or(0, |(seg, atom)| {
+            if atom.is_atomic() {
+                atom.src.start
+            } else {
+                atom.src_at(layout.start.saturating_sub(seg.layout.start))
+            }
+        });
+        let end = last.map_or(start, |(seg, atom)| {
+            if atom.is_atomic() {
+                atom.src.end
+            } else {
+                atom.src_at(layout.end - seg.layout.start)
+            }
+        });
+        start..end.max(start)
     }
 
     /// The laid-out range that `sel` (bytes of the source) covers; for a text with no source,
@@ -147,6 +175,46 @@ impl Piece {
         };
         self.map.source_at(at)
     }
+
+    /// The source bytes of the word or drawn line under `point`; none for any other unit.
+    pub(crate) fn unit_at(&self, point: Point<Pixels>, unit: SelectUnit) -> Option<Range<usize>> {
+        let text = self.layout.text();
+        let range = match unit {
+            SelectUnit::Word => {
+                let (Ok(at) | Err(at)) = self.layout.index_for_position(point);
+                word_at(&text, at)
+            }
+            SelectUnit::Line => self.line_at(point, &text),
+            SelectUnit::Char | SelectUnit::Block => return None,
+        };
+        Some(self.map.source_range(range))
+    }
+
+    /// The row of the text that `point` is on, as bytes of the laid-out text, without the
+    /// spaces a wrapped row ends in.
+    fn line_at(&self, over: Point<Pixels>, text: &str) -> Range<usize> {
+        let bounds = self.layout.bounds();
+        let y = over.y.clamp(bounds.top(), bounds.bottom() - px(1.0));
+        let index = |x| {
+            let (Ok(at) | Err(at)) = self.layout.index_for_position(point(x, y));
+            at.min(text.len())
+        };
+        let start = index(bounds.left());
+        let end = index(bounds.right() + px(1.0)).max(start);
+        start..start + text.get(start..end).unwrap_or_default().trim_end().len()
+    }
+}
+
+/// The word, or the run of spaces or punctuation, that byte `at` of `text` is in.
+pub(crate) fn word_at(text: &str, at: usize) -> Range<usize> {
+    let mut found = 0..0;
+    for (start, word) in text.split_word_bound_indices() {
+        found = start..start + word.len();
+        if at < found.end {
+            break;
+        }
+    }
+    found
 }
 
 /// The texts painted this frame, filled as they are painted and emptied before the next draw.
@@ -427,5 +495,49 @@ mod tests {
         assert_eq!(map.source_at(9), 15);
         assert_eq!(map.layout_range(&(12..40), 6, false), Some(2..6));
         assert_eq!(map.layout_range(&(0..8), 6, false), None);
+    }
+
+    #[test]
+    fn a_word_is_the_letters_around_the_click_and_punctuation_is_not_part_of_it() {
+        let text = "see the transcript, now";
+        assert_eq!(word_at(text, 10), 8..18);
+        assert_eq!(word_at(text, 8), 8..18);
+        assert_eq!(word_at(text, 18), 18..19, "the comma");
+        assert_eq!(word_at(text, 3), 3..4, "the space");
+        assert_eq!(
+            word_at(text, text.len()),
+            20..23,
+            "past the end is the last word"
+        );
+        assert_eq!(word_at("héllo wörld", 9), 7..13);
+        assert_eq!(word_at("", 0), 0..0);
+    }
+
+    #[test]
+    fn a_drawn_range_maps_to_the_source_without_the_markers_around_it() {
+        // Drawn: "a bold and it"; "bold" is source 4..8 and its closing markers end at 10.
+        let (map, _) = atoms_map("a **bold** and *it*");
+        assert_eq!(map.source_range(2..6), 4..8);
+        assert_eq!(map.source_range(7..10), 11..14);
+        assert_eq!(map.source_range(0..13), 0..18);
+    }
+
+    #[test]
+    fn a_range_touching_a_formula_takes_the_whole_formula() {
+        let (map, _) = atoms_map("p $x^2$ q");
+        // Drawn: "p x^2 q"; the word "x" is part of the formula.
+        assert_eq!(map.source_range(2..3), 2..7);
+        assert_eq!(map.source_range(0..1), 0..1);
+    }
+
+    #[test]
+    fn a_range_of_a_plain_text_maps_by_its_base() {
+        let map = Map::Linear { base: 10, len: 8 };
+        assert_eq!(map.source_range(2..5), 12..15);
+        assert_eq!(
+            map.source_range(2..30),
+            12..18,
+            "the ellipsis belongs to the end"
+        );
     }
 }

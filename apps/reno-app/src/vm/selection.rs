@@ -60,6 +60,29 @@ pub(crate) struct Pos {
     pub(crate) off: usize,
 }
 
+/// How much one press of the pointer selects, by how many presses came in a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectUnit {
+    /// One press: a drag starts, a click on its own selects nothing.
+    Char,
+    Word,
+    /// A drawn line: what shows on one row of the screen.
+    Line,
+    /// A paragraph, a list, a code block or a table; a whole plain text.
+    Block,
+}
+
+impl SelectUnit {
+    pub(crate) fn of(click_count: usize) -> Self {
+        match click_count {
+            0 | 1 => Self::Char,
+            2 => Self::Word,
+            3 => Self::Line,
+            _ => Self::Block,
+        }
+    }
+}
+
 /// What is selected: where the drag started and where it is now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Selection {
@@ -70,6 +93,16 @@ pub(crate) struct Selection {
 impl Selection {
     pub(crate) fn is_empty(&self) -> bool {
         self.anchor == self.head
+    }
+
+    /// The selection after a shift-click at `at`: it reaches the click from the end it is
+    /// farther from, so a click before it extends it backwards.
+    pub(crate) fn extended_to(&self, at: Pos) -> Self {
+        let (start, end) = self.ordered();
+        Self {
+            anchor: if at < start { end } else { start },
+            head: at,
+        }
     }
 
     /// The start and the end in reading order.
@@ -122,6 +155,8 @@ pub(crate) struct Text {
     pub(crate) sourced: bool,
     /// Length of the source the atoms cover.
     pub(crate) len: usize,
+    /// The source text itself (empty for a text that has none).
+    pub(crate) source: String,
     pub(crate) atoms: Vec<Atom>,
 }
 
@@ -132,6 +167,7 @@ impl Text {
             slot,
             sourced: true,
             len: text.len(),
+            source: text.to_owned(),
             atoms: vec![Atom::plain(0..text.len(), text)],
         }
     }
@@ -142,11 +178,12 @@ impl Text {
             slot,
             sourced: false,
             len: 0,
+            source: String::new(),
             atoms: vec![Atom::plain(0..0, text)],
         }
     }
 
-    fn copy_all(&self) -> String {
+    pub(crate) fn copy_all(&self) -> String {
         anchor::copy(&self.atoms, 0..self.len.max(1))
     }
 }
@@ -185,6 +222,7 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
                 slot: Slot::WHOLE,
                 sourced: true,
                 len: text.len(),
+                source: text.clone(),
                 atoms,
             }]
         }
@@ -271,7 +309,7 @@ pub(crate) struct Anchor {
     pub(crate) range: Option<Range<usize>>,
 }
 
-fn covered<'a>(
+pub(crate) fn covered<'a>(
     sel: &'a Selection,
     entries: &'a [Entry<'a>],
     shown: &'a Shown<'a>,
@@ -304,16 +342,17 @@ pub(crate) fn anchors(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>)
         .collect()
 }
 
-/// What ⌘C puts on the clipboard: the text of each covered entry as the owner saw it, one blank
-/// line between entries and a line break between an entry's own texts.
-pub(crate) fn copy_text(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>) -> String {
+/// The covered texts of `sel`, each turned into text by `part`, one blank line between entries
+/// and a line break between an entry's own texts.
+pub(crate) fn joined(
+    sel: &Selection,
+    entries: &[Entry<'_>],
+    shown: &Shown<'_>,
+    part: impl Fn(&Text, Range<usize>) -> String,
+) -> String {
     let mut out: Vec<(usize, String)> = Vec::new();
     for (e, t, range) in covered(sel, entries, shown) {
-        let part = if t.sourced {
-            anchor::copy(&t.atoms, range)
-        } else {
-            t.copy_all()
-        };
+        let part = part(&t, range);
         if part.is_empty() {
             continue;
         }
@@ -329,6 +368,49 @@ pub(crate) fn copy_text(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_
         .map(|(_, t)| t)
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// What ⌘C puts on the clipboard: the text of each covered entry as the owner saw it.
+pub(crate) fn copy_text(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>) -> String {
+    joined(sel, entries, shown, |t, range| {
+        if t.sourced {
+            anchor::copy(&t.atoms, range)
+        } else {
+            t.copy_all()
+        }
+    })
+}
+
+/// The block around `at`: the paragraph, list, code block or table of a reply it is in (the
+/// blank line after one belongs to it), or all of any other text. A text with no source is
+/// selected whole by an end one byte on, so that the selection is not empty.
+pub(crate) fn block_at(at: Pos, entries: &[Entry<'_>], shown: &Shown<'_>) -> Option<Selection> {
+    let entry = entries.iter().find(|e| e.ordinal == at.ordinal)?;
+    let text = texts_of(entry.row, shown)
+        .into_iter()
+        .find(|t| t.slot == at.slot)?;
+    let at_off = |off| Pos { off, ..at };
+    let range = if !text.sourced {
+        0..1
+    } else if let Row::Prose { key, text: source } = entry.row {
+        let tree = (shown.tree)(*key, source);
+        let top = tree
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| b.range.start <= at.off)
+            .or(tree.blocks.first())
+            .map(|b| b.range.clone())
+            .unwrap_or(0..text.len);
+        let body = text.source.get(top.clone()).unwrap_or_default();
+        top.start..top.start + body.trim_end().len()
+    } else {
+        0..text.len
+    };
+    (range.start < range.end).then(|| Selection {
+        anchor: at_off(range.start),
+        head: at_off(range.end),
+    })
 }
 
 #[cfg(test)]
@@ -589,5 +671,62 @@ mod tests {
         assert_eq!(across.within(1, Slot::WHOLE, Some(7)), Some(5..7));
         assert_eq!(across.within(4, Slot::WHOLE, Some(7)), Some(0..1));
         assert_eq!(across.within(2, Slot::HEAD, None), Some(0..0));
+    }
+
+    #[test]
+    fn clicks_choose_the_unit_they_select() {
+        assert_eq!(SelectUnit::of(1), SelectUnit::Char);
+        assert_eq!(SelectUnit::of(2), SelectUnit::Word);
+        assert_eq!(SelectUnit::of(3), SelectUnit::Line);
+        assert_eq!(SelectUnit::of(4), SelectUnit::Block);
+        assert_eq!(SelectUnit::of(7), SelectUnit::Block);
+    }
+
+    #[test]
+    fn a_shift_click_extends_to_the_click_from_the_end_it_is_farther_from() {
+        let sel = drag(at(2, 4), at(2, 9));
+        assert_eq!(sel.extended_to(at(3, 1)), drag(at(2, 4), at(3, 1)));
+        assert_eq!(sel.extended_to(at(1, 6)), drag(at(2, 9), at(1, 6)));
+        assert_eq!(sel.extended_to(at(2, 6)), drag(at(2, 4), at(2, 6)));
+    }
+
+    #[test]
+    fn a_block_is_the_paragraph_around_the_click_or_the_whole_of_a_plain_text() {
+        let reply = "first para\nstill first\n\nsecond para\n\n```\ncode\n```\n";
+        let rows = [user(0, "one two\nthree"), prose(2, reply)];
+        let w = World::new();
+        let block = |pos: Pos| w.run(&rows, |e, s| block_at(pos, e, s));
+        let second = reply.find("second").unwrap();
+        assert_eq!(
+            block(at(1, second + 3)),
+            Some(drag(at(1, second), at(1, second + "second para".len())))
+        );
+        assert_eq!(
+            block(at(1, 2)),
+            Some(drag(at(1, 0), at(1, "first para\nstill first".len())))
+        );
+        assert_eq!(
+            block(at(1, second - 1)),
+            Some(drag(at(1, 0), at(1, "first para\nstill first".len()))),
+            "the blank line belongs to the block before it"
+        );
+        assert_eq!(
+            block(at(0, 3)),
+            Some(drag(at(0, 0), at(0, "one two\nthree".len())))
+        );
+    }
+
+    #[test]
+    fn a_block_of_a_text_with_no_source_is_all_of_it() {
+        let rows = [worked(2, vec![prose(2, "inner")])];
+        let w = World::new();
+        let head = Pos {
+            ordinal: 0,
+            slot: Slot::HEAD,
+            off: 0,
+        };
+        let sel = w.run(&rows, |e, s| block_at(head, e, s)).expect("a block");
+        assert!(!sel.is_empty());
+        assert_eq!(w.copy(&rows, sel), "Worked for 3m 12s");
     }
 }

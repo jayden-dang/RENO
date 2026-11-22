@@ -25,7 +25,8 @@ use crate::transcript::Key;
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
 use crate::ui::theme::Theme;
-use crate::vm::selection::{self, Entry, Pos, Selection, Shown, Slot};
+use crate::vm::anchor;
+use crate::vm::selection::{self, Entry, Pos, SelectUnit, Selection, Shown, Slot};
 
 actions!(run_transcript, [CopyTranscript]);
 
@@ -111,6 +112,32 @@ impl RunScreen {
             .collect()
     }
 
+    /// The place of the character `within` bytes into the first painted text that holds
+    /// `needle`, as last painted.
+    #[cfg(test)]
+    pub(crate) fn painted_point(&self, needle: &str, within: usize) -> Option<Point<Pixels>> {
+        self.select.registry.borrow().iter().find_map(|p| {
+            let at = p.layout.text().find(needle)? + within;
+            let origin = p.layout.position_for_index(at)?;
+            Some(origin + gpui::point(px(1.0), p.layout.line_height() / 2.0))
+        })
+    }
+
+    /// Selects bytes `range` of the source of the row `key`.
+    #[cfg(test)]
+    pub(crate) fn select_source(&mut self, key: Key, range: Range<usize>) {
+        let ordinal = self.select.order[&key];
+        let at = |off| Pos {
+            ordinal,
+            slot: Slot::WHOLE,
+            off,
+        };
+        self.select.current = Some(Selection {
+            anchor: at(range.start),
+            head: at(range.end),
+        });
+    }
+
     /// The words and place of the head line of the row `key`, as last painted.
     #[cfg(test)]
     pub(crate) fn painted_head(&self, key: Key) -> Option<(String, Bounds<Pixels>)> {
@@ -188,10 +215,9 @@ impl RunScreen {
 
     // --- the pointer ---------------------------------------------------------------------------
 
-    /// The position under `point`, from the texts painted last frame: the text it is on or, past
-    /// the text, the nearest one.
-    fn position_at(&self, point: Point<Pixels>) -> Option<Pos> {
-        let pieces = self.select.registry.borrow();
+    /// The text of `pieces` (painted last frame) that is nearest `point`: the one it is on or,
+    /// past the texts, the nearest.
+    fn nearest_piece<'a>(&self, pieces: &'a [Piece], point: Point<Pixels>) -> Option<&'a Piece> {
         let area = self.select.list.get();
         let gap = |p: &Piece| {
             let b = &p.bounds;
@@ -212,7 +238,7 @@ impl RunScreen {
             // Rows are what the pointer is between: a line above or below beats one beside.
             (f32::from(dy), f32::from(dx))
         };
-        let piece = pieces
+        pieces
             .iter()
             .filter(|p| p.bounds.intersects(&area) || area.size.width == px(0.0))
             .filter(|p| self.select.order.contains_key(&p.key))
@@ -220,7 +246,13 @@ impl RunScreen {
                 gap(a)
                     .partial_cmp(&gap(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
-            })?;
+            })
+    }
+
+    /// The position under `point`, from the texts painted last frame.
+    fn position_at(&self, point: Point<Pixels>) -> Option<Pos> {
+        let pieces = self.select.registry.borrow();
+        let piece = self.nearest_piece(&pieces, point)?;
         let off = if piece.map.is_sourceless() {
             0
         } else {
@@ -233,15 +265,83 @@ impl RunScreen {
         })
     }
 
-    /// The left button went down in the transcript: a drag may start.
-    pub(super) fn select_down(&mut self, event: &MouseDownEvent) {
-        if event.button != MouseButton::Left || event.modifiers.platform || event.modifiers.shift {
+    /// What `unit` selects at `point`: the word or drawn line under it, or the block around it.
+    fn unit_selection(&self, point: Point<Pixels>, unit: SelectUnit) -> Option<Selection> {
+        let at = self.position_at(point)?;
+        let whole = unit == SelectUnit::Block || {
+            let pieces = self.select.registry.borrow();
+            self.nearest_piece(&pieces, point)?.map.is_sourceless()
+        };
+        if whole {
+            return self.view(|entries, shown| selection::block_at(at, entries, shown));
+        }
+        let range = {
+            let pieces = self.select.registry.borrow();
+            let piece = self.nearest_piece(&pieces, point)?;
+            piece.unit_at(point, unit).filter(|r| r.start < r.end)?
+        };
+        Some(Selection {
+            anchor: Pos {
+                off: range.start,
+                ..at
+            },
+            head: Pos {
+                off: range.end,
+                ..at
+            },
+        })
+    }
+
+    /// The left button went down in the transcript: a drag may start, or a word, a line or a
+    /// block is selected by the second, third and fourth press, or a shift-press extends the
+    /// selection to the pointer.
+    pub(super) fn select_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left || event.modifiers.platform {
             return;
         }
-        self.select.drag = Some(Drag {
-            start: event.position,
-            last: event.position,
-            moved: false,
+        if event.modifiers.shift {
+            let extended = self
+                .select
+                .current
+                .filter(|s| !s.is_empty())
+                .zip(self.position_at(event.position))
+                .map(|(sel, at)| sel.extended_to(at));
+            if extended.is_some() {
+                self.select.current = extended;
+                self.focus_transcript(window, cx);
+                cx.notify();
+            }
+            return;
+        }
+        match SelectUnit::of(event.click_count) {
+            SelectUnit::Char => {
+                self.select.drag = Some(Drag {
+                    start: event.position,
+                    last: event.position,
+                    moved: false,
+                });
+            }
+            unit => {
+                self.select.drag = None;
+                if let Some(sel) = self.unit_selection(event.position, unit) {
+                    self.select.current = Some(sel);
+                    self.focus_transcript(window, cx);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// The selection owns the keyboard, so that ⌘C copies it. Deferred: the press is still
+    /// bubbling and its other handlers would take the focus back.
+    fn focus_transcript(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.defer_in(window, |this, window, cx| {
+            window.focus(&this.transcript_focus, cx);
         });
     }
 
@@ -383,9 +483,8 @@ impl RunScreen {
 
     // --- copying -------------------------------------------------------------------------------
 
-    /// What ⌘C copies: the selected text in order, with a blank line between entries.
-    pub(crate) fn selected_text(&self) -> Option<String> {
-        let sel = self.select.current.filter(|s| !s.is_empty())?;
+    /// Runs `f` over the entries in reading order and what each shows.
+    fn view<T>(&self, f: impl FnOnce(&[Entry<'_>], &Shown<'_>) -> T) -> T {
         let open = |k: Key| self.open.contains(&k);
         let out_open = |id: &str| self.outputs_open.contains(&id.to_owned());
         let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
@@ -400,8 +499,20 @@ impl RunScreen {
             output_full: &out_full,
             tree: &tree,
         };
-        let entries = selection::reading(&self.rows, &open);
-        let text = selection::copy_text(&sel, &entries, &shown);
+        f(&selection::reading(&self.rows, &open), &shown)
+    }
+
+    /// What ⌘C copies: the selected text in order, with a blank line between entries.
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        let sel = self.select.current.filter(|s| !s.is_empty())?;
+        let text = self.view(|entries, shown| selection::copy_text(&sel, entries, shown));
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The markdown source of the selection, as the owner wrote it.
+    fn selected_source(&self) -> Option<String> {
+        let sel = self.select.current.filter(|s| !s.is_empty())?;
+        let text = self.view(|entries, shown| anchor::source_of(&sel, entries, shown));
         (!text.is_empty()).then_some(text)
     }
 
@@ -412,27 +523,20 @@ impl RunScreen {
         let Some(sel) = self.select.current.filter(|s| !s.is_empty()) else {
             return Vec::new();
         };
-        let open = |k: Key| self.open.contains(&k);
-        let out_open = |id: &str| self.outputs_open.contains(&id.to_owned());
-        let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
-        let tree = |key: Key, text: &str| {
-            self.markdown
-                .peek(&key)
-                .map_or_else(|| reno_markdown::parse_full(text), |s| s.tree().clone())
-        };
-        let shown = Shown {
-            open: &open,
-            output_open: &out_open,
-            output_full: &out_full,
-            tree: &tree,
-        };
-        let entries: Vec<Entry<'_>> = selection::reading(&self.rows, &open);
-        selection::anchors(&sel, &entries, &shown)
+        self.view(|entries, shown| selection::anchors(&sel, entries, shown))
     }
 
     /// ⌘C in the transcript.
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// "Copy as Markdown": the selection's source bytes on the clipboard.
+    #[cfg_attr(not(test), expect(dead_code))] // The transcript's context menu calls it (Task 17).
+    pub(super) fn copy_markdown(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_source() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }

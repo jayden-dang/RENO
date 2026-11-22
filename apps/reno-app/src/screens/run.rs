@@ -1395,7 +1395,7 @@ impl Render for RunScreen {
                     .pl(px(RAIL))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, event, _, _| this.select_down(event)),
+                        cx.listener(|this, event, window, cx| this.select_down(event, window, cx)),
                     )
                     .child(
                         list(
