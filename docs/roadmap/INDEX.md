@@ -21,8 +21,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 
 ## Focus
 
-**Now:** ROAD-33, ROAD-56
-**Next:** ROAD-55, ROAD-53, MILE-1
+**Now:** ROAD-33, ROAD-56, ROAD-61, ROAD-65
+**Next:** ROAD-55, ROAD-53, MILE-1, MILE-11
 
 | ID | Milestone | Depends-on | Commitment |
 |---|---|---|---|
@@ -36,11 +36,13 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 | MILE-7 | Bots made by chat | MILE-4 | Planned |
 | MILE-8 | Teams on one goal | MILE-4 | Planned |
 | MILE-9 | Checked work and gated improvement | MILE-8 | Planned |
+| MILE-11 | Bots on Reno's own harness | MILE-10 | Planned |
+| MILE-12 | A computer for each bot | MILE-11 | Planned |
 
 ## MILE-10 — Workflow design on a mocked daemon
 
 **Outcome:** The owner clicks through every main workflow in the new design on mocked data (start a task in a project, branch or worktree; answer questions and approvals from one inbox; follow a run with its subagents, background tasks and plan; hand work to other harnesses; make a bot by chat; manage executors and settings) and grades each one good enough or not.
-**Goals:** GOAL-1, GOAL-2, GOAL-7, GOAL-8, GOAL-9
+**Goals:** GOAL-1, GOAL-11, GOAL-7, GOAL-8, GOAL-9
 **Members:**
 - **ROAD-30** ui-direction — After: none — Surfaces: None — the new design is drafted with `draft-ui` first
 - **ROAD-29** app-budgets-and-profiling — After: none — Surfaces: `xtask/src/bench.rs`, `docs/BENCHMARKS.md`, `apps/reno-app/`
@@ -63,12 +65,12 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 ## MILE-1 — Harness parity
 
 **Outcome:** A run the owner starts from Reno behaves as the same harness started in a terminal in that folder (its own settings, allow-list, hooks and MCP servers decide), the owner answers its questions from Reno, an "Always allow" given in Reno also holds in the terminal, and every daemon feature is reachable from the CLI.
-**Goals:** GOAL-2, GOAL-6, GOAL-8
+**Goals:** GOAL-11, GOAL-6, GOAL-8
 **Members:**
 - **ROAD-1** answer-harness-questions — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/src/supervisor.rs`, `crates/reno-harness/src/drivers/`, `apps/reno/` — Card: [ROAD-1](roads/ROAD-1.md)
 - **ROAD-2** owner-started-vs-unattended-runs — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-kernel/`
 - **ROAD-3** terminal-parity-config — After: ROAD-2 — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-harness/src/child_env.rs`, `crates/reno-harness/src/conformance/`
-- **ROAD-4** harness-decides-permissions — After: ROAD-2 — Surfaces: `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/`, `crates/reno-harness/src/wire/`
+- **ROAD-4** harness-decides-permissions — After: ROAD-2 — Surfaces: `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/`, `crates/reno-harness/src/wire/` — Notes: [ROAD-4](roads/ROAD-4.notes.md)
 - **ROAD-5** always-allow-into-harness-settings — After: ROAD-4 — Surfaces: `crates/reno-harness/src/drivers/`, `apps/renod/`, `apps/reno/`
 - **ROAD-6** cli-reaches-every-method — After: none — Surfaces: `apps/reno/`
 **Depends-on:** MILE-10
@@ -122,7 +124,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-22** unforgeable-agent-messages — After: ROAD-21 — Surfaces: `apps/renod/`, `crates/reno-proto/src/agent.rs`
 - **ROAD-23** lead-answers-child-questions — After: ROAD-1, ROAD-21 — Surfaces: `apps/reno/src/mcp.rs`
 - **ROAD-24** side-chat-and-fork — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/`, `crates/reno-harness/src/drivers/`
-- **ROAD-25** lead-build-spike — After: ROAD-21 — Surfaces: None — a spike decides between a lead bot on an existing harness and a loop inside Reno
+- ~~**ROAD-25**~~ lead-build-spike — retired 2026-11-22: ADR-0001 settles it; a lead may be a bot on the Reno harness, which ROAD-61 picks
 **Depends-on:** MILE-1, MILE-3
 **Commitment:** Planned
 **Closed:** None
@@ -132,7 +134,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 ## MILE-5 — Notices and terminal status
 
 **Outcome:** The owner gets a desktop banner when a run finishes, fails or needs them even with the app closed, and programs in Reno's terminals report working, needs-input and done, with search and clickable links in the terminal.
-**Goals:** GOAL-2
+**Goals:** GOAL-11
 **Members:**
 - **ROAD-26** banners-from-the-daemon — After: none — Surfaces: `apps/renod/`, `crates/reno-notify/`
 - **ROAD-27** terminal-program-status — After: none — Surfaces: `crates/reno-term/`, `apps/renod/`
@@ -146,12 +148,13 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 ## MILE-6 — The app on the real daemon
 
 **Outcome:** Every workflow designed in MILE-10 runs on the real daemon instead of mocks, and the app stays inside its written idle, streaming and cold-start budgets.
-**Goals:** GOAL-1, GOAL-2, GOAL-7, GOAL-8
+**Goals:** GOAL-1, GOAL-11, GOAL-7, GOAL-8
 **Members:**
 - **ROAD-54** replace-mocks-with-real-contracts — After: MILE-10 — Surfaces: `apps/reno-app/`, `crates/reno-client/` — Notes: [ROAD-54](roads/ROAD-54.notes.md)
 - **ROAD-36** project-actions — After: ROAD-7, MILE-10 — Surfaces: `crates/reno-store/`, `apps/renod/`, `apps/reno-app/`
 - **ROAD-39** browser-tab-for-a-person — After: ROAD-35 — Surfaces: None — needs a new boundary crate for the web view, decided when it starts
 - **ROAD-56** bounded-queues-enforced — After: none — Surfaces: `clippy.toml`, `apps/reno-app/`, `crates/reno-harness/src/drivers/opencode/`, `docs/architecture/runtime.md` — Notes: [ROAD-56](roads/ROAD-56.notes.md)
+- **ROAD-70** change-provenance — After: ROAD-54 — Surfaces: `crates/reno-kernel/`, `crates/reno-store/`, `apps/reno-app/src/panel/` — Notes: [ROAD-70](roads/ROAD-70.notes.md)
 - **ROAD-57** thread-links-open-the-app — After: none — Surfaces: `xtask/src/bundle.rs`, `apps/reno-app/src/lifecycle.rs` — Notes: [ROAD-57](roads/ROAD-57.notes.md)
 **Depends-on:** MILE-10, MILE-2, MILE-3, MILE-4, MILE-5
 **Commitment:** Planned
@@ -205,6 +208,37 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Deferred:** None
 **Blockers:** None
 
+## MILE-11 — Bots on Reno's own harness
+
+**Outcome:** The owner gives a bot Reno's own harness: it runs on the owner's API key, every tool call it makes is checked by that bot's policy before it runs and a denied call never runs, the owner sees each call with its usage, and a run goes on until the harness says it is done.
+**Goals:** GOAL-1, GOAL-10, GOAL-11
+**Members:**
+- **ROAD-61** reno-harness-spike — After: none — Surfaces: None — a throwaway spike picks Pi or dsh — Notes: [ROAD-61](roads/ROAD-61.notes.md)
+- **ROAD-62** reno-harness-driver-and-gate — After: ROAD-61 — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/bot.rs`, `README.md`
+- **ROAD-63** per-bot-tool-and-domain-policy — After: ROAD-62 — Surfaces: `crates/reno-proto/src/defs/`, `crates/reno-kernel/`
+- **ROAD-64** runs-uncapped-by-default — After: none — Surfaces: `crates/reno-proto/src/defs/bot.rs`, `crates/reno-kernel/src/budget.rs`, `docs/ROADMAP.md`
+**Depends-on:** MILE-10
+**Commitment:** Planned
+**Closed:** None
+**Deferred:** None
+**Blockers:** None
+
+## MILE-12 — A computer for each bot
+
+**Outcome:** A bot on Reno's harness works in a computer of its own on the owner's Mac: a browser first, only its project mounted, only the domains its definition allows reachable, and the owner watches it live and can take over.
+**Goals:** GOAL-10
+**Members:**
+- **ROAD-65** bot-computer-spike — After: none — Surfaces: None — a throwaway spike on a Linux VM per bot — Notes: [ROAD-65](roads/ROAD-65.notes.md)
+- **ROAD-66** bot-computer-vm — After: ROAD-65 — Surfaces: `apps/renod/`, `crates/reno-kernel/`
+- **ROAD-67** egress-allowlist-proxy — After: ROAD-66 — Surfaces: `apps/renod/`, `crates/reno-proto/src/defs/bot.rs`
+- **ROAD-68** browser-tools-and-live-view — After: ROAD-66, ROAD-62 — Surfaces: `crates/reno-harness/`, `apps/reno-app/`
+- **ROAD-69** computer-setup-scripts — After: ROAD-66 — Surfaces: `apps/renod/`
+**Depends-on:** MILE-11
+**Commitment:** Planned
+**Closed:** None
+**Deferred:** None
+**Blockers:** None
+
 ## Goal dispositions
 
 Every live `GOAL-N` in `docs/product/vision.md` that no milestone cites belongs here, so
@@ -212,4 +246,4 @@ that a goal is never silently dropped (S6).
 
 | Goal | Disposition | Date | Reason |
 |---|---|---|---|
-| None | | | Every live goal (GOAL-1 to GOAL-9) is cited by a milestone |
+| None | | | Every live goal (GOAL-1, GOAL-3 to GOAL-11) is cited by a milestone |
