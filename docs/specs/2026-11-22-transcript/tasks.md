@@ -396,7 +396,7 @@ window close call through `Saved::flush`, `panel/saved.rs:58` and `app.rs:401`),
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_file_from_before_reads_with_no_place_and_version_stays_one`;
   - `a_key_with_only_a_place_is_kept`;
   - `the_place_survives_snapshot_persist_and_the_terminal_round_trip`;
@@ -405,11 +405,11 @@ window close call through `Saved::flush`, `panel/saved.rs:58` and `app.rs:401`),
   - `the_place_moves_with_the_run_to_thread_key`;
   - `a_view_at_the_tail_saves_no_place_and_reopens_following`.
   Run: `cargo test -p reno-app place` — expect: fails to compile, with `Place` undefined.
-- [ ] **Step 2:** Add `Place` and the field; carry it through every builder and `resolve_panel_key`. Add `place: None` to
+- [x] **Step 2:** Add `Place` and the field; carry it through every builder and `resolve_panel_key`. Add `place: None` to
   the test literals (compile only).
-- [ ] **Step 3:** Mark the place changed on each scroll event, let `Saver` coalesce, and restore after the first layout.
+- [x] **Step 3:** Mark the place changed on each scroll event, let `Saver` coalesce, and restore after the first layout.
   Run: `cargo test -p reno-app` — expect: pass.
-- [ ] **Step 4:** Commit `transcript: each thread's reading place is saved with its panel and restored after a restart`.
+- [x] **Step 4:** Commit `transcript: each thread's reading place is saved with its panel and restored after a restart`.
 
 _Requirements: TRANSCRIPT-4.1, TRANSCRIPT-4.2, TRANSCRIPT-4.3, TRANSCRIPT-4.4, TRANSCRIPT-4.5_
 
