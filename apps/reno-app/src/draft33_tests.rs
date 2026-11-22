@@ -106,9 +106,9 @@ fn the_handshake_thread_shows_as_eight_folded_turns(cx: &mut TestAppContext) {
     };
     wait_drawn(vcx, |vcx| folds(vcx).len() == 8);
     let sizes = folds(vcx);
-    // Each turn is one fold of about 250 events: a reasoning note, and a note and a tool group
-    // for each of 82 steps.
-    assert!(sizes.iter().all(|n| *n >= 160), "{sizes:?}");
+    // Each turn is one fold of 250 messages: a reasoning note, and a note and a tool group
+    // for each step.
+    assert!(sizes.iter().all(|n| *n >= 400), "{sizes:?}");
 }
 
 #[gpui::test]

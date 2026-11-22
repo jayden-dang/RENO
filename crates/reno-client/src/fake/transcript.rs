@@ -1,10 +1,10 @@
 //! ROAD-33: the fake daemon's transcript demo world, behind [`FakeConfig::transcript_threads`]
 //! (super::FakeConfig::transcript_threads).
 //!
-//! - "fix the ACP v2 handshake": one thread of eight finished runs, one run per turn, 2,000
-//!   events in all (250 a run). Each turn is a prompt, a reasoning note, 82 steps (interim text,
-//!   a tool call and its result) and a final reply, so each finished turn folds into one
-//!   "Worked for" fold of about 250 entries. The steps vary (searches, reads, edits, builds,
+//! - "fix the ACP v2 handshake": one thread of eight finished runs, one run per turn, 2,000 agent
+//!   messages in all (250 a run, each followed by a tool call and its result, as the bench's
+//!   burst reads). Each turn is a prompt, a reasoning note, 250 steps (interim text, a tool call
+//!   and its result) and a final reply, so each finished turn folds into one "Worked for" fold. The steps vary (searches, reads, edits, builds,
 //!   test runs). The file name [`NEEDLE`] occurs exactly [`NEEDLE_HITS`] times in the thread and
 //!   its first occurrence is in turn 3, inside a `cargo test` step's output.
 //! - "Render check": one finished run whose final reply holds a display formula, an inline
@@ -31,7 +31,7 @@ pub const NEEDLE_FIRST_TURN: usize = 3;
 /// Turns in the handshake thread.
 pub const TURNS: usize = 8;
 /// Steps in a turn.
-const STEPS: usize = 82;
+const STEPS: usize = 250;
 /// Events in a run: `Started`, one reasoning note, three a step, the final reply and `Done`.
 pub const EVENTS_PER_RUN: usize = 1 + 1 + 3 * STEPS + 1 + 1;
 
@@ -570,15 +570,25 @@ mod tests {
     }
 
     #[test]
-    fn the_handshake_thread_has_2000_events_in_8_turns() {
+    fn the_handshake_thread_has_2000_messages_in_8_turns() {
         let runs = handshake();
         assert_eq!(runs.len(), TURNS);
+        let mut messages = 0;
         for run in &runs {
             assert_eq!(run.journal.len(), EVENTS_PER_RUN);
             assert!(matches!(run.journal.last(), Some(ExecEvent::Done { .. })));
+            // An agent message that a tool call follows is one of the 2,000; the final reply is
+            // followed by Done.
+            messages += run
+                .journal
+                .windows(2)
+                .filter(|w| {
+                    matches!(w[0], ExecEvent::Text { .. }) && matches!(w[1], ExecEvent::Tool { .. })
+                })
+                .count();
         }
-        let total: usize = runs.iter().map(|r| r.journal.len()).sum();
-        assert_eq!(total, 2_000);
+        assert_eq!(messages, 2_000);
+        assert_eq!(EVENTS_PER_RUN, 754);
     }
 
     #[test]
