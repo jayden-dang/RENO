@@ -1107,3 +1107,111 @@ fn match_ticks_show_on_the_rail_while_find_holds_a_query(cx: &mut TestAppContext
     );
     assert!(painted(vcx, "tick-rail"), "the prompt ticks stay");
 }
+
+/// The rows the whole path gives for `run`'s own events, folded as the screen folds them.
+fn whole_rows(
+    vcx: &VisualTestContext,
+    store: &Entity<Store>,
+    run: &RunId,
+    pending: &[reno_proto::Approval],
+    segment: usize,
+) -> Vec<Row> {
+    store.read_with(vcx, |s, _| {
+        let state = s.state();
+        let events = state
+            .transcript(run)
+            .map_or(&[][..], |t| t.events.as_slice());
+        let summary = state.run(run).unwrap();
+        let built = crate::transcript::build_rows(None, events, pending);
+        let elapsed = crate::vm::convo::run_elapsed_ms(
+            summary.status.is_terminal(),
+            summary.created_at_ms,
+            summary.updated_at_ms,
+            events,
+        );
+        crate::transcript::fold_turns(built.rows, elapsed)
+            .into_iter()
+            .map(|row| row.in_segment(segment))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn an_approval_that_waits_and_resolves_takes_the_screen_off_the_incremental_path_and_back(
+    cx: &mut TestAppContext,
+) {
+    use reno_proto::{Approval, ApprovalId, ApprovalSubject};
+    let (store, _root, vcx, screen) = open(cx);
+    let run = run_id("acp8");
+    let segment = screen.read_with(vcx, |s, _| s.runs.len() - 1);
+    let waiting = Approval {
+        id: ApprovalId::from_suffix("held").unwrap(),
+        run_id: run.clone(),
+        subject: ApprovalSubject {
+            action: ActionClass::Command,
+            tool: "bash".into(),
+            command: Some("git push".into()),
+            paths: vec![],
+            raw: serde_json::Value::Null,
+        },
+        requested_at_ms: 1,
+    };
+    // The screen's rows end with the run's own: the lead before them is the divider and prompt.
+    let ends_with = |vcx: &VisualTestContext, pending: &[Approval], what: &str| {
+        let want = whole_rows(vcx, &store, &run, pending, segment);
+        screen.read_with(vcx, |s, _| {
+            assert!(s.rows().ends_with(&want), "{what}: {:?}", s.rows());
+        });
+    };
+
+    // The finished run goes on with a new attempt, whose reply streams in.
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 0,
+                session: SessionRef("s".into()),
+            },
+            text("One"),
+        ],
+    );
+    draw(vcx);
+    ends_with(vcx, &[], "incremental");
+    let (rebuilt, ..) = work_so_far(vcx, &screen);
+    stream(vcx, &store, &run, vec![text(" two")]);
+    draw(vcx);
+    assert_eq!(work_so_far(vcx, &screen).0, rebuilt, "incremental");
+
+    // The approval is held: the rows are built whole, with it, and stay so while it waits.
+    store.update(vcx, |s, cx| {
+        s.apply(Update::Approvals(vec![waiting.clone()]), cx);
+    });
+    draw(vcx);
+    let held = work_so_far(vcx, &screen).0;
+    assert!(held > rebuilt, "the approval builds the rows whole");
+    ends_with(vcx, std::slice::from_ref(&waiting), "held");
+    stream(vcx, &store, &run, vec![text(" three")]);
+    draw(vcx);
+    assert!(work_so_far(vcx, &screen).0 > held, "whole while it waits");
+    ends_with(vcx, std::slice::from_ref(&waiting), "held, with more");
+
+    // It resolves: one whole build, and the next delta goes in without any.
+    store.update(vcx, |s, cx| s.apply(Update::Approvals(vec![]), cx));
+    draw(vcx);
+    ends_with(vcx, &[], "resolved");
+    let resolved = work_so_far(vcx, &screen).0;
+    stream(vcx, &store, &run, vec![text(" four")]);
+    draw(vcx);
+    assert_eq!(
+        work_so_far(vcx, &screen).0,
+        resolved,
+        "back on the incremental path"
+    );
+    ends_with(vcx, &[], "incremental again");
+    screen.read_with(vcx, |s, _| {
+        assert!(matches!(s.rows().last(),
+            Some(Row::Prose { text, .. }) if text == "One two three four"));
+    });
+}

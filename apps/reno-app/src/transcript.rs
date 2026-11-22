@@ -671,7 +671,7 @@ pub(crate) enum Change {
 
 /// A tool call as the call index holds it.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // The tool cards read it; only the builder's tests do today.
+#[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
 pub(crate) struct CallInfo<'a> {
     pub(crate) input: &'a reno_proto::ToolCall,
     /// The seq of the event that gave the call its result; none while it has none.
@@ -773,7 +773,7 @@ impl TurnBuilder {
     }
 
     /// The tool call `id` as the events gave it, and where its result came.
-    #[allow(dead_code)] // The tool cards read it; only the builder's tests do today.
+    #[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
     pub(crate) fn call(&self, id: &str) -> Option<CallInfo<'_>> {
         let (input, result_seq) = self.calls.get(id)?;
         Some(CallInfo {
@@ -826,12 +826,13 @@ impl TurnBuilder {
     /// The group a call is added to, or a new one; the group is no row while it only holds the
     /// harness's questions.
     fn add_call(&mut self, entry: ToolEntry, key: Key, first: &mut Option<usize>) {
-        if let Some((_, calls)) = self.hidden.as_mut() {
+        if let Some((key, mut calls)) = self.hidden.take() {
             calls.push(entry);
-            if crate::vm::convo::has_steps(calls) {
-                let (key, calls) = self.hidden.take().unwrap_or((key, Vec::new()));
+            if crate::vm::convo::has_steps(&calls) {
                 self.rows.push(Row::Tools { key, calls });
                 touch(first, self.rows.len() - 1);
+            } else {
+                self.hidden = Some((key, calls));
             }
             return;
         }

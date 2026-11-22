@@ -945,11 +945,20 @@ impl RunScreen {
                     {
                         self.older_builds += 1;
                     }
-                    let built = build(id, &[]);
-                    let mut seg_rows: Vec<Row> =
-                        divider_row(state, id, at, built.facts.model.clone())
-                            .into_iter()
-                            .collect();
+                    let events = state
+                        .transcript(id)
+                        .map_or(&[][..], |t| t.events.as_slice());
+                    let mut built = model::build_rows(None, events, &[]);
+                    if let Some(run) = state.run(id) {
+                        let elapsed = convo::run_elapsed_ms(
+                            run.status.is_terminal(),
+                            run.created_at_ms,
+                            run.updated_at_ms,
+                            events,
+                        );
+                        built.rows = model::fold_turns(built.rows, elapsed);
+                    }
+                    let mut seg_rows = lead_rows(state, id, at, built.facts.model.clone(), None);
                     seg_rows.extend(built.rows.into_iter().map(|row| row.in_segment(at)));
                     Segment {
                         signature: *sig,
