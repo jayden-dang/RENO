@@ -166,6 +166,68 @@ pub(crate) fn step_lines(calls: &[ToolEntry]) -> Vec<StepLine> {
     lines
 }
 
+/// Where the call's label is painted in its step line: `(label byte, line byte)`, the start of the
+/// part of the label the line shows and where that part starts in the line. A command shows its
+/// whole label; another call shows what it did to (a path, a URL); a run of edits says only how
+/// many files, so none of its label shows (`None`).
+pub(crate) fn label_in_line(call: &ToolEntry, line: &str) -> Option<(usize, usize)> {
+    let shown = match call.kind {
+        ToolKind::Edit => return None,
+        ToolKind::Command => 0,
+        ToolKind::Other => {
+            let target = other_step(&call.label).3;
+            (target.as_ptr() as usize).checked_sub(call.label.as_ptr() as usize)?
+        }
+    };
+    let painted = call.label.get(shown..)?.trim_end();
+    let at = line.len().checked_sub(painted.len())?;
+    line.get(at..).filter(|tail| *tail == painted)?;
+    Some((shown, at))
+}
+
+/// How many tool calls a fold holds: its "steps".
+pub(crate) fn steps_in(rows: &[Row]) -> usize {
+    rows.iter()
+        .map(|r| match r {
+            Row::Tools { calls, .. } => calls.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// The tools a fold used, by name, in the order they first appear: "cargo", "rg", "edit".
+pub(crate) fn tools_used(rows: &[Row], most: usize) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for call in rows.iter().flat_map(|r| match r {
+        Row::Tools { calls, .. } => calls.as_slice(),
+        _ => &[],
+    }) {
+        if seen.len() == most {
+            break;
+        }
+        let name = match call.kind {
+            ToolKind::Edit => "edit".to_owned(),
+            ToolKind::Command => call
+                .label
+                .split_whitespace()
+                .next()
+                .map_or_else(String::new, |w| {
+                    w.rsplit('/').next().unwrap_or(w).to_owned()
+                }),
+            ToolKind::Other => call
+                .label
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_lowercase(),
+        };
+        if !name.is_empty() && !seen.contains(&name) {
+            seen.push(name);
+        }
+    }
+    seen
+}
+
 /// "Worked for 12s", "Worked for 1m 5s", or "Worked" when the turn has no timing.
 pub(crate) fn worked_label(secs: Option<u64>) -> String {
     match secs {
@@ -255,7 +317,9 @@ pub(crate) fn thinking(rows: &[Row], live: bool) -> bool {
 }
 
 /// The rows that are the final agent message of a finished turn (they carry the quiet actions):
-/// the prose just before a `Done`, in every turn of the list.
+/// the prose just before a `Done`, in every turn of the list. The list items carry the same fact
+/// (`vm::items`), worked out once for all rows; this is the rule they are tested against.
+#[cfg(test)]
 pub(crate) fn final_messages(rows: &[Row]) -> Vec<usize> {
     rows.windows(2)
         .enumerate()
@@ -302,6 +366,20 @@ pub(crate) fn tick_marks(rows: &[Row]) -> Vec<TickMark> {
         above += row_weight(r);
     }
     marks
+}
+
+/// Where each row starts in the whole transcript, from the top (0.0) to the end (1.0), by the
+/// same estimate as the ticks. The find ticks of the rail read it.
+pub(crate) fn row_starts(rows: &[Row]) -> Vec<f32> {
+    let total: f32 = rows.iter().map(row_weight).sum();
+    let mut above = 0.0;
+    rows.iter()
+        .map(|r| {
+            let at = if total > 0.0 { above / total } else { 0.0 };
+            above += row_weight(r);
+            at
+        })
+        .collect()
 }
 
 /// Which tick is the message in view: the last one at or above the list's top row (the first,
@@ -735,5 +813,62 @@ mod tests {
             json!(null),
             ToolCall::new("x", json!(null), ActionClass::Other),
         );
+    }
+
+    #[test]
+    fn a_step_line_shows_the_part_of_the_label_a_hit_in_it_can_be_painted_on() {
+        let cmd = call("c", ToolKind::Command, "cargo test -p reno", ok());
+        let line = &step_lines(std::slice::from_ref(&cmd))[0];
+        assert_eq!(line.text, "Ran cargo test -p reno");
+        assert_eq!(label_in_line(&cmd, &line.text), Some((0, 4)));
+        // A read shows its path; the tool's name is not in the label's painted part.
+        let read = call("r", ToolKind::Other, "read src/supervisor.rs", ok());
+        let line = &step_lines(std::slice::from_ref(&read))[0];
+        assert_eq!(line.text, "Read src/supervisor.rs");
+        assert_eq!(label_in_line(&read, &line.text), Some((5, 5)));
+        // A run of edits says how many files, so nothing of the label shows.
+        let edit = call("e", ToolKind::Edit, "edit src/a.rs", ok());
+        let line = &step_lines(std::slice::from_ref(&edit))[0];
+        assert_eq!(label_in_line(&edit, &line.text), None);
+    }
+
+    #[test]
+    fn a_fold_counts_its_steps_and_names_the_tools_it_used_once_each() {
+        let calls = |labels: &[(ToolKind, &str)]| Row::Tools {
+            key: Key(9),
+            calls: labels
+                .iter()
+                .enumerate()
+                .map(|(i, (k, l))| call(&format!("c{i}"), *k, l, ok()))
+                .collect(),
+        };
+        let rows = vec![
+            prose(1),
+            calls(&[
+                (ToolKind::Command, "cargo test -p a"),
+                (ToolKind::Command, "/usr/bin/rg -n x"),
+                (ToolKind::Command, "cargo build"),
+            ]),
+            calls(&[
+                (ToolKind::Edit, "edit a.rs"),
+                (ToolKind::Other, "Read a.rs"),
+            ]),
+        ];
+        assert_eq!(steps_in(&rows), 5);
+        assert_eq!(tools_used(&rows, 4), ["cargo", "rg", "edit", "read"]);
+        assert_eq!(tools_used(&rows, 2), ["cargo", "rg"]);
+        assert!(tools_used(&[prose(1)], 4).is_empty());
+    }
+
+    #[test]
+    fn every_row_starts_where_the_ticks_say_it_does() {
+        let rows = [user(0), long_prose(1, 3000), user(2), prose(3)];
+        let starts = row_starts(&rows);
+        assert_eq!(starts.len(), rows.len());
+        let marks = tick_marks(&rows);
+        assert_eq!(starts[0], 0.0);
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(starts[2], marks[1].at);
+        assert!(row_starts(&[]).is_empty());
     }
 }
