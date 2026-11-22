@@ -1403,6 +1403,43 @@ fn a_recount_while_streaming_rescans_only_the_live_run(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn two_older_runs_that_swap_places_with_the_same_signature_keep_their_own_hits(
+    cx: &mut TestAppContext,
+) {
+    let (_store, _root, vcx, screen) = open(cx);
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    // Both runs look the same to the cache: the same event count and standing.
+    screen.update(vcx, |s, _| {
+        for (_, signature) in &mut s.prefix_runs[..2] {
+            *signature = (1, None);
+        }
+        for (id, _) in &s.prefix_runs[..2] {
+            s.segments.get_mut(id).unwrap().signature = (1, None);
+        }
+    });
+    requery(vcx, "e");
+    let (before, after) = screen.update(vcx, |s, _| {
+        let before = s.find_hits();
+        let (a, b) = (
+            s.segments[&s.prefix_runs[0].0].rows.len(),
+            s.segments[&s.prefix_runs[1].0].rows.len(),
+        );
+        let mut moved = s.rows[a..a + b].to_vec();
+        moved.extend_from_slice(&s.rows[..a]);
+        moved.extend_from_slice(&s.rows[a + b..]);
+        s.rows = moved;
+        s.prefix_runs.swap(0, 1);
+        (before, s.find_hits())
+    });
+    let truth = screen.read_with(vcx, |s, _| {
+        crate::vm::find::find_all(&s.rows, &s.find.matcher)
+    });
+    assert_ne!(before, truth, "the swap changed where the hits are");
+    assert_eq!(after, truth, "each run was served its own hits");
+}
+
+#[gpui::test]
 fn the_hit_cache_stops_at_its_bound(cx: &mut TestAppContext) {
     let (_store, _root, vcx, screen) = open(cx);
     vcx.simulate_keystrokes("cmd-f");

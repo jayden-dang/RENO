@@ -102,6 +102,13 @@ impl Query {
             return Ok(Matcher { re: None });
         }
         let pattern = if self.regex {
+            // The wrapping group would close a stray paren and let `a)|(b` parse: the text must
+            // parse as it is.
+            RegexBuilder::new(&self.text)
+                .unicode(true)
+                .size_limit(PATTERN_LIMIT)
+                .build()
+                .map_err(|err| reason(&err))?;
             let body = format!("(?:{})", self.text);
             if self.word {
                 format!("\\b{body}\\b")
@@ -660,6 +667,15 @@ mod tests {
             query("(open").compile().is_ok(),
             "plain text is never a pattern"
         );
+
+        // The pattern must parse on its own: the group around it must not hide a stray paren.
+        let escape = Query {
+            regex: true,
+            ..query("a)|(b")
+        };
+        let why = escape.compile().unwrap_err();
+        assert!(why.contains("unopened group"), "{why}");
+        assert!(!why.contains('\n'), "one line: {why}");
     }
 
     #[test]

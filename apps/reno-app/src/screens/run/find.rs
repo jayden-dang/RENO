@@ -40,9 +40,8 @@ const HIT_LISTS: usize = 64;
 /// What an older run was built from: how many events it has, and how it stands.
 type Signature = (usize, Option<RunStatus>);
 
-/// One older run's hits for one query: the run's place in the thread, what it was built from,
-/// and the query.
-type RunKey = (usize, Signature, Query);
+/// One older run's hits for one query: the run, what it was built from, and the query.
+type RunKey = (RunId, Signature, Query);
 
 struct HitCache(Lru<RunKey, Vec<Hit>>);
 
@@ -57,7 +56,7 @@ pub(super) struct Find {
     pub(super) open: bool,
     /// The query: the text as the field last said it, and the three options.
     pub(super) query: Query,
-    matcher: Rc<Matcher>,
+    pub(super) matcher: Rc<Matcher>,
     /// Why the query cannot be searched with (a pattern that does not parse), when it cannot.
     error: Option<String>,
     /// What older runs held for a query, so a recount reads only the live run's text.
@@ -86,7 +85,7 @@ fn older_runs_in<'a>(
     prefix_len: usize,
     prefix_runs: &[(RunId, Signature)],
     segments: &HashMap<RunId, Segment>,
-) -> Option<Vec<(Signature, &'a [Row])>> {
+) -> Option<Vec<(RunId, Signature, &'a [Row])>> {
     let mut start = 0;
     let mut older = Vec::with_capacity(prefix_runs.len());
     for (id, signature) in prefix_runs {
@@ -98,7 +97,7 @@ fn older_runs_in<'a>(
         {
             return None;
         }
-        older.push((*signature, run));
+        older.push((id.clone(), *signature, run));
         start += run.len();
     }
     (start == prefix_len).then_some(older)
@@ -342,7 +341,7 @@ impl RunScreen {
 
     /// The hits of the thread. The older runs' come from the cache when the run and the query are
     /// as they were; only the runs that are not (the live one, always) are read through.
-    fn find_hits(&mut self) -> Vec<Hit> {
+    pub(super) fn find_hits(&mut self) -> Vec<Hit> {
         if self.find.matcher.is_empty() {
             return Vec::new();
         }
@@ -360,11 +359,11 @@ impl RunScreen {
         };
         let mut hits: Vec<Hit> = Vec::new();
         let mut at = Place::default();
-        for (index, (signature, rows)) in older.into_iter().enumerate() {
+        for (id, signature, rows) in older {
             if hits.len() >= find::HIT_CAP {
                 break;
             }
-            let key = (index, signature, self.find.query.clone());
+            let key = (id, signature, self.find.query.clone());
             let local = match self.find.hit_cache.0.get(&key) {
                 Some(local) => local.clone(),
                 None => {
@@ -387,12 +386,14 @@ impl RunScreen {
                 turns: at.turns + taken.turns,
             };
         }
-        #[cfg(test)]
-        {
-            self.find.runs_scanned += 1;
+        if hits.len() < find::HIT_CAP {
+            #[cfg(test)]
+            {
+                self.find.runs_scanned += 1;
+            }
+            let live = find::find_in_run(&self.rows[self.prefix_len..], &self.find.matcher);
+            hits.extend(find::placed(&live, at));
         }
-        let live = find::find_in_run(&self.rows[self.prefix_len..], &self.find.matcher);
-        hits.extend(find::placed(&live, at));
         hits.truncate(find::HIT_CAP);
         hits
     }
