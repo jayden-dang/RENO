@@ -341,3 +341,283 @@ fn finishing(parts: impl IntoIterator<Item = [MockStep; 2]>) -> Vec<MockStep> {
     steps.push(MockStep::done(StopReason::Completed));
     steps
 }
+
+// ---- the built-in protection and the calls Pi's gate raises ---------------------------------
+//
+// The subjects have the shape `subject()` gives a gate call: the path as Pi will open it
+// (`@` dropped, a `file:` URL decoded, `~` expanded with the daemon user's home), and for a
+// refused URL both the decoded path and the text as written.
+
+mod gate_calls {
+    use reno_proto::ApprovalSubject;
+
+    use super::super::approvals::{MODES, gate_bash, gate_call, gate_edit, reno_rig, script};
+    use super::*;
+
+    const DATA: &str = "/Users/u/Library/Application Support/Reno";
+    const SCRATCH: &str = "/tmp/reno-scratch-1";
+
+    /// A policy that allows everything the protection does not refuse, rule by rule, so a
+    /// protected call is also one an `allow` rule names.
+    const ALLOW_ALL: &str = r#"
+default = "allow"
+[[rules]]
+note = "edits are fine"
+effect = "allow"
+match = { action = "edit" }
+[[rules]]
+note = "commands are fine"
+effect = "allow"
+match = { action = "command", command = "*" }
+"#;
+
+    fn edit_of(paths: &[&str]) -> ApprovalSubject {
+        let mut subject = gate_edit("c1", paths[0]);
+        subject.paths = paths.iter().map(Into::into).collect();
+        subject
+    }
+
+    /// Run each subject as one call of a `reno` run and say what the ladder answered, in order.
+    async fn judged(
+        extra: &str,
+        policy: &str,
+        subjects: &[ApprovalSubject],
+    ) -> Vec<(ApprovalOutcome, ResolvedBy, Option<String>)> {
+        let calls = subjects
+            .iter()
+            .enumerate()
+            .map(|(n, subject)| (format!("r{n}"), subject.clone()))
+            .collect::<Vec<_>>();
+        let steps = script(
+            calls
+                .iter()
+                .map(|(id, subject)| (id.as_str(), subject.clone()))
+                .collect(),
+        );
+        let rig = reno_rig(policy, extra, steps).await;
+        let run = rig.run_as("keeper").await;
+        rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+        assert!(rig.fx.kernel.pending_approvals().await.unwrap().is_empty());
+        let journal = rig.fx.journal_with_done(&run).await;
+        let got = resolved(&journal);
+        assert_eq!(got.len(), subjects.len(), "{got:?}");
+        got.into_iter()
+            .map(|(_, outcome, by, message)| (outcome, by, message))
+            .collect()
+    }
+
+    fn protected() -> ResolvedBy {
+        ResolvedBy::Rule {
+            name: PROTECTED_RULE.into(),
+        }
+    }
+
+    fn rows_of_edits() -> Vec<(&'static str, ApprovalSubject)> {
+        let edit = |paths: &[&str]| edit_of(paths);
+        vec![
+            (
+                "the gate extension",
+                edit(&[&format!("{SCRATCH}/.reno/gate.mjs")]),
+            ),
+            (
+                "a Pi session file in the data directory",
+                edit(&[&format!("{DATA}/harness/.reno/pi-sessions/x/s.jsonl")]),
+            ),
+            (
+                "the data directory itself",
+                edit(&[&format!("{DATA}/reno.db")]),
+            ),
+            ("git config, relative", edit(&[".git/config"])),
+            ("git config, absolute", edit(&["/work/tree/.git/config"])),
+            (
+                "a dot-dot that lands in .reno",
+                edit(&["src/../.reno/policy.toml"]),
+            ),
+            (
+                "a dot-dot that lands in .reno, absolute",
+                edit(&["/work/tree/a/../.reno/x"]),
+            ),
+            (
+                "a dot-dot that leaves and enters a repository",
+                edit(&["/work/tree/x/../../outside/.git/hooks/pre-push"]),
+            ),
+            ("a dot-dot above the root", edit(&["/../.reno/x"])),
+            ("a dot-dot between the two", edit(&[".reno/../.git/config"])),
+            ("a current-directory dot", edit(&["./.reno/./x"])),
+            ("doubled and trailing separators", edit(&["a//.reno//x/"])),
+            (".RENO", edit(&[".RENO/policy.toml"])),
+            (".rEnO", edit(&["x/.rEnO/defs/bot.toml"])),
+            (".Git", edit(&[".Git/hooks/pre-commit"])),
+            (".GIT, absolute", edit(&["/work/tree/a/../.GIT/config"])),
+            (
+                "the data directory in capitals",
+                edit(&["/Users/u/LIBRARY/APPLICATION SUPPORT/RENO/harness/x"]),
+            ),
+            (
+                "the data directory in lower case",
+                edit(&["/Users/u/library/application support/reno/reno.db"]),
+            ),
+            (
+                "a path under the home Pi expanded for ~",
+                edit(&["/Users/u/.reno/policy.toml"]),
+            ),
+            (
+                "a ~ left as written when no home is known",
+                edit(&["~/.reno/policy.toml"]),
+            ),
+            (
+                "a refused URL: the decoded path first",
+                edit(&["/work/a/.reno/x", "file:///work/a%2F.reno/x"]),
+            ),
+            (
+                "a refused URL: the text as written first",
+                edit(&["file:///work/a%2F.reno/x", "/work/a/.reno/x"]),
+            ),
+            (
+                "a refused URL naming another host",
+                edit(&["/work/.git/x", "file://other/work/.git/x"]),
+            ),
+            (
+                "a protected path among several",
+                edit(&["src/lib.rs", "docs/a.md", ".reno/x"]),
+            ),
+        ]
+    }
+
+    fn rows_of_commands() -> Vec<(&'static str, ApprovalSubject)> {
+        let bash = |line: &str| gate_bash("c1", line);
+        vec![
+            (
+                "rm of the gate extension",
+                bash(&format!("rm {SCRATCH}/.reno/gate.mjs")),
+            ),
+            (
+                "rm of a session file in the data directory",
+                bash(&format!(
+                    "rm \"{DATA}/harness/.reno/pi-sessions/x/s.jsonl\""
+                )),
+            ),
+            (
+                "a redirect onto a session file",
+                bash(&format!(
+                    "echo x > \"{DATA}/harness/.reno/pi-sessions/x/s.jsonl\""
+                )),
+            ),
+            (
+                "an appending redirect onto a session file",
+                bash(&format!(
+                    "echo x >> {DATA_ESCAPED}/harness/.reno/pi-sessions/x/s.jsonl"
+                )),
+            ),
+            (
+                "rm of the store",
+                bash(&format!("rm {DATA_ESCAPED}/reno.db")),
+            ),
+            (
+                "a redirect onto the policy",
+                bash("echo x > .reno/policy.toml"),
+            ),
+            ("tee onto git config", bash("echo x | tee .git/config")),
+            ("sed -i on git config", bash("sed -i s/a/b/ .git/config")),
+            ("cp onto a hook", bash("cp evil .git/hooks/pre-commit")),
+            ("rm through a dot-dot", bash("rm -rf src/../.reno")),
+            ("rm of .GIT", bash("rm .GIT/config")),
+            (
+                "rm of the data directory in capitals",
+                bash("rm \"/Users/u/LIBRARY/APPLICATION SUPPORT/RENO/reno.db\""),
+            ),
+            ("sudo rm", bash("sudo rm .reno/policy.toml")),
+            (
+                "a shell script that removes",
+                bash("bash -lc 'rm .reno/policy.toml'"),
+            ),
+            (
+                "a tilde path that names .reno",
+                bash("rm ~/.reno/policy.toml"),
+            ),
+        ]
+    }
+
+    const DATA_ESCAPED: &str = "/Users/u/Library/Application\\ Support/Reno";
+
+    #[tokio::test(start_paused = true)]
+    async fn an_edit_of_a_protected_path_is_denied_in_every_mode_before_any_allow() {
+        let rows = rows_of_edits();
+        let subjects: Vec<_> = rows.iter().map(|(_, subject)| subject.clone()).collect();
+        for (mode, extra) in MODES {
+            for policy in [ALLOW_ALL, "default = \"allow\"\n"] {
+                let got = judged(extra, policy, &subjects).await;
+                for ((name, _), (outcome, by, message)) in rows.iter().zip(got) {
+                    assert_eq!(outcome, ApprovalOutcome::Denied, "{name} at {mode}");
+                    assert_eq!(by, protected(), "{name} at {mode}");
+                    let message = message.unwrap_or_default();
+                    assert!(
+                        message.starts_with("denied: `") && message.contains("is protected"),
+                        "{name}: {message}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_command_that_writes_a_protected_path_is_denied_in_every_mode_before_any_allow() {
+        let rows = rows_of_commands();
+        let subjects: Vec<_> = rows.iter().map(|(_, subject)| subject.clone()).collect();
+        for (mode, extra) in MODES {
+            let got = judged(extra, ALLOW_ALL, &subjects).await;
+            for ((name, _), (outcome, by, _)) in rows.iter().zip(got) {
+                assert_eq!(outcome, ApprovalOutcome::Denied, "{name} at {mode}");
+                assert_eq!(by, protected(), "{name} at {mode}");
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_protection_leaves_the_neighbours_of_a_protected_name_alone() {
+        let read_of_reno = gate_call(
+            "read",
+            "c1",
+            serde_json::json!({ "path": ".reno/policy.toml" }),
+            &[".reno/policy.toml"],
+        );
+        let rows: Vec<(&str, ApprovalSubject)> = vec![
+            ("an ordinary file", gate_edit("c1", "src/lib.rs")),
+            (".gitignore", gate_edit("c1", ".gitignore")),
+            (".github", gate_edit("c1", ".github/ci.yml")),
+            ("a directory named reno", gate_edit("c1", "reno/x")),
+            (
+                "a dot-dot that leaves .reno before the file",
+                gate_edit("c1", ".reno/../src/a.rs"),
+            ),
+            (
+                "a dot-dot that leaves .git before the file",
+                gate_edit("c1", "docs/.git/../x"),
+            ),
+            (
+                "a path that only ends at .reno",
+                gate_edit("c1", "a/.reno/.."),
+            ),
+            (
+                "the data directory's name inside the worktree",
+                gate_edit("c1", "Library/Application Support/Reno/x"),
+            ),
+            ("a read of .reno", read_of_reno),
+            (
+                "a command that reads .reno",
+                gate_bash("c1", "cat .reno/policy.toml"),
+            ),
+            ("git itself", gate_bash("c1", "git status")),
+            ("git config", gate_bash("c1", "git config user.name x")),
+            ("an ordinary redirect", gate_bash("c1", "echo hi > out.txt")),
+        ];
+        let subjects: Vec<_> = rows.iter().map(|(_, subject)| subject.clone()).collect();
+        for (mode, extra) in MODES {
+            let got = judged(extra, ALLOW_ALL, &subjects).await;
+            for ((name, _), (outcome, by, _)) in rows.iter().zip(got) {
+                assert_eq!(outcome, ApprovalOutcome::Approved, "{name} at {mode}");
+                assert_ne!(by, protected(), "{name} at {mode}");
+            }
+        }
+    }
+}
