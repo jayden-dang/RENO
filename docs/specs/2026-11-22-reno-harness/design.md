@@ -275,8 +275,10 @@ Flow:
     `GateHost::decide(id, .., message)`.
   - A cancel, or the end of the run, denies all open gate requests (`drain`) before Pi's process group goes, as
     `dismiss_all` does for dialogs.
-- **Credential check (2.7).** At arming, and before each call is raised, the host checks (one `stat`) whether
-  `<agent dir>/auth.json` exists. If it does, it denies the waiting call, drains every open request, and ends the run
+- **Credential check (2.7).** At arming, and before each call is raised, the host reads `<agent dir>/auth.json`.
+  A missing file, or one that parses to an empty JSON object, is clean. Pi writes `{}` itself when the file is missing
+  (Pi `core/auth-storage.js:40-43,62-64,314-322`). Anything else, an unparsable file included (fail closed), is a
+  stored credential. Then it denies the waiting call, drains every open request, and ends the run
   with `Done{stop: Error, diagnostic: "a credential file appeared in the run's Pi agent directory (auth.json)"}`. The
   check is in the driver rather than in `gate.mjs`, because the driver is out of the run's reach. This keeps the
   semantics of the interpret pick (Weigh) and moves only where it runs.
@@ -411,7 +413,7 @@ Locality: leave. Text only.
 | Proto definitions (`crates/reno-proto/src/defs/tests.rs`) | unit | RENOHARNESS-1.7, 10.7, 10.8 |
 | `apps/renod/src/executors.rs` tests (`built_in_ids_are_valid` and discover) | unit | RENOHARNESS-1.1, 1.2, 10.6 |
 | Conformance `reno_target()` (`crates/reno-harness/tests/conformance/targets.rs`) with an approval plan | integration | RENOHARNESS-3.1, 3.3, 3.4 |
-| Live Pi, `#[ignore]` + `RENO_PI_LIVE=1`, mock provider by `-e` (no key, no network) | e2e | RENOHARNESS-3.2, 5.1, 8.5 (real Pi), and the latency report |
+| Live Pi, `#[ignore]` + `RENO_PI_LIVE=1`, mock provider by `-e` (no key, no network) | e2e | RENOHARNESS-3.2, 5.1, 8.5 and 2.7 (a real Pi arms with its own `{}` `auth.json` present, and a planted credential ends the run), and the latency report |
 | Docs check (a test asserting the retired README line is gone and the new one present) | unit | RENOHARNESS-9.1, 9.2, 9.3 |
 
 New seams: two. They are the node test for `gate.mjs`, because the fake Pi cannot run JS, and the

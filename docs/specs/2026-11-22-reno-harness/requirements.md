@@ -40,7 +40,7 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-2.4** THE SYSTEM SHALL pass a run's provider key to Pi through the environment only, never on Pi's command line. [agent-decided]
 - **RENOHARNESS-2.5** (guard) IF a secret that a bot lists is not set THEN THE SYSTEM SHALL CONTINUE TO refuse to start the run, naming the secret, on `reno` as on every executor.
 - **RENOHARNESS-2.6** (guard) WHEN a run on `reno` prints to stderr or reaches the journal THE SYSTEM SHALL CONTINUE TO replace the run's secret values (exact match, 8 bytes or longer) with their `[secret:NAME]` mark in what is logged, kept or journaled.
-- **RENOHARNESS-2.7** IF an `auth.json` is found in the run's Pi agent directory, when the attempt is armed or before a call on `reno` is raised, THEN THE SYSTEM SHALL end the run failed, denying any call that is waiting, with a reason naming the file. Pi ranks a stored `auth.json` above the environment key (Pi `docs/models.md:22`), so the file would put the attempt on a credential that is not the bot's. [Lock L7; Weigh: check pick]
+- **RENOHARNESS-2.7** IF the run's Pi agent directory holds an `auth.json` with any content other than an empty JSON object, when the attempt is armed or before a call on `reno` is raised, THEN THE SYSTEM SHALL end the run failed, denying any call that is waiting, with a reason naming the file. Pi writes `{}` there itself when the file is missing (Pi `core/auth-storage.js:40-43`), and a missing file or `{}` holds no credential. Pi ranks a stored `auth.json` above the environment key (Pi `docs/models.md:22`), so a stored credential would put the attempt on one that is not the bot's. [Lock L7; Weigh: check pick]
 
 ## 3. Every tool call passes Reno's policy before it runs
 
