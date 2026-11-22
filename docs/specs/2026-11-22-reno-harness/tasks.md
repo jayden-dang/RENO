@@ -465,7 +465,7 @@ _Requirements: RENOHARNESS-2.8, RENOHARNESS-2.9, RENOHARNESS-5.1, RENOHARNESS-5.
 
 **Depends-on:** Task 5, Task 6
 
-- [ ] Write failing tests (fake Pi in `FAKE_PI_GATE=ok`, decisions sent through `ExecHandle::decide` /
+- [x] Write failing tests (fake Pi in `FAKE_PI_GATE=ok`, decisions sent through `ExecHandle::decide` /
   `decide_with_message`):
   - `gate-coverage` raises one `NeedsApproval` per call: read, grep, find, ls, bash, edit, write, MCP, three siblings
     one after another, and a nested codemode call. Each has its action class (Task 5's table) and keeps the tool, the
@@ -477,12 +477,12 @@ _Requirements: RENOHARNESS-2.8, RENOHARNESS-2.9, RENOHARNESS-5.1, RENOHARNESS-5.
   - Per-turn `Usage` is still emitted.
   - A cancel denies every open gate request, and the cancelled attempt leaves no scratch behind.
   - `gate-flood` gets its 17th call denied, and the run ends.
-- [ ] Run `cargo test -p reno-harness --test pi reno_calls`, and expect no `NeedsApproval` to be raised.
-- [ ] Implement `next`, `decide` and the writer task: a bounded channel on the `PiExecutor`'s `TaskTracker`, owned by
+- [x] Run `cargo test -p reno-harness --test pi reno_calls`, and expect no `NeedsApproval` to be raised.
+- [x] Implement `next`, `decide` and the writer task: a bounded channel on the `PiExecutor`'s `TaskTracker`, owned by
   `Run` and aborted in `teardown`. Add the `Player::play` arm (`subject` → `OpenRequests::open_approval` →
   `emit(NeedsApproval)`; `answers` → `decide`) and the drain on cancel.
-- [ ] Run, and expect a pass.
-- [ ] `git commit -m "feat(harness): hold each Reno-harness tool call for the kernel's approval ladder"`
+- [x] Run, and expect a pass.
+- [x] `git commit -m "feat(harness): hold each Reno-harness tool call for the kernel's approval ladder"`
 
 _Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.1, RENOHARNESS-8.2, RENOHARNESS-11.2, RENOHARNESS-11.3_
 
