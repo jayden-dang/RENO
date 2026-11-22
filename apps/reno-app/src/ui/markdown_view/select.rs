@@ -84,15 +84,22 @@ impl Map {
         let last = segs.iter().rev().find(|s| s.layout.start < layout.end);
         let first = first.and_then(|s| Some((s, atoms.get(s.atom)?)));
         let last = last.and_then(|s| Some((s, atoms.get(s.atom)?)));
+        // A range that reaches an edge of the block takes the markers there with it.
+        let at_front = layout.start <= segs.first().map_or(0, |s| s.layout.start);
+        let at_back = segs.last().is_some_and(|s| layout.end >= s.layout.end);
         let start = first.map_or(0, |(seg, atom)| {
-            if atom.is_atomic() {
+            if let (true, Some(block)) = (at_front, &atom.block) {
+                block.start
+            } else if atom.is_atomic() {
                 atom.src.start
             } else {
                 atom.src_at(layout.start.saturating_sub(seg.layout.start))
             }
         });
         let end = last.map_or(start, |(seg, atom)| {
-            if atom.is_atomic() {
+            if let (true, Some(block)) = (at_back, &atom.block) {
+                block.end
+            } else if atom.is_atomic() {
                 atom.src.end
             } else {
                 atom.src_at(layout.end - seg.layout.start)
@@ -194,8 +201,7 @@ impl Piece {
     /// spaces a wrapped row ends in.
     fn line_at(&self, over: Point<Pixels>, text: &str) -> Range<usize> {
         let bounds = self.layout.bounds();
-        let last_row = (bounds.bottom() - px(1.0)).max(bounds.top());
-        let y = over.y.max(bounds.top()).min(last_row);
+        let y = over.y.clamp(bounds.top(), bounds.bottom() - px(1.0));
         let index = |x| {
             let (Ok(at) | Err(at)) = self.layout.index_for_position(point(x, y));
             at.min(text.len())
@@ -520,7 +526,47 @@ mod tests {
         let (map, _) = atoms_map("a **bold** and *it*");
         assert_eq!(map.source_range(2..6), 4..8);
         assert_eq!(map.source_range(7..10), 11..14);
-        assert_eq!(map.source_range(0..13), 0..18);
+        assert_eq!(
+            map.source_range(0..13),
+            0..19,
+            "the last run's closing marker is the block's"
+        );
+    }
+
+    #[test]
+    fn a_range_from_the_first_drawn_byte_of_a_block_starts_at_its_source() {
+        // Drawn: "Bold text".
+        let (map, len) = atoms_map("**Bold** text");
+        assert_eq!(map.source_range(0..len), 0..13);
+        assert_eq!(
+            map.source_range(0..4),
+            0..6,
+            "the opening marker, not the closing"
+        );
+        assert_eq!(
+            map.source_range(1..4),
+            3..6,
+            "inside the first run it stays"
+        );
+    }
+
+    #[test]
+    fn a_range_to_the_last_drawn_byte_of_a_block_ends_at_its_source() {
+        // Drawn: "see it".
+        let (map, len) = atoms_map("see *it*");
+        assert_eq!(
+            map.source_range(4..len),
+            5..8,
+            "the closing marker, not the opening"
+        );
+        assert_eq!(map.source_range(0..len), 0..8);
+        assert_eq!(map.source_range(4..5), 5..6, "short of the end it stays");
+    }
+
+    #[test]
+    fn a_block_edge_extends_over_the_blank_lines_around_the_block_only_up_to_its_text() {
+        let (map, len) = atoms_map("**Bold**\n\nplain *it*\n");
+        assert_eq!(map.source_range(0..len), 0..8 + 2 + 10);
     }
 
     #[test]

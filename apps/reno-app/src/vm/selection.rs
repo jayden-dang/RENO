@@ -95,8 +95,8 @@ impl Selection {
         self.anchor == self.head
     }
 
-    /// The selection after a shift-click at `at`: it reaches the click from the end it is
-    /// farther from, so a click before it extends it backwards.
+    /// The selection after a shift-click at `at`: a click before the selection keeps its end and
+    /// extends it backwards; a click inside it or after it keeps its start.
     pub(crate) fn extended_to(&self, at: Pos) -> Self {
         let (start, end) = self.ordered();
         Self {
@@ -309,7 +309,7 @@ pub(crate) struct Anchor {
     pub(crate) range: Option<Range<usize>>,
 }
 
-pub(crate) fn covered<'a>(
+fn covered<'a>(
     sel: &'a Selection,
     entries: &'a [Entry<'a>],
     shown: &'a Shown<'a>,

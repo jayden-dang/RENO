@@ -510,8 +510,8 @@ fn shift_click_extends_the_selection(cx: &mut TestAppContext) {
     let copied = copy_with_the_keyboard(vcx);
     let (head, tail) = copied.split_once("\n\n").expect("two entries");
     assert_eq!(head, "transcript has to draw.", "the word stays selected");
-    assert!(
-        FIRST_PARAGRAPH.starts_with(tail) && tail.len() > "Here is every kind of c".len(),
+    assert_eq!(
+        tail, "Here is every kind of content the tran",
         "up to the click: {copied:?}"
     );
 
@@ -552,5 +552,32 @@ fn copy_as_markdown_gives_the_source_with_its_math_delimiters(cx: &mut TestAppCo
     assert!(
         source.contains("[supervisor](src/supervisor.rs:42)"),
         "{source}"
+    );
+}
+
+#[gpui::test]
+fn triple_click_in_a_reply_copies_the_closing_marker_of_the_paragraph_as_markdown(
+    cx: &mut TestAppContext,
+) {
+    let (_store, _root, vcx, screen) = open(cx);
+    // The last paragraph before the note ends in inline code.
+    for _ in 0..4 {
+        let y = screen
+            .read_with(vcx, |s, _| s.painted_point("supervisor.rs:42", 4))
+            .map_or(px(0.0), |p| p.y);
+        screen.update(vcx, |s, cx| {
+            s.list.scroll_by(y - px(400.0));
+            cx.notify();
+        });
+        draw(vcx);
+    }
+    let at = on_text(vcx, &screen, "supervisor.rs:42");
+    press(vcx, at, 3, Modifiers::none());
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()));
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    let source = clipboard(vcx).unwrap();
+    assert!(
+        source.ends_with("at `src/supervisor.rs:42`"),
+        "the closing backtick comes with the row: {source:?}"
     );
 }

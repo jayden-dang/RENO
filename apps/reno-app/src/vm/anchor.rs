@@ -65,6 +65,10 @@ pub(crate) struct Atom {
     /// What comes before it when copied after another atom.
     pub(crate) gap: Gap,
     shape: Shape,
+    /// The source of the paragraph or heading this run is in, without the blank lines around
+    /// it: where a selection that reaches the block's edge extends to, so the markers there
+    /// (`**`, a closing backtick) come with it. Empty for a run in any other block.
+    pub(crate) block: Option<Range<usize>>,
 }
 
 impl Atom {
@@ -76,6 +80,7 @@ impl Atom {
             copy: text.to_owned(),
             gap: Gap::Line,
             shape: Shape::Exact,
+            block: None,
         }
     }
 
@@ -184,10 +189,13 @@ pub(crate) fn atoms(source: &str, tree: &BlockTree) -> Vec<Atom> {
         cursor: 0,
         end: source.len(),
         lead: Gap::Joined,
+        block: None,
     };
     for top in &tree.blocks {
         b.cursor = top.range.start.min(source.len());
         b.end = top.range.end.min(source.len());
+        b.block = matches!(top.block, Block::Paragraph { .. } | Block::Heading { .. })
+            .then(|| trimmed(source, b.cursor..b.end));
         b.block(&top.block, Gap::Blank);
     }
     b.out
@@ -202,10 +210,20 @@ struct Builder<'a> {
     end: usize,
     /// What goes before the next atom made.
     lead: Gap,
+    /// The trimmed source of the top-level block being walked, when it is a paragraph or a heading.
+    block: Option<Range<usize>>,
+}
+
+/// `range` of `source` without the whitespace at its ends.
+fn trimmed(source: &str, range: Range<usize>) -> Range<usize> {
+    let text = source.get(range.clone()).unwrap_or_default();
+    let start = range.start + (text.len() - text.trim_start().len());
+    start..(range.end - (text.len() - text.trim_end().len())).max(start)
 }
 
 impl Builder<'_> {
     fn push(&mut self, mut atom: Atom) {
+        atom.block.clone_from(&self.block);
         atom.gap = if self.out.is_empty() {
             Gap::Joined
         } else {
@@ -230,6 +248,7 @@ impl Builder<'_> {
                         copy: fenced,
                         gap: Gap::Joined,
                         shape: Shape::Whole,
+                        block: None,
                     });
                     self.cursor = to;
                 } else {
@@ -250,6 +269,7 @@ impl Builder<'_> {
                     src,
                     gap: Gap::Joined,
                     shape: Shape::Whole,
+                    block: None,
                 });
             }
             Block::BlockQuote { children } => {
@@ -302,6 +322,7 @@ impl Builder<'_> {
                 src,
                 gap: Gap::Joined,
                 shape: Shape::Whole,
+                block: None,
             };
         }
         if style.math {
@@ -314,6 +335,7 @@ impl Builder<'_> {
                 src,
                 gap: Gap::Joined,
                 shape: Shape::Whole,
+                block: None,
             };
         }
         let (src, shape) = self.find_text(&run.text);
@@ -334,6 +356,7 @@ impl Builder<'_> {
             copy,
             gap: Gap::Joined,
             shape,
+            block: None,
         }
     }
 

@@ -565,7 +565,7 @@ And one from the network:
 
 ![status](https://example.com/status.png)
 
-The wait is in [supervisor](src/supervisor.rs:42), at `src/supervisor.rs:42`.
+The wait is in [supervisor](src/supervisor.rs:42), at `src/supervisor.rs:42`
 
 > [!NOTE]
 > The remote image is shown as a link, and nothing is fetched.
