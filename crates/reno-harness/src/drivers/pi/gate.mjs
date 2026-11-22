@@ -15,6 +15,8 @@ import { connect } from "node:net";
 
 export const MAX_OUTSTANDING = 16;
 export const MAX_WAITING = 256;
+// The longest reply Reno may send without a newline. It is checked once per received chunk, so the
+// line that trips it is one chunk past 1 MiB.
 const MAX_LINE = 1 << 20;
 
 const block = (reason) => ({ block: true, reason });
@@ -25,6 +27,7 @@ export default function (pi) {
   let ready;
   let lostReason = cannotJudge("the gate is not connected");
   let live = false;
+  let connected = false;
   let nextId = 0;
   const outstanding = new Map();
   const waiting = [];
@@ -104,6 +107,7 @@ export default function (pi) {
       socket = conn;
       conn.once("connect", () => {
         live = true;
+        connected = true;
         conn.write(JSON.stringify({ t: "hello", nonce }) + "\n");
         resolve();
       });
@@ -111,7 +115,7 @@ export default function (pi) {
       conn.on("error", () => {});
       conn.on("close", () => {
         if (live) lose("the connection to Reno closed");
-        else lostReason = cannotJudge("Reno's socket could not be reached");
+        else if (!connected) lostReason = cannotJudge("Reno's socket could not be reached");
         resolve();
       });
     });

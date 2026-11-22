@@ -2,13 +2,28 @@
 // plays the driver. Run as `node pi-gate-test.mjs <path to gate.mjs>`. Pi is not involved: the gate
 // is an extension function, driven with the calls Pi makes of it (`on`, `registerCommand`).
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { Socket, createServer } from "node:net";
 import { join } from "node:path";
 
+// The gate must not measure time at all: trap every way it could, for the whole run.
+const clock = [];
+for (const name of ["setTimeout", "setInterval"]) {
+  const real = globalThis[name];
+  globalThis[name] = (...args) => (clock.push(name), real(...args));
+}
+const realNow = Date.now;
+Date.now = () => (clock.push("Date.now"), realNow());
+const realSocketTimeout = Socket.prototype.setTimeout;
+Socket.prototype.setTimeout = function (...args) {
+  clock.push("socket.setTimeout");
+  return realSocketTimeout.apply(this, args);
+};
+assert.doesNotMatch(readFileSync(process.argv[2], "utf8"), /setTimeout|setInterval|Date\.now|AbortSignal\.timeout/);
+
 const { default: extension, MAX_OUTSTANDING, MAX_WAITING } = await import(process.argv[2]);
-const dir = mkdtempSync(join(tmpdir(), "reno-pi-gate-test-"));
+// A short directory, so the socket path stays within sun_path whatever TMPDIR is.
+const dir = mkdtempSync("/tmp/rg-");
 const NONCE = "nonce-1234";
 let sockets = 0;
 
@@ -153,12 +168,12 @@ async function connected() {
   const never = await load(join(dir, "nobody.sock"), { start: false });
   const early = await never.call("bash", { command: "ls" });
   assert.equal(early.block, true);
-  assert.match(early.reason, /Reno/);
+  assert.match(early.reason, /not connected/);
 
   const absent = await load(join(dir, "nobody.sock"));
   const result = await absent.call("bash", { command: "ls" });
   assert.equal(result.block, true);
-  assert.match(result.reason, /Reno/);
+  assert.match(result.reason, /could not be reached/);
 }
 
 // A closed socket blocks the call in flight and every call after it.
@@ -170,13 +185,13 @@ async function connected() {
   peer.conn.destroy();
   const blocked = await open;
   assert.equal(blocked.block, true);
-  assert.match(blocked.reason, /Reno/);
+  assert.match(blocked.reason, /the connection to Reno closed/);
   const after = await gate.call("bash", { command: "ls" });
-  assert.equal(after.block, true);
+  assert.deepEqual(after, blocked, "the reason survives the socket closing");
 }
 
 // A malformed line blocks the call in flight and every call after it.
-for (const garbage of ["this is not json\n", "[1,2]\n", `{"t":"decision","id":9999,"decision":"allow"}\n`, `{"t":"decision","id":1,"decision":"maybe"}\n`]) {
+for (const garbage of ["this is not json\n", "[1,2]\n", `{"t":"decision","id":9999,"decision":"allow"}\n`, `{"t":"decision","id":1,"decision":"maybe"}\n`, "x".repeat(2 << 20)]) {
   const { peer, gate } = await connected();
   await peer.next();
   const open = gate.call("bash", { command: "ls" });
@@ -184,9 +199,11 @@ for (const garbage of ["this is not json\n", "[1,2]\n", `{"t":"decision","id":99
   peer.raw(garbage);
   const blocked = await open;
   assert.equal(blocked.block, true, garbage);
-  assert.match(blocked.reason, /Reno/);
+  assert.match(blocked.reason, garbage.length > 1000 ? /too long/ : /malformed/);
+  await turns(20);
+  assert.equal(peer.closed, true, "the gate drops the connection it cannot trust");
   const after = await gate.call("bash", { command: "ls" });
-  assert.equal(after.block, true, garbage);
+  assert.deepEqual(after, blocked, garbage.slice(0, 40));
 }
 
 // A handler that throws blocks the call and every call after it, even one the driver would allow.
@@ -197,10 +214,9 @@ for (const garbage of ["this is not json\n", "[1,2]\n", `{"t":"decision","id":99
   circular.self = circular;
   const thrown = await gate.call("bash", circular);
   assert.equal(thrown.block, true);
-  assert.match(thrown.reason, /Reno/);
-  const after = gate.call("bash", { command: "ls" });
-  const result = await after;
-  assert.equal(result.block, true);
+  assert.match(thrown.reason, /could not be described/);
+  const result = await gate.call("bash", { command: "ls" });
+  assert.deepEqual(result, thrown);
 }
 
 // There is no timer of its own: a reply withheld across 1000 turns of the event loop leaves the
@@ -263,4 +279,6 @@ for (const garbage of ["this is not json\n", "[1,2]\n", `{"t":"decision","id":99
   assert.equal(peer.closed, false);
 }
 
+assert.deepEqual(clock, [], "the gate never reads a clock or sets a timer");
+rmSync(dir, { recursive: true, force: true });
 process.exit(0);

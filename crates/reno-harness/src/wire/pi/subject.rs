@@ -13,13 +13,11 @@ use super::normalize::action_class;
 /// The subject of the gate call `call_id` to `tool`, made by `parent` when another tool made it.
 ///
 /// A command is `input.command`. Edits and reads name `input.path`; `grep`, `find` and `ls` may
-/// omit it (meaning the working directory), which leaves no path. Paths are kept as written. A
+/// omit it (meaning the working directory), which leaves no path. A path is spelled as Pi will
+/// open it (see [`opened_path`]), otherwise kept as written. A
 /// `find` pattern and a `grep` glob are not paths and stay only in `raw`, which is the call as
 /// the gate sent it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the driver reads gate calls from Task 6 on")
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "nothing reads gate calls yet"))]
 pub(crate) fn subject(
     tool: &str,
     call_id: &str,
@@ -33,7 +31,7 @@ pub(crate) fn subject(
         .flatten();
     let paths = match action {
         ActionClass::Edit | ActionClass::Read => {
-            text("path").map(PathBuf::from).into_iter().collect()
+            text("path").map(opened_path).into_iter().collect()
         }
         _ => Vec::new(),
     };
@@ -49,6 +47,41 @@ pub(crate) fn subject(
             "input": input,
         }),
     }
+}
+
+/// The path Pi opens for a tool's `path` argument, as far as it changes which components the
+/// protection sees: one leading `@` is dropped, and a `file://` URL (empty or `localhost`
+/// authority) becomes its percent-decoded path. `~` is left, since `~/.reno` already names `.reno`.
+fn opened_path(path: &str) -> PathBuf {
+    let path = path.strip_prefix('@').unwrap_or(path);
+    let Some(rest) = path.strip_prefix("file://") else {
+        return PathBuf::from(path);
+    };
+    let (authority, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if !(authority.is_empty() || authority == "localhost") || tail.is_empty() {
+        return PathBuf::from(path);
+    }
+    let bytes = tail.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|pair| std::str::from_utf8(pair).ok())
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+        match hex {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    PathBuf::from(String::from_utf8_lossy(&decoded).into_owned())
 }
 
 #[cfg(test)]
@@ -85,6 +118,36 @@ mod tests {
                 unnamed.paths.is_empty(),
                 "{tool}: the working directory is no path"
             );
+        }
+    }
+
+    #[test]
+    fn a_path_is_what_pi_will_open_not_what_the_model_typed() {
+        let rows = [
+            ("@.reno/policy.toml", ".reno/policy.toml"),
+            ("@.git/hooks/pre-commit", ".git/hooks/pre-commit"),
+            ("@@x", "@x"),
+            ("@", ""),
+            ("src/lib.rs", "src/lib.rs"),
+            ("/work/.reno/x", "/work/.reno/x"),
+            ("docs/a@b/c", "docs/a@b/c"),
+            ("~/.reno/x", "~/.reno/x"),
+            ("file:///work/.reno/x", "/work/.reno/x"),
+            ("file:///work/%2Ereno/x", "/work/.reno/x"),
+            ("file://localhost/work/%2egit/x", "/work/.git/x"),
+            ("@file:///work/%2Ereno/x", "/work/.reno/x"),
+            ("file://other/work/x", "file://other/work/x"),
+            ("file:///work/%zz/x", "/work/%zz/x"),
+        ];
+        for tool in ["read", "ls", "grep", "find", "edit", "write"] {
+            for (typed, opened) in rows {
+                let subject = subject(tool, "c1", None, &json!({ "path": typed }));
+                assert_eq!(paths(&subject), [opened], "{tool} {typed}");
+                assert_eq!(
+                    subject.raw["input"]["path"], typed,
+                    "{tool}: raw is as sent"
+                );
+            }
         }
     }
 
