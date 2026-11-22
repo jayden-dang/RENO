@@ -162,7 +162,7 @@ Surface:
 Interface:
 ```
 // layout, per attempt:  <scratch>/.reno/{gate.mjs, gate.sock, agent/, reno-mcp.mjs, mcp-servers.json, instructions.md}
-// argv (Reno):  --mode rpc --no-themes --no-extensions --no-skills --no-prompt-templates
+// argv (Reno):  --mode rpc --no-themes --no-extensions --no-skills --no-prompt-templates --no-approve
 //               --session-dir <sessions_root>/<run_id> [--session-id <id>] [--append-system-prompt <file>]
 //               -e builtin:mcp -e builtin:codemode [--extension <bridge>] --extension <gate>      (gate last)
 // env (Reno):   restrict(RENO)  — BASE only: no PI_* and no provider variable from the daemon
@@ -179,6 +179,9 @@ Details:
   agent dir, socket and nonce (a uuid v4). The 5.5 re-arm comes for free.
 - **Session dir (8.4).** It is created by the launch if absent, with mode 0700. The run id is the same across
   attempts (`dispatcher.rs:393`), so a resume's `--session-id` finds the session.
+- **Project trust.** `--no-approve` makes Pi ignore the working folder's `.pi/` resources (Pi `cli/args.js:232,335`;
+  `docs/security.md:37-42`). The explicit `--session-dir` outranks a project `sessionDir` setting, which Pi reads before
+  trust (`docs/security.md:31`). `AGENTS.md` context files still load (`launch.rs:20-22`), as they do for `pi`.
 - **Built-in MCP.** `--no-mcp` is not passed on `Reno`. With an agent dir that holds no `mcp.json`, Pi's built-in
   MCP loads no server, and Reno's bridge is the only source of MCP tools.
 - **Codemode.** Whether Pi also needs `--tools +codemode` for the codemode tool is checked by the live test. The
@@ -226,7 +229,7 @@ Rules the file implements:
 
 ### The gate host (in the driver)
 
-Satisfies: RENOHARNESS-3.1, RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-6.6, RENOHARNESS-7.2,
+Satisfies: RENOHARNESS-2.7, RENOHARNESS-3.1, RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-6.6, RENOHARNESS-7.2,
 RENOHARNESS-8.2, RENOHARNESS-11.1, RENOHARNESS-11.2
 Reuse: rung 2 and rung 5:
 - the approval open/answer/deny-all pattern of the Claude driver (`drivers/claude/mod.rs:1070,1089-1225`) and
@@ -272,6 +275,11 @@ Flow:
     `GateHost::decide(id, .., message)`.
   - A cancel, or the end of the run, denies all open gate requests (`drain`) before Pi's process group goes, as
     `dismiss_all` does for dialogs.
+- **Credential check (2.7).** At arming, and before each call is raised, the host checks (one `stat`) whether
+  `<agent dir>/auth.json` exists. If it does, it denies the waiting call, drains every open request, and ends the run
+  with `Done{stop: Error, diagnostic: "a credential file appeared in the run's Pi agent directory (auth.json)"}`. The
+  check is in the driver rather than in `gate.mjs`, because the driver is out of the run's reach. This keeps the
+  semantics of the interpret pick (Weigh) and moves only where it runs.
 - **Bound (11.2).** More than `MAX_OPEN_GATE_CALLS` (16) open requests means a broken gate. The excess call is
   denied with a reason, and the connection is closed, which is 6.6.
 - **Lost connection (6.6).** `GateHost::next() == None` while the run goes on ends it as
@@ -303,9 +311,11 @@ of the installed Pi 1.5.0 source (`/opt/homebrew/lib/node_modules/@earendil-work
 - **Result:** no reload of settings or extensions is reachable by a run within an attempt. So a file written into
   the agent dir cannot displace the gate before the attempt ends, and RENOHARNESS-7.5 covers the next attempt.
 - **What a run can still affect.** Pi re-reads `auth.json` when its file revision changes
-  (`core/auth-storage.js:283-284`). A run that writes the agent dir's `auth.json` by a means the protection does not
-  recognise can change which provider credential the attempt uses. It cannot change what is gated. This is part of
-  the Out of Scope gap that ROAD-63 and MILE-12 close.
+  (`core/auth-storage.js:283-284`), and a stored `auth.json` outranks the environment key (Pi `docs/models.md:22`).
+  A run that writes one into its agent dir by a means the protection does not recognise, for example a copy of the
+  owner's `~/.pi/agent/auth.json`, would put the attempt on that credential, which can be a subscription login
+  (against L7). The gate host's `auth.json` check (RENOHARNESS-2.7) ends the run at the next call. One model turn may
+  already have used the credential; that residual is in the Out of Scope gap that ROAD-63 and MILE-12 close.
 - **Re-checked when `cli_verified` moves.** The check is repeated whenever `VERIFIED_CLI_VERSION` is raised, beside
   the gate matrix.
 
@@ -395,7 +405,7 @@ Locality: leave. Text only.
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
+| `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
 | `gate.mjs` under node, against a scripted socket (new, beside `pi-mcp-test.mjs`) | unit | RENOHARNESS-3.2, 3.3, 3.4, 3.5, 6.1, 6.2 |
 | Kernel with `MockExecutor` (`crates/reno-kernel/src/tests/{approvals,protect,routing,resume}.rs` and recovery) | integration | RENOHARNESS-1.4, 1.5, 1.6, 2.5, 3.6, 3.7, 4.2, 4.3, 5.3, 6.3, 6.4, 6.5, 7.1, 7.4, 8.3, 8.5, 10.3, 10.4, 10.5, 11.4, 11.6 |
 | Proto definitions (`crates/reno-proto/src/defs/tests.rs`) | unit | RENOHARNESS-1.7, 10.7, 10.8 |
@@ -419,7 +429,7 @@ Every requirement ID appears in exactly one `Satisfies:` line above. The mapping
 | Eligibility | 1.4, 1.5, 1.6, 10.5 |
 | Launch | 1.3, 2.1-2.6, 5.4, 5.5, 7.3, 7.5, 8.4, 10.1, 11.3 |
 | Gate | 3.2-3.5, 6.1, 6.2 |
-| Host | 3.1, 5.1-5.3, 6.6, 7.2, 8.2, 11.1, 11.2 |
+| Host | 2.7, 3.1, 5.1-5.3, 6.6, 7.2, 8.2, 11.1, 11.2 |
 | Subjects | 3.8, 4.1 |
 | Ladder | 3.6, 3.7, 4.2-4.4, 6.3, 7.1, 7.4, 8.1, 8.3, 10.3, 10.4 |
 | Sessions | 8.5, 11.4-11.6 |

@@ -40,6 +40,7 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-2.4** THE SYSTEM SHALL pass a run's provider key to Pi through the environment only, never on Pi's command line. [agent-decided]
 - **RENOHARNESS-2.5** (guard) IF a secret that a bot lists is not set THEN THE SYSTEM SHALL CONTINUE TO refuse to start the run, naming the secret, on `reno` as on every executor.
 - **RENOHARNESS-2.6** (guard) WHEN a run on `reno` prints to stderr or reaches the journal THE SYSTEM SHALL CONTINUE TO replace the run's secret values (exact match, 8 bytes or longer) with their `[secret:NAME]` mark in what is logged, kept or journaled.
+- **RENOHARNESS-2.7** IF an `auth.json` is found in the run's Pi agent directory, when the attempt is armed or before a call on `reno` is raised, THEN THE SYSTEM SHALL end the run failed, denying any call that is waiting, with a reason naming the file. Pi ranks a stored `auth.json` above the environment key (Pi `docs/models.md:22`), so the file would put the attempt on a credential that is not the bot's. [Lock L7; Weigh: check pick]
 
 ## 3. Every tool call passes Reno's policy before it runs
 
@@ -90,7 +91,7 @@ run whose executor is the Reno harness.
 
 - **RENOHARNESS-7.1** IF a call on `reno` is an edit of, or a command that writes in a form the built-in protection recognises to, the gate extension, the run's Pi agent directory, its session directory, or another file Reno loads into Pi for the run, THEN THE SYSTEM SHALL deny it, whatever the policy and the access mode allow. [Weigh S3; Lock L19, L15]
 - **RENOHARNESS-7.2** THE SYSTEM SHALL refuse, in the driver's writer, to send Pi's host RPC `bash` command on a run on `reno`. [Lock L15]
-- **RENOHARNESS-7.3** WHEN Pi starts for a run on `reno` THE SYSTEM SHALL load none of the owner's Pi extensions, skills, prompt templates or MCP servers, and name each extension it loads explicitly: Reno's MCP bridge, Pi's built-in MCP and codemode, and the gate. [Lock L15]
+- **RENOHARNESS-7.3** WHEN Pi starts for a run on `reno` THE SYSTEM SHALL load none of the owner's Pi extensions, skills, prompt templates or MCP servers, and name each extension it loads explicitly: Reno's MCP bridge, Pi's built-in MCP and codemode, and the gate. It SHALL also pass Pi's `--no-approve`, so the working folder's `.pi/` resources are ignored. [Lock L15; Weigh: `--no-approve`]
 - **RENOHARNESS-7.4** (guard) WHEN a call on `reno` is an edit of a path in `.git`, `.reno` or Reno's data directory, or a command that writes there in a form the built-in protection recognises, THE SYSTEM SHALL CONTINUE TO deny it in every access mode, before any allow, as the built-in protection does for every run.
 - **RENOHARNESS-7.5** WHEN an attempt of a run on `reno` starts THE SYSTEM SHALL write that attempt's gate extension and Pi agent directory afresh, never reusing files an earlier attempt could reach, other than the run's session directory (RENOHARNESS-8.4). [agent-decided]
 
@@ -181,7 +182,7 @@ System-doc consult: `docs/product/metrics.md`, `docs/ops/reliability.md` and `do
   - the run's own files. It reaches no later attempt (RENOHARNESS-7.5), but it can reach the session directory that a resume reads;
   - Reno's definitions, its data directory and the bot's policy.
 
-  So ROAD-63's "nothing inside a run can change Reno's definitions, data dir, the bot's own policy or its gate" (L19, `docs/roadmap/roads/ROAD-63.md:16`) is **not met by this feature alone**. Command parsing is ROAD-63's (`ROAD-63.md:19`), and isolating the run is the bot computer's (MILE-12). **Unverified:** whether Pi 1.5.0 re-reads, within one attempt, a file a run wrote into its agent directory (it has an `auth.json` reload on a revision change, a settings `reload()` and an extension `ctx.reload()`). Design checks that no reload path is reachable in RPC mode, by a source read or a test, before `design.md` is approved.
+  So ROAD-63's "nothing inside a run can change Reno's definitions, data dir, the bot's own policy or its gate" (L19, `docs/roadmap/roads/ROAD-63.md:16`) is **not met by this feature alone**, and neither is L7 in one narrow case. A run can copy a credential, the owner's `~/.pi/agent/auth.json` for one, into its agent directory by such a script. RENOHARNESS-2.7 then ends the run at its next call, but one model turn may already have used that credential. Command parsing is ROAD-63's (`ROAD-63.md:19`), and isolating the run is the bot computer's (MILE-12). **Checked in design** (Pi 1.5.0 source read, `design.md` § Reload paths): no reload of settings or extensions is reachable by a run in RPC mode. Pi does re-read `auth.json` when its file revision changes, which is the case RENOHARNESS-2.7 covers.
 - Exfiltration of the provider key. A model-run command can read the key from the run's environment, because secrets are environment variables of the run. This is an accepted risk handed to ROAD-63.
 
 ## Open Questions
