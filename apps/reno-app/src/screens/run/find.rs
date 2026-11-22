@@ -476,7 +476,7 @@ impl RunScreen {
         if self.list.max_offset_for_scrollbar().y < px(1200.0) {
             return false;
         }
-        self.list.scroll_by(px(-700.0));
+        self.list.scroll_by(px(-1800.0));
         cx.notify();
         true
     }
@@ -530,13 +530,15 @@ impl RunScreen {
                 .items_center()
                 .justify_center()
                 .gap(px(6.0))
-                .bg(theme.accent.opacity(0.16))
+                // Opaque, so the words under it do not show through; the tint is laid over it.
+                .bg(theme.canvas)
                 .border_t_1()
                 .border_color(theme.accent.opacity(0.35))
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.accent)
                 .cursor_pointer()
+                .child(div().absolute().inset_0().bg(theme.accent.opacity(0.16)))
                 .child(icon(Icon::ChevDown, 13.0, theme.accent))
                 .child(if live {
                     "Latest \u{b7} streaming"
