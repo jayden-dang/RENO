@@ -194,7 +194,8 @@ impl Piece {
     /// spaces a wrapped row ends in.
     fn line_at(&self, over: Point<Pixels>, text: &str) -> Range<usize> {
         let bounds = self.layout.bounds();
-        let y = over.y.clamp(bounds.top(), bounds.bottom() - px(1.0));
+        let last_row = (bounds.bottom() - px(1.0)).max(bounds.top());
+        let y = over.y.max(bounds.top()).min(last_row);
         let index = |x| {
             let (Ok(at) | Err(at)) = self.layout.index_for_position(point(x, y));
             at.min(text.len())
