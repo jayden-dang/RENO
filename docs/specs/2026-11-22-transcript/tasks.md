@@ -756,18 +756,20 @@ SVG.
 
 **Interfaces:**
 - Consumes: `mermaid::no_files()`, `image::resolve`.
-- Produces: `image::rasterize_svg(bytes: &[u8], scale: f32) -> Option<Raster>`. It applies to **worktree markdown images**
-  only. A `data:` SVG stays refused (its existing test is unchanged). A posted visual's SVG still shows "Visual not
-  loaded", as the locked brief's Contract says.
+- Produces: `image::rasterize_svg(bytes: &[u8], scale: f32) -> Option<Raster>`, used for **markdown images**: worktree
+  SVGs (11.1) and `data:` SVGs (11.2, "the same way"). The branch-added test that pinned `data:` SVG as refused is
+  rewritten to expect it drawn; it was added on this branch, not before it. A posted visual's SVG still shows "Visual not
+  loaded", as the locked brief's Contract says (`ui-brief.md`, Contract 1).
 
 **Depends-on:** Task 1
 
 - [ ] **Step 1:** Add failing tests:
   - `a_worktree_svg_draws` (`docs/flow.svg`);
+  - `a_data_svg_draws_the_same_way`;
   - `an_svg_whose_image_href_names_a_file_outside_the_worktree_paints_nothing`;
   - `an_image_wrapped_in_a_link_follows_the_link`.
   Run: `cargo test -p reno-app svg` — expect: the first fails ("Image not loaded").
-- [ ] **Step 2:** Rasterise a worktree SVG from `fs.read_image` through `usvg` with `no_files()`. Run:
+- [ ] **Step 2:** Rasterise worktree SVGs from `fs.read_image`, and `data:` SVGs, through `usvg` with `no_files()`. Run:
   `cargo test -p reno-app` — expect: pass, including the kept 11.2–11.4 tests and the zero-send test.
 - [ ] **Step 3:** Commit `images: worktree SVGs drawn by the app's own rasteriser, which follows no paths`.
 

@@ -342,8 +342,8 @@ Interface: `image::{classify(src) -> Classified { Source(ImageSource), Remote, R
 Shown}`.
 Depth: if `md/image.rs` (rung 7, new on this branch) vanished, callers would still need only `classify` and `resolve`;
 the chunked read, the cache and the SVG rasteriser stay inside.
-Locality: extend `md/image.rs`: an SVG returned by `fs.read_image` is rasterised by `usvg` with `no_files()` instead of being
-refused. Lock test: an SVG whose `<image href>` names a file outside the worktree paints nothing. Leave the rest.
+Locality: extend `md/image.rs`: an SVG returned by `fs.read_image`, or given as `data:` (11.2, "the same way"), is
+rasterised by `usvg` with `no_files()` instead of being refused. Lock test: an SVG whose `<image href>` names a file outside the worktree paints nothing. Leave the rest.
 
 ### Agent-posted visuals and tool-result images
 
