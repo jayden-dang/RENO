@@ -172,7 +172,7 @@ _Requirements: RENOHARNESS-1.1, RENOHARNESS-1.2, RENOHARNESS-1.7, RENOHARNESS-10
 
 **Depends-on:** Task 1
 
-- [ ] Write failing kernel tests:
+- [x] Write failing kernel tests:
   - A bot with `executors = ["reno", "codex"]` and `inherit_user_config = true` routes to `codex`, with `reno`
     rejected as `Excluded` naming the setting.
   - With `["reno"]` alone, the run fails with "no executor this bot lists can take the task (…inherit_user_config…)",
@@ -180,14 +180,14 @@ _Requirements: RENOHARNESS-1.1, RENOHARNESS-1.2, RENOHARNESS-1.7, RENOHARNESS-10
   - An explicit `--executor reno` for that bot is excluded the same way.
   - A bot set to `auto_accept_edits`, or to a narrower sandbox, finds `reno` ineligible with today's reason.
   - The fallback for an account or install decline still moves to the next listed executor.
-- [ ] Write failing driver tests in `tests/pi.rs`: a spec with no `RENO_BOT`, or with `inherit_user_config`, is
+- [x] Write failing driver tests in `tests/pi.rs`: a spec with no `RENO_BOT`, or with `inherit_user_config`, is
   refused with `InvalidSpec` and the "runs bots only" reason, before the not-armed refusal.
-- [ ] Run `cargo test -p reno-kernel routing && cargo test -p reno-harness --test pi reno_`. Expect: the
+- [x] Run `cargo test -p reno-kernel routing && cargo test -p reno-harness --test pi reno_`. Expect: the
   `inherit_user_config` bot is routed to `reno`, and the text is wrong.
-- [ ] Implement `unfit_config` (router, every construction site, and `plan_route`), the dispatcher text for a run with
+- [x] Implement `unfit_config` (router, every construction site, and `plan_route`), the dispatcher text for a run with
   a bot, and the two `InvalidSpec` checks at the top of the `Reno` branch of `start`.
-- [ ] Run the same commands, and expect a pass.
-- [ ] `git commit -m "feat(kernel): exclude the Reno harness for bots that inherit the owner's config, and say why"`
+- [x] Run the same commands, and expect a pass.
+- [x] `git commit -m "feat(kernel): exclude the Reno harness for bots that inherit the owner's config, and say why"`
 
 _Requirements: RENOHARNESS-1.4, RENOHARNESS-1.5, RENOHARNESS-1.6, RENOHARNESS-10.5_
 
