@@ -268,6 +268,18 @@ impl Plan {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many items [`diff`] has been given to compare on this thread (for tests that hold a
+/// streamed delta to the changed tail).
+#[cfg(test)]
+pub(crate) fn compared() -> usize {
+    COMPARED.with(std::cell::Cell::get)
+}
+
 /// A run of items and the rows they point into, which start at top-level row `base`.
 #[derive(Clone, Copy)]
 pub(crate) struct Side<'a> {
@@ -282,6 +294,8 @@ pub(crate) struct Side<'a> {
 /// plan are the list's, so they start at `at`.
 pub(crate) fn diff(old: Side<'_>, new: Side<'_>, at: usize) -> Plan {
     let (o, n) = (old.items, new.items);
+    #[cfg(test)]
+    COMPARED.with(|c| c.set(c.get() + o.len().max(n.len())));
     let changed = |a: &Item, b: &Item| match (a.visual, b.visual) {
         (Some(x), Some(y)) => x != y || a.decor != b.decor,
         _ => match (row_of(old.rows, old.base, a), row_of(new.rows, new.base, b)) {

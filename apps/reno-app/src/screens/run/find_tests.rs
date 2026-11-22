@@ -6,7 +6,9 @@
 use std::time::Duration;
 
 use gpui::{AppContext as _, Entity, ListOffset, TestAppContext, VisualTestContext, px};
+use reno_client::Update;
 use reno_client::fake::FakeConfig;
+use reno_proto::{ActionClass, ExecEvent, RunId, SessionRef, StopReason, ToolCall};
 
 use super::RunScreen;
 use crate::app::RootView;
@@ -55,8 +57,8 @@ fn bind(cx: &mut TestAppContext) {
     });
 }
 
-/// The handshake thread's last run opened, with every turn's fold in.
-fn open(cx: &mut TestAppContext) -> Opened<'_> {
+/// The fake daemon with the seeded threads, and a window over it.
+fn setup(cx: &mut TestAppContext) -> (Entity<Store>, Entity<RootView>, &mut VisualTestContext) {
     one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     let store = cx.new(|cx| {
@@ -77,6 +79,12 @@ fn open(cx: &mut TestAppContext) -> Opened<'_> {
     bind(cx);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
+    (store, root, vcx)
+}
+
+/// The handshake thread's last run opened, with every turn's fold in.
+fn open(cx: &mut TestAppContext) -> Opened<'_> {
+    let (store, root, vcx) = setup(cx);
     root.update_in(vcx, |r, window, cx| r.open_run(run_id("acp8"), window, cx));
     let screen = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
@@ -679,6 +687,275 @@ fn the_flat_list_keeps_the_anchor_and_follows_the_tail(cx: &mut TestAppContext) 
     screen.update(vcx, |s, cx| s.toggle(fold, cx));
     draw(vcx);
     a_turn_that_folds_keeps_the_reading_place_below_it_and_lands_on_the_head(vcx, &screen);
+}
+
+/// Hands `events` to the store as the daemon would send them, one after the other.
+fn stream<C: gpui::AppContext>(
+    cx: &mut C,
+    store: &Entity<Store>,
+    run: &RunId,
+    events: Vec<ExecEvent>,
+) {
+    for event in events {
+        store.update(cx, |s, cx| {
+            let seq = s
+                .state()
+                .transcript(run)
+                .and_then(|t| t.highest)
+                .and_then(reno_proto::Seq::next)
+                .unwrap_or(reno_proto::Seq(1));
+            s.apply(
+                Update::RunEvent {
+                    run: run.clone(),
+                    seq,
+                    event,
+                },
+                cx,
+            );
+        });
+    }
+}
+
+fn text(s: &str) -> ExecEvent {
+    ExecEvent::Text { text: s.into() }
+}
+
+/// How often the rows were built whole, how many items `diff` was given and how many were
+/// measured again, all so far.
+fn work_so_far(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> (usize, usize, usize) {
+    screen.read_with(vcx, |s, _| {
+        (s.rebuilds(), crate::vm::items::compared(), s.remeasured())
+    })
+}
+
+#[gpui::test]
+fn a_streamed_delta_rebuilds_nothing_and_diffs_only_the_changed_tail(cx: &mut TestAppContext) {
+    let (store, _root, vcx, screen) = open(cx);
+    let run = run_id("acp8");
+    let items = screen.read_with(vcx, |s, _| s.items().len());
+    assert!(items > 20, "a long thread: {items} items");
+
+    // The view rests in the middle of the thread, and nothing that streams in must move it.
+    let anchor = screen.update(vcx, |s, cx| {
+        s.list.scroll_to(ListOffset {
+            item_ix: 5,
+            offset_in_item: px(7.0),
+        });
+        cx.notify();
+        s.list.logical_scroll_top()
+    });
+    draw(vcx);
+
+    // The run goes on with a new turn, which takes a few events to open.
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 0,
+                session: SessionRef("s".into()),
+            },
+            text("Look"),
+        ],
+    );
+    draw(vcx);
+    let opened = screen.read_with(vcx, |s, _| s.items().len());
+    assert_eq!(opened, items + 2, "the resume line and the reply came in");
+    screen.read_with(vcx, |s, _| {
+        let reply = s.rows().last().unwrap().key();
+        assert!(
+            !s.markdown.contains_key(&reply),
+            "a reply out of view is not parsed until its item is drawn"
+        );
+    });
+    let (rebuilt, compared, measured) = work_so_far(vcx, &screen);
+
+    stream(vcx, &store, &run, vec![text(" closer")]);
+    draw(vcx);
+    let (rebuilt_now, compared_now, measured_now) = work_so_far(vcx, &screen);
+    assert_eq!(rebuilt_now, rebuilt, "a delta builds no rows again");
+    assert!(
+        compared_now - compared <= 3,
+        "a delta compares the changed tail, not the list: {} items",
+        compared_now - compared
+    );
+    assert!(
+        measured_now - measured <= 2,
+        "a delta measures its own item again: {}",
+        measured_now - measured
+    );
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.items().len(), opened, "no item came or went");
+        assert!(
+            matches!(s.rows().last(),
+            Some(Row::Prose { text, .. }) if text == "Look closer"),
+            "{:?}",
+            s.rows().last()
+        );
+        assert_eq!(s.list.logical_scroll_top(), anchor, "the view did not move");
+    });
+
+    // A step is one new item at the end, and its result patches it in place.
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            ExecEvent::Tool {
+                id: "late".into(),
+                call: ToolCall::new(
+                    "bash",
+                    serde_json::json!({ "command": "cargo test" }),
+                    ActionClass::Command,
+                ),
+            },
+            ExecEvent::ToolResult {
+                id: "late".into(),
+                ok: true,
+                summary: Some("ok".into()),
+                output: None,
+            },
+        ],
+    );
+    draw(vcx);
+    let (rebuilt_end, compared_end, _) = work_so_far(vcx, &screen);
+    assert_eq!(rebuilt_end, rebuilt, "a step builds no rows again");
+    assert!(
+        compared_end - compared_now <= 6,
+        "{}",
+        compared_end - compared_now
+    );
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.items().len(), opened + 1);
+        assert_eq!(s.item_count(), s.items().len());
+        assert_eq!(s.list.logical_scroll_top(), anchor, "the view did not move");
+    });
+
+    // The turn finishes: its loose rows fold in one splice, and a view resting inside them
+    // lands on the fold's head.
+    // Where the view stands right after the screen has taken the events in (the next frame may
+    // move it to keep the end of a short list at the bottom).
+    let landed = std::rc::Rc::new(std::cell::Cell::new(None));
+    let list = screen.read_with(vcx, |s, _| s.list.clone());
+    let _watch = vcx.update(|_, cx| {
+        let landed = landed.clone();
+        cx.observe(&store, move |_, _| {
+            landed.set(Some(list.logical_scroll_top()));
+        })
+    });
+    let (loose_at, loose_key) = screen.update(vcx, |s, cx| {
+        let key = s
+            .rows()
+            .iter()
+            .rev()
+            .find_map(|r| {
+                matches!(r, Row::Prose { text, .. } if text == "Look closer").then(|| r.key())
+            })
+            .unwrap();
+        let ix = s.items().item_of(key).unwrap();
+        s.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(3.0),
+        });
+        // The events reach the screen once this returns, before any frame is drawn.
+        stream(
+            cx,
+            &store,
+            &run,
+            vec![
+                text(" Done."),
+                ExecEvent::Done {
+                    stop: StopReason::Completed,
+                    result: None,
+                    diagnostic: None,
+                    reason: None,
+                },
+            ],
+        );
+        (ix, key)
+    });
+    let (rebuilt_done, ..) = work_so_far(vcx, &screen);
+    assert_eq!(
+        rebuilt_done, rebuilt,
+        "a finished turn builds no rows again"
+    );
+    let (fold, _) = *folds(vcx, &screen).last().unwrap();
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.item_count(), s.items().len());
+        assert!(s.items().item_of(loose_key).is_none(), "the reply folded");
+        let head = s.items().item_of(fold).unwrap();
+        assert!(head <= loose_at, "the fold stands where its first row was");
+        assert_eq!(
+            landed.get(),
+            Some(ListOffset {
+                item_ix: head,
+                offset_in_item: px(0.0)
+            }),
+            "the view lands on the head"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_rows_height_is_held_until_its_render_settles(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    // The view rests at the top of the thread, where the first reply is in view.
+    screen.update(vcx, |s, cx| {
+        s.list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    // The first reply in view and its height.
+    let (ix, held, top) = screen.read_with(vcx, |s, _| {
+        let top = s.list.logical_scroll_top();
+        let ix = (top.item_ix..s.items().len())
+            .find(|&ix| {
+                matches!(s.items().row(s.rows(), ix), Some(Row::Prose { .. }))
+                    && s.list.bounds_for_item(ix).is_some()
+            })
+            .expect("a reply in view");
+        (ix, s.list.bounds_for_item(ix).unwrap().size.height, top)
+    });
+    let (_, _, measured) = work_so_far(vcx, &screen);
+
+    // Nothing the store says outside the run changes it.
+    for _ in 0..3 {
+        screen.update(vcx, |_, cx| cx.notify());
+        draw(vcx);
+    }
+    let (_, _, quiet) = work_so_far(vcx, &screen);
+    assert_eq!(
+        quiet, measured,
+        "no renderer settled: no row is measured again"
+    );
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.list.bounds_for_item(ix).unwrap().size.height, held);
+        assert_eq!(s.list.logical_scroll_top(), top);
+    });
+
+    // A render lands: the rows in view that hold its output are measured again, once, and
+    // the view stays where it was.
+    vcx.update(|_, cx| crate::ui::markdown_view::settled(cx));
+    draw(vcx);
+    let (_, _, settled) = work_so_far(vcx, &screen);
+    assert!(
+        settled > quiet,
+        "the settled render measures its rows again"
+    );
+    draw(vcx);
+    assert_eq!(
+        work_so_far(vcx, &screen).2,
+        settled,
+        "once per landing, not once per frame"
+    );
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.list.bounds_for_item(ix).unwrap().size.height, held);
+        assert_eq!(s.list.logical_scroll_top(), top, "the list did not jump");
+    });
 }
 
 #[gpui::test]

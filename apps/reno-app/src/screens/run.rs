@@ -21,7 +21,7 @@ use gpui::{
 use reno_client::visuals::Visual;
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
-    RunSummary, StopReason, ThreadId,
+    RunSummary, Seq, StopReason, ThreadId,
 };
 
 use super::ScreenEvent;
@@ -29,7 +29,7 @@ use crate::panel::saved::Saved;
 use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
-use crate::transcript::{self as model, Facts, Key, Row, ToolEntry};
+use crate::transcript::{self as model, Change, Facts, Key, Row, ToolEntry, TurnBuilder};
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
@@ -83,6 +83,65 @@ struct Segment {
     rows: Vec<Row>,
 }
 
+/// The line before the `at`th run of a thread (none before the first): which agent and model it
+/// went to, and when. A run that does not say its model has the one its first event reported.
+fn divider_row(
+    state: &reno_client::State,
+    id: &RunId,
+    at: usize,
+    reported_model: Option<String>,
+) -> Option<Row> {
+    state.run(id).filter(|_| at > 0).map(|r| Row::Divider {
+        key: Key::divider(at),
+        executor: r.executor.clone(),
+        model: r.model.clone().or(reported_model),
+        at_ms: r.created_at_ms,
+    })
+}
+
+/// What comes before a run's events in the transcript: its divider, its prompt (stamped with the
+/// run's start) and the routing card.
+fn lead_rows(
+    state: &reno_client::State,
+    id: &RunId,
+    segment: usize,
+    reported_model: Option<String>,
+    routing: Option<RoutingView>,
+) -> Vec<Row> {
+    // The whole prompt when the daemon sends it; otherwise (an older daemon) the title, which is
+    // its first line, and which in the "bot . repo: what" shape shows its "what".
+    let prompt = state.run(id).map(|r| {
+        r.prompt
+            .as_deref()
+            .unwrap_or_else(|| summary::parse_title(&r.title).what)
+    });
+    let mut rows = model::build_rows(prompt, &[], &[]).rows;
+    if let Some(run) = state.run(id) {
+        model::stamp_prompt(&mut rows, run.created_at_ms);
+    }
+    let mut lead: Vec<Row> = divider_row(state, id, segment, reported_model)
+        .into_iter()
+        .collect();
+    lead.extend(
+        model::with_routing(rows, routing)
+            .into_iter()
+            .map(|row| row.in_segment(segment)),
+    );
+    lead
+}
+
+/// The thread's latest run, built as its events arrive: what `refresh` feeds, and what it checked
+/// the screen's rows against last time.
+struct Latest {
+    builder: TurnBuilder,
+    /// How many of the run's events the builder has taken, and the seq of the last.
+    fed: usize,
+    last_seq: Option<Seq>,
+    /// The rows that come before the builder's in the transcript: the run's divider, its prompt
+    /// and its routing card. They are not events.
+    lead: Vec<Row>,
+}
+
 pub(crate) struct RunScreen {
     store: Entity<Store>,
     /// The thread's latest run when the screen opened: the run the composer, the header and the
@@ -106,6 +165,15 @@ pub(crate) struct RunScreen {
     /// How many times an older run's rows were built (tests assert it stays put).
     #[cfg(test)]
     older_builds: usize,
+    /// The latest run's rows as its events arrive; none while an approval waits on this run (its
+    /// card is drawn from the state, not from the events), until it is built again.
+    latest: Option<Latest>,
+    /// How many times the rows were built whole (tests assert a streamed delta costs none), and
+    /// how many list items were told to measure again.
+    #[cfg(test)]
+    rebuilds: usize,
+    #[cfg(test)]
+    remeasured: std::cell::Cell<usize>,
     /// What Review compares: the whole thread (default) or the latest run.
     scope: ReviewScope,
     /// The Session tab's "Close thread" is asking for a confirmation.
@@ -249,6 +317,11 @@ impl RunScreen {
             segments: HashMap::new(),
             #[cfg(test)]
             older_builds: 0,
+            latest: None,
+            #[cfg(test)]
+            rebuilds: 0,
+            #[cfg(test)]
+            remeasured: std::cell::Cell::new(0),
             scope: ReviewScope::default(),
             close_confirm: false,
             facts: Facts::default(),
@@ -353,6 +426,18 @@ impl RunScreen {
         self.older_builds
     }
 
+    /// How many times the rows were built whole.
+    #[cfg(test)]
+    pub(crate) fn rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+
+    /// How many list items were told to measure again.
+    #[cfg(test)]
+    pub(crate) fn remeasured(&self) -> usize {
+        self.remeasured.get()
+    }
+
     #[cfg(test)]
     pub(crate) fn panel_key(&self) -> &PanelKey {
         &self.panel_key
@@ -439,8 +524,16 @@ impl RunScreen {
     /// The row holding `key` changed height: measure its item again.
     pub(super) fn remeasure(&mut self, key: Key) {
         if let Some(ix) = self.items.item_of(key) {
-            self.list.remeasure_items(ix..ix + 1);
+            self.measure_again(ix);
         }
+    }
+
+    /// Item `ix` is measured again the next time it is drawn; its old height stands until then,
+    /// and the view's place in it does not move.
+    fn measure_again(&self, ix: usize) {
+        #[cfg(test)]
+        self.remeasured.set(self.remeasured.get() + 1);
+        self.list.remeasure_items(ix..ix + 1);
     }
 
     /// The open folds changed: the items are made again over the same rows, and the list is told
@@ -513,7 +606,7 @@ impl RunScreen {
             self.list.splice(range.clone(), *count);
         }
         for &ix in &plan.remeasure {
-            self.list.remeasure_items(ix..ix + 1);
+            self.measure_again(ix);
         }
     }
 
@@ -542,7 +635,9 @@ impl RunScreen {
             .approvals_for(&self.run)
             .cloned()
             .collect();
-        self.rebuild_rows(routing, &pending, cx);
+        if !self.advance_latest(routing.clone(), &pending, cx) {
+            self.rebuild_rows(routing, &pending, cx);
+        }
         self.sync_visuals(cx);
         self.measure_activity_chips(cx);
         self.keep_menu(&pending);
@@ -566,7 +661,7 @@ impl RunScreen {
         self.activity_chips = spawned.len();
         for n in spawned {
             if let Some(ix) = self.items.prose_item(n) {
-                self.list.remeasure_items(ix..ix + 1);
+                self.measure_again(ix);
             }
         }
     }
@@ -607,7 +702,7 @@ impl RunScreen {
             let holds_output = self.items.items[ix].visual.is_some()
                 || matches!(self.items.row(&self.rows, ix), Some(Row::Prose { .. }));
             if holds_output {
-                self.list.remeasure_items(ix..ix + 1);
+                self.measure_again(ix);
             }
         }
     }
@@ -621,26 +716,136 @@ impl RunScreen {
         }
     }
 
-    /// Rebuilds what changed: the latest run's rows each time, an older run's only when its
-    /// events or summary moved. Rows of older runs sit before it, each run after the first
-    /// behind a divider. The list is told only what differs.
+    /// The latest run's rows from the events that arrived since the last time, when that is all
+    /// there is to do: the older runs are as they were, nothing waits on an approval, the events
+    /// are the ones the builder has taken with more after them, and the rows are the ones it made.
+    /// Then only the first row that differs, the one before it and the rows after them are made
+    /// again as items. Whether it did; if not, the rows are built whole.
+    fn advance_latest(
+        &mut self,
+        routing: Option<RoutingView>,
+        pending: &[Approval],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !pending.is_empty() || self.latest.is_none() {
+            return false;
+        }
+        let ids = self.thread_runs(cx);
+        let segment = ids.len() - 1;
+        let state = self.store.read(cx).state();
+        let Some(run) = state.run(&ids[segment]) else {
+            return false;
+        };
+        let events = state
+            .transcript(&ids[segment])
+            .map_or(&[][..], |t| t.events.as_slice());
+        let older = ids[..segment]
+            .iter()
+            .map(|id| (id.clone(), Self::signature(state, id)))
+            .collect::<Vec<_>>();
+        let Some(latest) = self.latest.as_mut() else {
+            return false;
+        };
+        let continues = latest.fed <= events.len()
+            && latest
+                .fed
+                .checked_sub(1)
+                .is_none_or(|last| Some(events[last].0) == latest.last_seq);
+        let mirrored =
+            self.rows.len() == self.prefix_len + latest.lead.len() + latest.builder.rows().len();
+        if ids != self.runs || older != self.prefix_runs || !continues || !mirrored {
+            return false;
+        }
+
+        let mut first: Option<usize> = None;
+        let mut note = |at: Option<usize>| {
+            if let Some(at) = at {
+                first = Some(first.map_or(at, |was| was.min(at)));
+            }
+        };
+        for (seq, event) in &events[latest.fed..] {
+            let change = latest.builder.push(*seq, event);
+            note(Self::first_row(latest.builder.rows(), &change));
+        }
+        latest.fed = events.len();
+        latest.last_seq = events.last().map(|(seq, _)| *seq);
+        let timed = latest.builder.set_run_time(
+            run.status.is_terminal(),
+            run.created_at_ms,
+            run.updated_at_ms,
+        );
+        note(Self::first_row(latest.builder.rows(), &timed));
+        self.facts = latest.builder.facts().clone();
+
+        let lead = lead_rows(
+            state,
+            &ids[segment],
+            segment,
+            latest.builder.facts().model.clone(),
+            routing,
+        );
+        let lead_len = latest.lead.len();
+        let (from, tail) = if lead != latest.lead {
+            latest.lead = lead;
+            let mut tail = latest.lead.clone();
+            tail.extend_from_slice(latest.builder.rows());
+            (0, tail)
+        } else if let Some(at) = first {
+            // The row before the first that differs goes with it: it was the last one, or
+            // the prose before a `Done`, and is not what it was.
+            let start = (lead_len + at).saturating_sub(1);
+            let mut tail = Vec::new();
+            if start < lead_len {
+                tail.extend_from_slice(&latest.lead[start..]);
+                tail.extend_from_slice(latest.builder.rows());
+            } else {
+                tail.extend_from_slice(&latest.builder.rows()[start - lead_len..]);
+            }
+            (start, tail)
+        } else {
+            return true;
+        };
+        self.replace_rows(self.prefix_len + from, Some(tail), cx);
+        true
+    }
+
+    /// The first top-level row a change says is not what it was.
+    fn first_row(rows: &[Row], change: &Change) -> Option<usize> {
+        match change {
+            Change::Unchanged => None,
+            Change::Folded { turn, .. } => Some(turn.start),
+            Change::Grew(key) | Change::Added(key) => {
+                rows.iter().rposition(|row| row.key() == *key)
+            }
+        }
+    }
+
+    /// What an older run's rows were built from: how many events it has, and how it stands.
+    fn signature(state: &reno_client::State, id: &RunId) -> (usize, Option<RunStatus>) {
+        (
+            state.transcript(id).map_or(0, |t| t.events.len()),
+            state.run(id).map(|r| r.status),
+        )
+    }
+
+    /// Builds the rows whole: the latest run's, and an older run's when its events or summary
+    /// moved. Rows of older runs sit before it, each run after the first behind a divider. The
+    /// list is told only what differs.
     fn rebuild_rows(
         &mut self,
         routing: Option<RoutingView>,
         pending: &[Approval],
         cx: &mut Context<Self>,
     ) {
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
         let ids = self.thread_runs(cx);
         self.runs.clone_from(&ids);
         let (older, anchor) = ids.split_at(ids.len() - 1);
         let segment_at = ids.len() - 1;
         let state = self.store.read(cx).state();
-        let signature = |id: &RunId| {
-            (
-                state.transcript(id).map_or(0, |t| t.events.len()),
-                state.run(id).map(|r| r.status),
-            )
-        };
         let build = |id: &RunId, with: &[Approval]| {
             let events = state
                 .transcript(id)
@@ -665,23 +870,56 @@ impl RunScreen {
             }
             built
         };
-        let divider = |id: &RunId, at: usize, model: Option<String>| {
-            state.run(id).filter(|_| at > 0).map(|r| Row::Divider {
-                key: Key::divider(at),
-                executor: r.executor.clone(),
-                model: r.model.clone().or(model),
-                at_ms: r.created_at_ms,
-            })
-        };
-        let prefix_runs: Vec<_> = older.iter().map(|id| (id.clone(), signature(id))).collect();
-        let prefix_same = prefix_runs == self.prefix_runs;
-        let mut built = build(&anchor[0], pending);
-        built.rows = model::with_routing(built.rows, routing);
-        let mut tail: Vec<Row> = divider(&anchor[0], segment_at, built.facts.model.clone())
-            .into_iter()
+        let prefix_runs: Vec<_> = older
+            .iter()
+            .map(|id| (id.clone(), Self::signature(state, id)))
             .collect();
-        tail.extend(built.rows.into_iter().map(|row| row.in_segment(segment_at)));
-        self.facts = built.facts;
+        let prefix_same = prefix_runs == self.prefix_runs;
+        let (tail, latest) = match (pending.is_empty(), state.run(&anchor[0])) {
+            (true, Some(run)) => {
+                let events = state
+                    .transcript(&anchor[0])
+                    .map_or(&[][..], |t| t.events.as_slice());
+                let mut builder = TurnBuilder::new(segment_at);
+                for (seq, event) in events {
+                    builder.push(*seq, event);
+                }
+                builder.set_run_time(
+                    run.status.is_terminal(),
+                    run.created_at_ms,
+                    run.updated_at_ms,
+                );
+                let lead = lead_rows(
+                    state,
+                    &anchor[0],
+                    segment_at,
+                    builder.facts().model.clone(),
+                    routing,
+                );
+                let mut tail = lead.clone();
+                tail.extend_from_slice(builder.rows());
+                let latest = Latest {
+                    fed: events.len(),
+                    last_seq: events.last().map(|(seq, _)| *seq),
+                    builder,
+                    lead,
+                };
+                self.facts = latest.builder.facts().clone();
+                (tail, Some(latest))
+            }
+            _ => {
+                let mut built = build(&anchor[0], pending);
+                built.rows = model::with_routing(built.rows, routing);
+                let mut tail: Vec<Row> =
+                    divider_row(state, &anchor[0], segment_at, built.facts.model.clone())
+                        .into_iter()
+                        .collect();
+                tail.extend(built.rows.into_iter().map(|row| row.in_segment(segment_at)));
+                self.facts = built.facts;
+                (tail, None)
+            }
+        };
+        self.latest = latest;
 
         if prefix_same {
             // The older runs' rows and items stay: only the latest run's are made again.
@@ -708,9 +946,10 @@ impl RunScreen {
                         self.older_builds += 1;
                     }
                     let built = build(id, &[]);
-                    let mut seg_rows: Vec<Row> = divider(id, at, built.facts.model.clone())
-                        .into_iter()
-                        .collect();
+                    let mut seg_rows: Vec<Row> =
+                        divider_row(state, id, at, built.facts.model.clone())
+                            .into_iter()
+                            .collect();
                     seg_rows.extend(built.rows.into_iter().map(|row| row.in_segment(at)));
                     Segment {
                         signature: *sig,
@@ -976,7 +1215,7 @@ impl RunScreen {
         if line != self.result {
             self.result = line;
             if let Some(ix) = self.items.last_done_item() {
-                self.list.remeasure_items(ix..ix + 1);
+                self.measure_again(ix);
             }
         }
     }
