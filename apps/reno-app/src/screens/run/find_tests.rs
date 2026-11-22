@@ -1215,3 +1215,68 @@ fn an_approval_that_waits_and_resolves_takes_the_screen_off_the_incremental_path
             Some(Row::Prose { text, .. }) if text == "One two three four"));
     });
 }
+
+fn reply(s: &mut RunScreen, key: Key, text: &str, live: bool) {
+    RunScreen::parse_reply(&mut s.markdown, &mut s.live_reply, key, text, live);
+}
+
+#[gpui::test]
+fn the_parsed_trees_stop_at_their_bound_and_keep_the_live_reply(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let first = Key(1 << 50);
+    screen.update(vcx, |s, _| {
+        reply(s, first, "the reply still arriving", true);
+        for n in 1..=700 {
+            reply(s, Key((1 << 50) + n), "an older reply", false);
+        }
+    });
+    screen.read_with(vcx, |s, _| {
+        assert!(s.markdown.len() <= 512, "{} parsed trees", s.markdown.len());
+        assert!(
+            s.markdown.peek(&first).is_some(),
+            "the live reply is the oldest and stays"
+        );
+        assert!(s.markdown.peek(&Key((1 << 50) + 700)).is_some());
+    });
+
+    screen.update(vcx, |s, _| {
+        reply(s, Key((1 << 50) + 701), "the next reply", true);
+        for n in 702..=1300 {
+            reply(s, Key((1 << 50) + n), "an older reply", false);
+        }
+    });
+    screen.read_with(vcx, |s, _| {
+        assert!(s.markdown.len() <= 512, "{} parsed trees", s.markdown.len());
+        assert!(
+            s.markdown.peek(&first).is_none(),
+            "a reply that stopped being the live one can go"
+        );
+        assert!(s.markdown.peek(&Key((1 << 50) + 701)).is_some());
+    });
+}
+
+#[gpui::test]
+fn the_directory_probes_stop_at_their_bound(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    screen.update(vcx, |s, cx| {
+        for n in 0..300_u64 {
+            let text = format!("see `probe{n}/lib.rs`");
+            let tree = reno_markdown::parse_full(&text);
+            s.probe_files(Key((1 << 50) + n), text.len(), &tree, cx);
+        }
+    });
+    screen.read_with(vcx, |s, _| {
+        assert!(s.probed.len() <= 256, "{} replies probed", s.probed.len());
+        assert!(
+            s.probed_dirs() <= 256,
+            "{} directories held",
+            s.probed_dirs()
+        );
+    });
+    // The answers arrive and are kept within the same bound.
+    for _ in 0..50 {
+        draw(vcx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    screen.read_with(vcx, |s, _| assert!(s.probed_dirs() <= 256));
+}

@@ -391,7 +391,7 @@ impl RunScreen {
         let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
         let tree = |key: Key, text: &str| {
             self.markdown
-                .get(&key)
+                .peek(&key)
                 .map_or_else(|| reno_markdown::parse_full(text), |s| s.tree().clone())
         };
         let shown = Shown {
@@ -417,7 +417,7 @@ impl RunScreen {
         let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
         let tree = |key: Key, text: &str| {
             self.markdown
-                .get(&key)
+                .peek(&key)
                 .map_or_else(|| reno_markdown::parse_full(text), |s| s.tree().clone())
         };
         let shown = Shown {

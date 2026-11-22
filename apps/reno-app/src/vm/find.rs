@@ -74,12 +74,20 @@ fn same_char(a: char, b: char) -> bool {
 /// Where `needle` is in `hay`, ignoring case, left to right and not overlapping. Ranges are bytes
 /// of `hay` and fall on character boundaries. An empty needle matches nothing.
 pub(crate) fn matches(hay: &str, needle: &str) -> Vec<Range<usize>> {
+    matches_up_to(hay, needle, usize::MAX)
+}
+
+/// [`matches`], stopping at `limit` of them.
+fn matches_up_to(hay: &str, needle: &str, limit: usize) -> Vec<Range<usize>> {
     let Some(first) = needle.chars().next() else {
         return Vec::new();
     };
     let mut found = Vec::new();
     let mut from = 0;
     for (at, c) in hay.char_indices() {
+        if found.len() >= limit {
+            break;
+        }
         if at < from || !same_char(c, first) {
             continue;
         }
@@ -132,7 +140,11 @@ pub(crate) fn text_of(row: &Row, part: Part) -> Option<&str> {
         .find_map(|(p, _, text)| (p == part).then_some(text))
 }
 
-/// Every match of `needle` in `rows` (folds opened out), in reading order.
+/// The most hits kept: a common word in a long thread would otherwise hold a hit for every
+/// occurrence.
+pub(crate) const HIT_CAP: usize = 10_000;
+
+/// The first [`HIT_CAP`] matches of `needle` in `rows` (folds opened out), in reading order.
 pub(crate) fn find_all(rows: &[Row], needle: &str) -> Vec<Hit> {
     let mut hits = Vec::new();
     if needle.is_empty() {
@@ -140,6 +152,7 @@ pub(crate) fn find_all(rows: &[Row], needle: &str) -> Vec<Hit> {
     }
     let (mut ordinal, mut turn) = (0, 0);
     scan(rows, None, needle, &mut ordinal, &mut turn, &mut hits);
+    hits.truncate(HIT_CAP);
     hits
 }
 
@@ -152,6 +165,9 @@ fn scan(
     hits: &mut Vec<Hit>,
 ) {
     for row in rows {
+        if hits.len() >= HIT_CAP {
+            return;
+        }
         if let Row::Worked { key, rows, .. } = row {
             scan(rows, Some(*key), needle, ordinal, turn, hits);
             continue;
@@ -160,15 +176,19 @@ fn scan(
             *turn += 1;
         }
         for (part, source, text) in texts(row) {
-            hits.extend(matches(text, needle).into_iter().map(|range| Hit {
-                key: row.key(),
-                part,
-                range,
-                fold,
-                ordinal: *ordinal,
-                turn: (*turn).max(1),
-                source,
-            }));
+            hits.extend(
+                matches_up_to(text, needle, HIT_CAP - hits.len())
+                    .into_iter()
+                    .map(|range| Hit {
+                        key: row.key(),
+                        part,
+                        range,
+                        fold,
+                        ordinal: *ordinal,
+                        turn: (*turn).max(1),
+                        source,
+                    }),
+            );
         }
         *ordinal += 1;
     }
@@ -180,6 +200,7 @@ pub(crate) fn count_label(query: &str, hits: usize, current: Option<usize>) -> O
         return None;
     }
     Some(match current {
+        Some(at) if hits >= HIT_CAP => format!("{} of 10,000+", at + 1),
         Some(at) if hits > 0 => format!("{} of {hits}", at + 1),
         _ => "No results".to_owned(),
     })
@@ -472,6 +493,31 @@ mod tests {
         assert_eq!(count_label("x", 7, Some(2)).as_deref(), Some("3 of 7"));
         assert_eq!(count_label("x", 0, None).as_deref(), Some("No results"));
         assert_eq!(count_label("", 0, None), None);
+    }
+
+    #[test]
+    fn hits_stop_at_ten_thousand_and_the_count_says_so() {
+        let rows = vec![
+            prose(0, &"x ".repeat(HIT_CAP - 1)),
+            prose(2, &"x ".repeat(HIT_CAP)),
+            prose(4, "x"),
+        ];
+        let hits = find_all(&rows, "x");
+        assert_eq!(hits.len(), HIT_CAP);
+        assert!(
+            hits.windows(2).all(|w| w[0].order() < w[1].order()),
+            "the first ten thousand, in reading order"
+        );
+        assert_eq!(hits.last().unwrap().key, Key(2));
+
+        assert_eq!(
+            count_label("x", HIT_CAP, Some(0)).as_deref(),
+            Some("1 of 10,000+")
+        );
+        assert_eq!(
+            count_label("x", HIT_CAP - 1, Some(0)).as_deref(),
+            Some("1 of 9999")
+        );
     }
 
     fn found(n: usize) -> Found {

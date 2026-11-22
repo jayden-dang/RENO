@@ -4,7 +4,7 @@
 //! when it has no such file, the text stays unlinked.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{App, Context, WeakEntity, Window};
@@ -15,6 +15,7 @@ use super::RunScreen;
 use crate::transcript::Key;
 use crate::ui::markdown_view::FileLinks;
 use crate::ui::markdown_view::link::{self, FileTarget};
+use crate::ui::markdown_view::lru::Lru;
 
 /// Pages of a directory read before the rest is taken as not there.
 const PAGES: usize = 5;
@@ -25,18 +26,29 @@ enum Dir {
     Failed,
 }
 
+/// Directories kept before the least recently asked about go; one asked about again is listed
+/// again.
+const DIRS: usize = 256;
+
 /// The files of the directories a reply named.
-#[derive(Default)]
 pub(super) struct FileIndex {
-    dirs: HashMap<String, Dir>,
+    dirs: Lru<String, Dir>,
+}
+
+impl Default for FileIndex {
+    fn default() -> Self {
+        Self {
+            dirs: Lru::new(DIRS, usize::MAX),
+        }
+    }
 }
 
 pub(super) type Index = Rc<RefCell<FileIndex>>;
 
 impl FileIndex {
-    fn has(&self, path: &str) -> bool {
+    fn has(&mut self, path: &str) -> bool {
         let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
-        matches!(self.dirs.get(dir), Some(Dir::Files(files)) if files.contains(path))
+        matches!(self.dirs.get(&dir.to_owned()), Some(Dir::Files(files)) if files.contains(path))
     }
 }
 
@@ -47,7 +59,7 @@ struct OpenInFiles {
 
 impl FileLinks for OpenInFiles {
     fn resolves(&self, path: &str, _cx: &App) -> bool {
-        self.index.borrow().has(path)
+        self.index.borrow_mut().has(path)
     }
 
     fn open(&self, target: FileTarget, window: &mut Window, cx: &mut App) {
@@ -60,6 +72,12 @@ impl FileLinks for OpenInFiles {
 }
 
 impl RunScreen {
+    /// How many directories the index holds.
+    #[cfg(test)]
+    pub(super) fn probed_dirs(&self) -> usize {
+        self.file_index.borrow().dirs.len()
+    }
+
     /// Whether the worktree is known to have `path`.
     #[cfg(test)]
     pub(super) fn file_resolves(&self, path: &str, cx: &App) -> bool {
@@ -90,9 +108,10 @@ impl RunScreen {
         tree: &BlockTree,
         cx: &mut Context<Self>,
     ) {
-        if self.probed.insert(key, text_len) == Some(text_len) {
+        if self.probed.get(&key) == Some(&text_len) {
             return;
         }
+        self.probed.insert(key, text_len, 1);
         let mut dirs: Vec<String> = link::paths_in(tree)
             .iter()
             .map(|p| {
@@ -109,7 +128,7 @@ impl RunScreen {
             self.file_index
                 .borrow_mut()
                 .dirs
-                .insert(dir.clone(), Dir::Loading);
+                .insert(dir.clone(), Dir::Loading, 1);
             let (ask, named) = (dir.clone(), dir);
             self.files_call(
                 cx,
@@ -140,7 +159,7 @@ impl RunScreen {
                 },
                 move |this, result, cx| {
                     let found = result.map_or(Dir::Failed, Dir::Files);
-                    this.file_index.borrow_mut().dirs.insert(named, found);
+                    this.file_index.borrow_mut().dirs.insert(named, found, 1);
                     cx.notify();
                 },
             );

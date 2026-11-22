@@ -7,9 +7,12 @@
 
 use std::rc::Rc;
 
+use reno_markdown::BlockTree;
+
 use super::select::Spot;
 use super::*;
-use crate::ui::markdown_view::{Host, SelectHost, select as pick, visual::visual_view};
+use crate::ui::markdown_view::lru::Lru;
+use crate::ui::markdown_view::{Host, SelectHost, Streaming, select as pick, visual::visual_view};
 use crate::ui::motion;
 use crate::vm::find;
 use crate::vm::selection::{self, Slot};
@@ -28,9 +31,8 @@ impl RunScreen {
         // A reply's markdown is parsed when its item is first drawn, not when the row arrives.
         if let Some(Row::Prose { key, text }) = items::row_of(&self.rows, 0, &item) {
             let (key, len) = (*key, text.len());
-            let stream = self.markdown.entry(key).or_default();
-            stream.set_text(text);
-            let tree = stream.tree().clone();
+            let live = item.decor.last && self.is_live(cx);
+            let tree = Self::parse_reply(&mut self.markdown, &mut self.live_reply, key, text, live);
             self.probe_files(key, len, &tree, cx);
         }
         let Some(row) = items::row_of(&self.rows, 0, &item) else {
@@ -63,6 +65,32 @@ impl RunScreen {
     pub(super) fn is_live(&self, cx: &Context<Self>) -> bool {
         self.summary(cx)
             .is_some_and(|r| r.status == RunStatus::Running)
+    }
+
+    /// The reply's tree for `text`, parsed from the last one when it only grew. `live` is the
+    /// reply still arriving: it stays parsed however many others are drawn after it. Takes the
+    /// two fields, not `self`: `text` is borrowed from the rows.
+    pub(super) fn parse_reply(
+        markdown: &mut Lru<Key, Streaming>,
+        live_reply: &mut Option<Key>,
+        key: Key,
+        text: &str,
+        live: bool,
+    ) -> BlockTree {
+        let mut stream = markdown.remove(&key).unwrap_or_default();
+        stream.set_text(text);
+        let tree = stream.tree().clone();
+        markdown.insert(key, stream, text.len());
+        if live {
+            if let Some(before) = live_reply.replace(key).filter(|before| *before != key) {
+                markdown.unpin(&before);
+            }
+            markdown.pin(key);
+        } else if *live_reply == Some(key) {
+            *live_reply = None;
+            markdown.unpin(&key);
+        }
+        tree
     }
 
     /// The run a row belongs to: the thread's `n`th, in the high bits of its key.
@@ -144,7 +172,7 @@ impl RunScreen {
                 at_ms,
             } => self.user_message(theme, *key, text, *steer, *at_ms, cx),
             Row::Prose { key, text } => {
-                let Some(stream) = self.markdown.get(key) else {
+                let Some(stream) = self.markdown.peek(key) else {
                     return div().into_any_element();
                 };
                 let item = top.and_then(|ix| self.items.items.get(ix));

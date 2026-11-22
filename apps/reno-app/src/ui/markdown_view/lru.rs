@@ -1,14 +1,17 @@
 //! A small cache bounded by entry count and by bytes (TRANSCRIPT-16.4, ARCH-12): the least
-//! recently used entry goes first. The renderers hold a few hundred entries, so eviction scans
-//! rather than keeping a linked list.
+//! recently used entry goes first, except a pinned one. The renderers hold a few hundred entries,
+//! so eviction scans rather than keeping a linked list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 /// A least-recently-used cache with a cap on entries and on the summed cost of its values.
 #[derive(Debug)]
 pub(crate) struct Lru<K, V> {
     entries: HashMap<K, Entry<V>>,
+    /// Keys that eviction skips and the cost cap does not turn away. A pin belongs to the key,
+    /// not the entry: it outlasts `remove`, so a value taken out to change can be put back.
+    pinned: HashSet<K>,
     max_entries: usize,
     max_cost: usize,
     cost: usize,
@@ -28,6 +31,7 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
     pub(crate) fn new(max_entries: usize, max_cost: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            pinned: HashSet::new(),
             max_entries,
             max_cost,
             cost: 0,
@@ -44,6 +48,16 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
     #[cfg(test)]
     pub(crate) fn cost(&self) -> usize {
         self.cost
+    }
+
+    /// Keeps `key` from being evicted until it is unpinned, even over a cap.
+    pub(crate) fn pin(&mut self, key: K) {
+        self.pinned.insert(key);
+    }
+
+    /// Lets `key` be evicted again.
+    pub(crate) fn unpin(&mut self, key: &K) {
+        self.pinned.remove(key);
     }
 
     /// Takes the value for `key` out.
@@ -64,8 +78,12 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
         })
     }
 
+    /// Whether `key` is held, without marking it used.
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
+    }
+
     /// The value for `key` without marking it used.
-    #[cfg(test)]
     pub(crate) fn peek(&self, key: &K) -> Option<&V> {
         self.entries.get(key).map(|entry| &entry.value)
     }
@@ -77,7 +95,7 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
         if let Some(old) = self.entries.remove(&key) {
             self.cost -= old.cost;
         }
-        if cost > self.max_cost {
+        if cost > self.max_cost && !self.pinned.contains(&key) {
             return;
         }
         self.entries.insert(
@@ -93,6 +111,7 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
             let Some(oldest) = self
                 .entries
                 .iter()
+                .filter(|(key, _)| !self.pinned.contains(*key))
                 .min_by_key(|(_, entry)| entry.used)
                 .map(|(key, _)| key.clone())
             else {
@@ -152,5 +171,39 @@ mod tests {
             cache.insert(n, n, 1);
             assert!(cache.len() <= 16);
         }
+    }
+
+    #[test]
+    fn a_pinned_entry_is_never_evicted() {
+        let mut cache = Lru::new(2, 100);
+        cache.insert(0, 0, 1);
+        cache.pin(0);
+        for n in 1..50 {
+            cache.insert(n, n, 1);
+        }
+        assert_eq!(cache.peek(&0), Some(&0), "the oldest entry stayed");
+        assert_eq!(cache.len(), 2, "the rest still stop at the cap");
+
+        let mut dear = Lru::new(4, 10);
+        dear.pin("huge");
+        dear.insert("huge", 1, 11);
+        assert_eq!(dear.peek(&"huge"), Some(&1), "a pin outweighs the cost cap");
+        dear.unpin(&"huge");
+        dear.insert("a", 2, 3);
+        assert!(
+            dear.peek(&"huge").is_none(),
+            "unpinned, it is evictable again"
+        );
+    }
+
+    #[test]
+    fn a_pin_survives_taking_the_value_out_and_putting_it_back() {
+        let mut cache = Lru::new(1, 100);
+        cache.insert("live", 1, 1);
+        cache.pin("live");
+        let value = cache.remove(&"live").unwrap();
+        cache.insert("live", value + 1, 1);
+        cache.insert("other", 9, 1);
+        assert_eq!(cache.peek(&"live"), Some(&2));
     }
 }

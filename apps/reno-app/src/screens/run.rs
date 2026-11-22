@@ -33,6 +33,7 @@ use crate::transcript::{self as model, Change, Facts, Key, Row, ToolEntry, TurnB
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
+use crate::ui::markdown_view::lru::Lru;
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
@@ -74,6 +75,10 @@ const RAIL: f32 = 16.0;
 const OVERDRAW: f32 = 600.0;
 /// How many items from the top of the view are measured again when the renderers settle.
 const SETTLED_ITEMS: usize = 40;
+/// Replies whose parsed tree is kept, and replies whose files were looked up, before the least
+/// recently drawn go. A long thread has more replies than that; drawing one again parses it again.
+const PARSED_REPLIES: usize = 512;
+const PROBED_REPLIES: usize = 256;
 
 /// What one older run of the thread contributed to the transcript, and what it was built from:
 /// a finished run is not built again until its events (or its summary) change.
@@ -180,8 +185,9 @@ pub(crate) struct RunScreen {
     close_confirm: bool,
     facts: Facts,
     /// One streaming parse per prose row, keyed by the row's first event, made when the row is
-    /// first drawn.
-    markdown: HashMap<Key, Streaming>,
+    /// first drawn. The oldest go when the thread is long; the reply still arriving never does.
+    markdown: Lru<Key, Streaming>,
+    live_reply: Option<Key>,
     /// Folds, tool groups, reasoning rows and long messages that are open: the owner's, and those
     /// find opened (which it closes again).
     open: Opens<Key>,
@@ -265,7 +271,7 @@ pub(crate) struct RunScreen {
     visuals: Vec<Visual>,
     /// The worktree's files a reply names, and the replies already looked through.
     file_index: links::Index,
-    probed: HashMap<Key, usize>,
+    probed: Lru<Key, usize>,
     /// The last renderer-settled generation seen: when it moves, drawn rows are measured again.
     settled_seen: u64,
     _store: Subscription,
@@ -325,7 +331,8 @@ impl RunScreen {
             scope: ReviewScope::default(),
             close_confirm: false,
             facts: Facts::default(),
-            markdown: HashMap::new(),
+            markdown: Lru::new(PARSED_REPLIES, usize::MAX),
+            live_reply: None,
             open: Opens::default(),
             outputs_open: Opens::default(),
             outputs_full: Opens::default(),
@@ -371,7 +378,7 @@ impl RunScreen {
             runs: Vec::new(),
             visuals: Vec::new(),
             file_index: links::Index::default(),
-            probed: HashMap::new(),
+            probed: Lru::new(PROBED_REPLIES, usize::MAX),
             settled_seen: markdown_view::settled_generation(cx),
         };
         screen.refresh(cx);
