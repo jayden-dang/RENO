@@ -60,6 +60,11 @@ impl Key {
         Self(first.0 | (1 << 39))
     }
 
+    /// The key of the `n`th agent-posted visual of a thread: not a row's, and no row can have it.
+    pub(crate) const fn visual(n: usize) -> Self {
+        Self(0xfd00_0000_0000_0000 | n as u64)
+    }
+
     /// The key of a divider before the `segment`th run.
     pub(crate) fn divider(segment: usize) -> Self {
         Self((u64::try_from(segment).unwrap_or(0) << 40) | 0xff_ffff_ffff)

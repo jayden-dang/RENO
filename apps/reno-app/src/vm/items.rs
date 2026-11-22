@@ -24,6 +24,10 @@ pub(crate) struct Item {
     /// Its index inside that fold; `None` for a top-level row (a fold's head included).
     pub(crate) inner: Option<usize>,
     pub(crate) decor: Decor,
+    /// For an agent-posted visual (TRANSCRIPT-12.1): which one, as an index into the visuals the
+    /// screen holds. Such an item shows no row, and sits right after the entry it was posted
+    /// with.
+    pub(crate) visual: Option<usize>,
 }
 
 /// What an item's drawing depends on besides its own row. A change here changes its height.
@@ -48,9 +52,30 @@ pub(crate) struct Projection {
     prose_item: Vec<usize>,
     /// The thread's last `Done` row, the only one that says what the branch holds.
     last_done: Option<usize>,
+    /// The visuals each entry carries after it, by the entry's key.
+    posted: HashMap<Key, Vec<usize>>,
 }
 
 impl Projection {
+    /// Says which visuals follow which entries; the next `reproject` puts them in. Whether it
+    /// changed.
+    pub(crate) fn set_posted(&mut self, posted: HashMap<Key, Vec<usize>>) -> bool {
+        std::mem::replace(&mut self.posted, posted.clone()) != posted
+    }
+
+    fn push_visuals(&mut self, host: Key, top: usize, inner: Option<usize>) {
+        for &v in self.posted.get(&host).map_or(&[][..], Vec::as_slice) {
+            self.by_key.insert(Key::visual(v), self.items.len());
+            self.items.push(Item {
+                key: Key::visual(v),
+                top,
+                inner,
+                decor: Decor::default(),
+                visual: Some(v),
+            });
+        }
+    }
+
     /// The item holding the row `key`.
     pub(crate) fn item_of(&self, key: Key) -> Option<usize> {
         self.by_key.get(&key).copied()
@@ -130,7 +155,9 @@ impl Projection {
                     final_message,
                     prose_at,
                 },
+                visual: None,
             });
+            self.push_visuals(row.key(), top, None);
             if let Row::Worked {
                 key, rows: inner, ..
             } = row
@@ -143,7 +170,9 @@ impl Projection {
                         top,
                         inner: Some(i),
                         decor: Decor::default(),
+                        visual: None,
                     });
+                    self.push_visuals(child.key(), top, Some(i));
                 }
             }
         }
@@ -157,6 +186,9 @@ impl Projection {
 
 /// The row an item shows, in `rows`, which start at top-level row `base`.
 pub(crate) fn row_of<'a>(rows: &'a [Row], base: usize, item: &Item) -> Option<&'a Row> {
+    if item.visual.is_some() {
+        return None;
+    }
     let top = rows.get(item.top.checked_sub(base)?)?;
     match (item.inner, top) {
         (None, row) => Some(row),
@@ -171,6 +203,34 @@ pub(crate) fn project(rows: &[Row], is_open: impl Fn(Key) -> bool) -> Projection
     let mut p = Projection::default();
     p.reproject(rows, 0, is_open);
     p
+}
+
+/// The entry a visual posted after journal event `after`, in the thread's `segment`th run, goes
+/// with: the last prose, tool group or other entry of that run that began at or before the
+/// event. Keys are the first event's seq plus one, with the run's place in the high bits; the
+/// closing line, the divider, the routing card and fold heads are never hosts.
+pub(crate) fn host_of(rows: &[Row], segment: usize, after: u64) -> Option<Key> {
+    const SEQ_BITS: u32 = 39;
+    let mut host = None;
+    let mut consider = |row: &Row| {
+        let key = row.key();
+        let in_run = usize::try_from(key.0 >> 40).is_ok_and(|s| s == segment);
+        let first = key.0 & ((1 << SEQ_BITS) - 1);
+        let plain = !matches!(
+            row,
+            Row::Done { .. } | Row::Divider { .. } | Row::Routing { .. } | Row::Worked { .. }
+        );
+        if in_run && plain && first <= after.saturating_add(1) {
+            host = Some(key);
+        }
+    };
+    for row in rows {
+        match row {
+            Row::Worked { rows, .. } => rows.iter().for_each(&mut consider),
+            other => consider(other),
+        }
+    }
+    host
 }
 
 /// Whether two rows draw the same item. A fold's head draws only its own line, so its inner rows
@@ -222,11 +282,13 @@ pub(crate) struct Side<'a> {
 /// plan are the list's, so they start at `at`.
 pub(crate) fn diff(old: Side<'_>, new: Side<'_>, at: usize) -> Plan {
     let (o, n) = (old.items, new.items);
-    let changed =
-        |a: &Item, b: &Item| match (row_of(old.rows, old.base, a), row_of(new.rows, new.base, b)) {
+    let changed = |a: &Item, b: &Item| match (a.visual, b.visual) {
+        (Some(x), Some(y)) => x != y || a.decor != b.decor,
+        _ => match (row_of(old.rows, old.base, a), row_of(new.rows, new.base, b)) {
             (Some(x), Some(y)) => a.decor != b.decor || !same_item_content(x, y),
             _ => true,
-        };
+        },
+    };
     let head = o.iter().zip(n).take_while(|(a, b)| a.key == b.key).count();
     let tail = o[head..]
         .iter()
@@ -535,6 +597,73 @@ mod tests {
         assert_eq!(p.prose_item(0), Some(1));
         assert_eq!(p.prose_item(1), Some(4));
         assert_eq!(p.prose_item(2), None);
+    }
+
+    fn posted(pairs: &[(Key, &[usize])]) -> HashMap<Key, Vec<usize>> {
+        pairs.iter().map(|(k, v)| (*k, v.to_vec())).collect()
+    }
+
+    #[test]
+    fn a_posted_visual_is_an_item_after_the_entry_it_was_posted_with() {
+        let rows = vec![user(0), prose(2, "reply"), done(3)];
+        let mut p = Projection::default();
+        p.set_posted(posted(&[(Key(2), &[0, 1])]));
+        p.reproject(&rows, 0, none);
+        assert_eq!(p.len(), 5);
+        let visual = |i: usize| p.items[i].visual;
+        assert_eq!((visual(0), visual(1), visual(2), visual(3), visual(4)), (None, None, Some(0), Some(1), None));
+        // The visuals have keys of their own, and show no row.
+        assert_eq!(p.item_of(Key::visual(0)), Some(2));
+        assert_eq!(p.row(&rows, 2), None);
+        assert_eq!(p.row(&rows, 4), Some(&done(3)));
+        // The rows after still have their top-level places, and the reply keeps the final-message mark.
+        assert_eq!(p.item_of_top(2), 4);
+        assert!(p.items[1].decor.final_message);
+    }
+
+    #[test]
+    fn a_visual_posted_inside_a_fold_shows_with_the_fold_open() {
+        let rows = vec![user(0), worked(2, vec![prose(2, "a")]), prose(8, "end"), done(9)];
+        let fold = Key::fold(Key(2));
+        let mut p = Projection::default();
+        p.set_posted(posted(&[(Key(2), &[0])]));
+        p.reproject(&rows, 0, none);
+        assert_eq!(p.len(), 4, "closed: no visual");
+        p.reproject(&rows, 0, |k| k == fold);
+        assert_eq!(p.len(), 6);
+        assert_eq!((p.items[3].visual, p.items[3].inner), (Some(0), Some(0)));
+    }
+
+    #[test]
+    fn a_visual_that_stays_is_not_measured_again_and_one_that_arrives_is_an_insert() {
+        let rows = vec![user(0), prose(2, "reply"), done(3)];
+        let (mut with, mut without) = (Projection::default(), Projection::default());
+        with.set_posted(posted(&[(Key(2), &[0])]));
+        with.reproject(&rows, 0, none);
+        without.reproject(&rows, 0, none);
+        assert_eq!(plan(&rows, &with, &rows, &with), Plan::default());
+        let arrival = plan(&rows, &without, &rows, &with);
+        assert_eq!(arrival.splice, Some((2..2, 1)));
+    }
+
+    #[test]
+    fn the_entry_a_visual_was_posted_with_is_the_last_one_at_or_before_its_event() {
+        use super::host_of;
+        let rows = vec![
+            user(0),
+            prose(3, "reply"),
+            Row::Tools { key: Key(5), calls: vec![] },
+            done(6),
+            user(1 << 40),
+            prose(3 | 1 << 40, "second"),
+        ];
+        // `after` is a journal seq; a row's key is its first event's seq plus one.
+        assert_eq!(host_of(&rows, 0, 2), Some(Key(3)));
+        assert_eq!(host_of(&rows, 0, 4), Some(Key(5)));
+        assert_eq!(host_of(&rows, 1, 2), Some(Key(3 | 1 << 40)));
+        // Never the closing line of a run.
+        assert_eq!(host_of(&rows, 0, 5), Some(Key(5)));
+        assert_eq!(host_of(&[], 0, 2), None);
     }
 
     #[test]

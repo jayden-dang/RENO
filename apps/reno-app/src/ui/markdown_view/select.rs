@@ -45,6 +45,10 @@ pub(crate) struct Seg {
 }
 
 impl Map {
+    pub(crate) fn is_sourceless(&self) -> bool {
+        matches!(self, Self::Sourceless)
+    }
+
     /// The source byte for laid-out byte `at`.
     pub(crate) fn source_at(&self, at: usize) -> usize {
         match self {
@@ -307,6 +311,31 @@ pub(crate) fn highlight_runs(
     out
 }
 
+/// `layers` as sorted, non-overlapping highlights for `StyledText::with_highlights`: where
+/// layers meet, each property a later one sets wins.
+pub(crate) fn flatten_layers(
+    layers: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut cuts: Vec<usize> = layers
+        .iter()
+        .filter(|(r, _)| r.start < r.end)
+        .flat_map(|(r, _)| [r.start, r.end])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .filter_map(|w| {
+            let mut style: Option<HighlightStyle> = None;
+            for (range, layer) in layers {
+                if range.start <= w[0] && w[1] <= range.end {
+                    style = Some(style.map_or(*layer, |acc| acc.highlight(*layer)));
+                }
+            }
+            style.map(|style| (w[0]..w[1], style))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +381,15 @@ mod tests {
         assert_eq!(at(1), Some(Hsla::from(rgb(0x00ff00))));
         assert_eq!(out[1].color, Hsla::from(rgb(0x000000)));
         assert_eq!(out[3].background_color, None);
+    }
+
+    #[test]
+    fn flattened_layers_do_not_overlap_and_the_later_wins() {
+        let out = flatten_layers(&[(0..8, bg(0xff0000)), (4..6, bg(0x00ff00))]);
+        let spans: Vec<_> = out.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(spans, [0..4, 4..6, 6..8]);
+        assert_eq!(out[1].1.background_color, Some(Hsla::from(rgb(0x00ff00))));
+        assert_eq!(out[2].1.background_color, Some(Hsla::from(rgb(0xff0000))));
     }
 
     #[test]
