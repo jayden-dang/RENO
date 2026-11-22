@@ -1,6 +1,6 @@
 # Roadmap: Reno
 
-Status: Approved
+Status: Draft
 Date: 2026-11-22
 
 <!--
@@ -166,6 +166,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-43** split-chats → MILE-6 (2026-11-19, after the new shell exists)
 - ~~**ROAD-44**~~ agent-published-visuals → MILE-6 (2026-11-19) — retired 2026-11-22: static visuals an agent posts moved into ROAD-33, scripted ones into ROAD-58
 - **ROAD-58** agent-scripted-visuals → MILE-6 (2026-11-22, reverses the earlier ruling that Reno renders harness output, not agent-written UI; needs a vision edit and an ADR first) — Notes: [ROAD-58](roads/ROAD-58.notes.md)
+- **ROAD-59** edit-a-past-prompt-and-regenerate → MILE-6 (2026-11-22, split from ROAD-33; needs a per-executor rewind and a ruling on the worktree, as Reno does not replace a harness's loop) — Notes: [ROAD-59](roads/ROAD-59.notes.md)
 - **ROAD-45** window-capture-into-composer → MILE-6 (2026-11-19, a person's tool in its own boundary crate, after the redesign)
 **Blockers:** None
 
