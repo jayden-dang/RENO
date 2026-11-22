@@ -72,8 +72,6 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-5.3** IF a run fails as RENOHARNESS-5.2 says THEN THE SYSTEM SHALL end the run failed, without falling back to another executor. [Weigh S1]
 - **RENOHARNESS-5.4** THE SYSTEM SHALL have Pi load the gate after every other extension of the run. [Lock L15]
 - **RENOHARNESS-5.5** WHEN a run on `reno` is resumed THE SYSTEM SHALL start a new Pi with a new socket and a new nonce, and arm it as RENOHARNESS-5.1 says before the resumed prompt. [Lock L11]
-- **RENOHARNESS-5.6** THE SYSTEM SHALL keep a run's Pi session in a directory under Reno's data directory that belongs to that run, is keyed by its run id, and has a `.reno` path component, and SHALL point each attempt's Pi at it. [Weigh W6]
-- **RENOHARNESS-5.7** WHEN a run on `reno` is resumed after a daemon restart THE SYSTEM SHALL continue the same Pi session, so that Pi gives no "did not find session" notice. [Weigh W6; Lock L21]
 
 ## 6. A call Reno cannot judge does not run
 
@@ -84,15 +82,17 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-6.3** (guard) IF no person answers a call by its deadline THEN THE SYSTEM SHALL CONTINUE TO deny it as expired, on `reno` as on every executor.
 - **RENOHARNESS-6.4** (guard) WHEN the daemon shuts down while a Pi run goes on THE SYSTEM SHALL CONTINUE TO stop that run's Pi process group with it.
 - **RENOHARNESS-6.5** (guard) WHEN the daemon starts after a crash THE SYSTEM SHALL CONTINUE TO end the Pi process groups the crash left running, by the orphan sweep from the stored process records, before any run resumes. Until then, the gate of such a Pi has lost its socket, and RENOHARNESS-6.1 blocks its calls.
+- **RENOHARNESS-6.6** IF the gate's connection to the driver closes while a run on `reno` goes on THEN THE SYSTEM SHALL end the run failed, with a reason saying Reno lost its watch over the run. [agent-decided]
 
 ## 7. Nothing in the run can change or get around its gate
 
 **Story:** As the owner, I want a bot's own calls to be unable to change or get around the gate that watches it, so that a run cannot switch Reno's watch off.
 
-- **RENOHARNESS-7.1** IF a call on `reno` would write, move or delete the gate extension, the run's Pi agent directory, or another file Reno loads into Pi for the run, THEN THE SYSTEM SHALL deny it, whatever the policy and the access mode allow. [Weigh S3; Lock L19]
+- **RENOHARNESS-7.1** IF a call on `reno` is an edit of, or a command that writes in a form the built-in protection recognises to, the gate extension, the run's Pi agent directory, its session directory, or another file Reno loads into Pi for the run, THEN THE SYSTEM SHALL deny it, whatever the policy and the access mode allow. [Weigh S3; Lock L19, L15]
 - **RENOHARNESS-7.2** THE SYSTEM SHALL refuse, in the driver's writer, to send Pi's host RPC `bash` command on a run on `reno`. [Lock L15]
 - **RENOHARNESS-7.3** WHEN Pi starts for a run on `reno` THE SYSTEM SHALL load none of the owner's Pi extensions, skills, prompt templates or MCP servers, and name each extension it loads explicitly: Reno's MCP bridge, Pi's built-in MCP and codemode, and the gate. [Lock L15]
 - **RENOHARNESS-7.4** (guard) WHEN a call on `reno` is an edit of a path in `.git`, `.reno` or Reno's data directory, or a command that writes there in a form the built-in protection recognises, THE SYSTEM SHALL CONTINUE TO deny it in every access mode, before any allow, as the built-in protection does for every run.
+- **RENOHARNESS-7.5** WHEN an attempt of a run on `reno` starts THE SYSTEM SHALL write that attempt's gate extension and Pi agent directory afresh, never reusing files an earlier attempt could reach. [agent-decided]
 
 ## 8. The run goes on until the harness says it is done
 
@@ -101,6 +101,8 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-8.1** THE SYSTEM SHALL add no limit of its own on the turns or tool calls of a run on `reno`. [Lock L1, L13]
 - **RENOHARNESS-8.2** WHEN Pi reports `agent_settled` for a run on `reno` THE SYSTEM SHALL end the run, with the stop reason that Pi's last assistant message gives, as the `pi` driver does. [Lock L1, L21]
 - **RENOHARNESS-8.3** (guard) WHERE a bot's budget sets `max_wall_time`, `max_concurrent_runs` or `daily_token_ceiling` THE SYSTEM SHALL CONTINUE TO apply them to its runs on `reno` as on any executor, defaults included.
+- **RENOHARNESS-8.4** THE SYSTEM SHALL keep a run's Pi session in a directory under Reno's data directory that belongs to that run, is keyed by its run id, and has a `.reno` path component, and SHALL point each attempt's Pi at it. [Weigh W6]
+- **RENOHARNESS-8.5** WHEN a run on `reno` is resumed after a daemon restart THE SYSTEM SHALL continue the same Pi session, so that Pi gives no "did not find session" notice. [Weigh W6; Lock L21]
 
 ## 9. Reno's docs say what it now does
 
@@ -175,6 +177,7 @@ System-doc consult: `docs/product/metrics.md`, `docs/ops/reliability.md` and `do
 - Argument rewrite by the gate, `auto_accept_edits` on `reno`, a new wire method, a migration or new persisted format, a new variant of a persisted or wire enum (`RejectReason`, `StartRefusal`, `ExecEvent`), and any new screen.
 - Redaction of Pi's own session files. Pi writes its session JSONL itself, and it never passes Reno's redactor, so a secret a tool printed stays in the run's session directory until the run is `done` or `cancelled`. [S10]
 - A retention limit for kept sessions. The session directories of runs left `failed` or `interrupted` are kept with no bound, so that a person can still resume them, until a retention rule exists. No time-based retention is added. [S11; agent-decided]
+- Writes that the built-in protection cannot recognise. A permitted command can still write the run's files by other means, for example through an interpreter script, because the gate is not a sandbox (L15). Such a write reaches no later attempt (RENOHARNESS-7.5), but it can reach the session directory that a resume reads. Isolating the run is the bot computer's (MILE-12).
 - Exfiltration of the provider key. A model-run command can read the key from the run's environment, because secrets are environment variables of the run. This is an accepted risk handed to ROAD-63.
 
 ## Open Questions
