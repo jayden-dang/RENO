@@ -26,8 +26,8 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-1.2** THE SYSTEM SHALL declare `supervised` and `full_access` as the access modes of `reno`, and `unrestricted` as its only sandbox level. [Weigh W3; Lock L10, L15]
 - **RENOHARNESS-1.3** WHEN a run of a bot that lists `reno` is routed to `reno` THE SYSTEM SHALL start Pi in RPC mode with Reno's gate extension loaded for that run. [Lock L11, L12]
 - **RENOHARNESS-1.4** IF a bot asks for `auto_accept_edits`, or for a sandbox narrower than `unrestricted`, THEN THE SYSTEM SHALL treat `reno` as ineligible for its runs, with the reason the router gives for any executor that does not declare the mode. [Lock L10; Weigh W3]
-- **RENOHARNESS-1.5** IF a bot sets `inherit_user_config = true` THEN THE SYSTEM SHALL treat `reno` as ineligible for its runs, with a reason that names the setting. [Lock L15, L19]
-- **RENOHARNESS-1.6** IF a run with no bot is to start on `reno` THEN THE SYSTEM SHALL refuse to start it, with a reason saying `reno` runs bots only, and without falling back to another executor. [agent-decided; CONTEXT.md:33]
+- **RENOHARNESS-1.5** IF a bot sets `inherit_user_config = true` THEN THE SYSTEM SHALL treat `reno` as ineligible for its runs, with a reason that names the setting, carried by the existing `RejectReason::Excluded { why }` (shown in the verbose routing explanation) and no new variant. [Lock L15, L19; Weigh: variant pick; agent-decided: no new variant]
+- **RENOHARNESS-1.6** IF a run with no bot is to start on `reno` THEN THE SYSTEM SHALL refuse to start it, with a reason saying `reno` runs bots only, and without falling back to another executor, carried as an invalid start (the existing `StartRefusal::Invalid`) and no new variant. [agent-decided; CONTEXT.md:33; Weigh: variant pick]
 - **RENOHARNESS-1.7** WHEN a bot definition lists `reno` THE SYSTEM SHALL accept the id wherever executor ids are validated, offline validation included. [Weigh W1]
 
 ## 2. The run uses the owner's Reno key, never Pi's own login
@@ -37,7 +37,7 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-2.1** WHEN a run starts on `reno` THE SYSTEM SHALL give Pi provider credentials only from the secrets the bot lists in `secrets`, read from Reno's own Keychain items. [Lock L7]
 - **RENOHARNESS-2.2** WHEN a run starts on `reno` THE SYSTEM SHALL point Pi's agent directory at a directory that belongs to the run, so that Pi's own settings and stored login are never read. [Lock L7; `docs/standards/INDEX.md:24`]
 - **RENOHARNESS-2.3** WHEN a run starts on `reno` THE SYSTEM SHALL pass to Pi none of the daemon environment's provider credential variables or Pi directory variables. [Lock L7]
-- **RENOHARNESS-2.4** THE SYSTEM SHALL pass a run's provider key to Pi through the environment only, never on Pi's command line. [Lock L7]
+- **RENOHARNESS-2.4** THE SYSTEM SHALL pass a run's provider key to Pi through the environment only, never on Pi's command line. [agent-decided]
 - **RENOHARNESS-2.5** (guard) IF a secret that a bot lists is not set THEN THE SYSTEM SHALL CONTINUE TO refuse to start the run, naming the secret, on `reno` as on every executor.
 - **RENOHARNESS-2.6** (guard) WHEN a run on `reno` prints to stderr or reaches the journal THE SYSTEM SHALL CONTINUE TO replace the run's secret values (exact match, 8 bytes or longer) with their `[secret:NAME]` mark in what is logged, kept or journaled.
 
@@ -46,13 +46,13 @@ run whose executor is the Reno harness.
 **Story:** As the owner, I want every tool call a Reno-harness bot makes to be decided by Reno's policy before it runs, so that a call I forbid never happens.
 
 - **RENOHARNESS-3.1** WHEN Pi is about to run a tool call on `reno` THE SYSTEM SHALL hold the call until Reno's approval ladder answers it, raised as `NeedsApproval` to the same policy, standing rules, inbox and journal that every run uses. [Lock L11, L17]
-- **RENOHARNESS-3.2** THE SYSTEM SHALL hold, as RENOHARNESS-3.1 says, every kind of call Pi runs: built-in read, bash, edit and write; MCP tools; each of several calls in one assistant message; and each nested call of a codemode script. [Lock L12 (ADR-0002); L15]
+- **RENOHARNESS-3.2** THE SYSTEM SHALL hold, as RENOHARNESS-3.1 says, every call Pi runs, whatever its tool: for example its built-in tools, MCP tools, each of several calls in one assistant message, each nested call of a codemode script, and a tool an extension adds. [Lock L9, L12 (ADR-0002), L15, L19]
 - **RENOHARNESS-3.3** WHEN the ladder denies a call on `reno` THE SYSTEM SHALL block it in Pi, so that it runs no part of its effect. [Lock L1, L9]
 - **RENOHARNESS-3.4** WHEN the ladder denies a call on `reno` THE SYSTEM SHALL give the bot the ladder's reason as that call's result. [Lock L21]
 - **RENOHARNESS-3.5** WHEN the ladder allows a call on `reno` THE SYSTEM SHALL let Pi run it with exactly the arguments it was judged on. [agent-decided]
-- **RENOHARNESS-3.6** WHILE a run on `reno` is `full_access` THE SYSTEM SHALL answer its calls as the ladder does for every executor at full access: a policy deny, a standing deny or a repeat denial refuses; a policy or standing allow allows; a call to a tool of Reno's own MCP server is allowed; a call a policy rule names with the effect `ask` is asked of the owner; and the rest is allowed without asking. [Weigh W3]
+- **RENOHARNESS-3.6** WHILE a run on `reno` is `full_access` THE SYSTEM SHALL answer its calls as the ladder does for every executor at full access: a policy deny, a standing deny or a repeat denial refuses; a policy or standing allow allows; a call to a tool of Reno's own MCP server is allowed (even when an `ask` rule names it); a call a policy rule names with the effect `ask` is asked of the owner; and the rest is allowed without asking. [Weigh W3]
 - **RENOHARNESS-3.7** WHILE a run on `reno` is `supervised` THE SYSTEM SHALL ask the owner through the inbox about every call that the policy and the standing rules neither allow nor deny, that this run has not already refused, and that is not a call to a tool of Reno's own MCP server. [Weigh W3]
-- **RENOHARNESS-3.8** WHEN the gate raises a call on `reno` THE SYSTEM SHALL describe it to the ladder with the action class, command and paths that the policy and the built-in protection read: `write` and `edit` as edits with their paths, `bash` as a command with its command line, `read` as a read with its path, and MCP tools as MCP tool calls with their tool name. [Lock L11; L15 ("the gate is not a sandbox")]
+- **RENOHARNESS-3.8** WHEN the gate raises a call on `reno` THE SYSTEM SHALL describe it to the ladder with the action class, command and paths that the policy and the built-in protection read: `write` and `edit` as edits with their paths; `bash` and `powershell` as commands with their command line; `read`, `grep`, `find` and `ls` as reads with their paths; MCP tools as MCP tool calls with their tool name; and any other tool as class `other` with its tool name, judged like any call and never let through unraised. [Lock L11; L15 ("the gate is not a sandbox")]
 
 ## 4. Every tool call is on record, with its arguments, before it runs
 
@@ -94,7 +94,7 @@ run whose executor is the Reno harness.
 
 ## 8. The run goes on until the harness says it is done
 
-**Story:** As the owner, I want a Reno-harness run to end when Pi itself settles, so that Reno does not cut a long task short.
+**Story:** As the owner, I want a Reno-harness run to end when Pi itself settles, so that Reno adds no limit of its own to a long task.
 
 - **RENOHARNESS-8.1** THE SYSTEM SHALL add no limit of its own on the turns or tool calls of a run on `reno`. [Lock L1, L13]
 - **RENOHARNESS-8.2** WHEN Pi reports `agent_settled` for a run on `reno` THE SYSTEM SHALL end the run, with the stop reason that Pi's last assistant message gives, as the `pi` driver does. [Lock L1, L21]
@@ -153,21 +153,21 @@ Files the change touches, and what each guards:
 
 System-doc consult: `docs/product/metrics.md`, `docs/ops/reliability.md` and `docs/security/threat-model.md` are absent, so the consult is a no-op. The targets below are domain judgment with no greppable ID.
 
-- **Performance:** **RENOHARNESS-11.1** WHEN the ladder answers a call on `reno` with no person involved THE SYSTEM SHALL add at most 50 ms at p99 between the gate's request and its answer, over 200 policy-allowed calls, verified by the `--ignored` live Pi test with Pi's mock provider. [agent-decided]
-- **Security:** **RENOHARNESS-11.2** THE SYSTEM SHALL make each run's gate socket reachable only by the owner's user, and accept on it only the one connection whose hello carries that run's nonce, closing any other with no decision given, verified by a unit test that connects a second client. [agent-decided]
-- **Reliability:** **RENOHARNESS-11.3** THE SYSTEM SHALL hold at most a bounded number of unanswered gate requests per run, and deny each request beyond the bound, verified by a test that floods the socket. [agent-decided; ARCH-11]
-- **Reliability:** **RENOHARNESS-11.4** WHEN a run on `reno` ends, however it ends, THE SYSTEM SHALL remove its socket and the files Reno wrote for it, verified by a test that ends runs as done, failed, cancelled and with Pi killed. [agent-decided]
+- **Performance:** None. There is no standing target: no metrics or reliability doc defines one, and no number for the real path (one `synchronous=FULL` commit plus a journal write per call) has been measured. The spike's figure was for a path without either. The `--ignored` live Pi test reports gated-call latency over 200 policy-allowed calls as a measurement, with no pass or fail bound. A target, if one is wanted, is set from that first measurement.
+- **Security:** **RENOHARNESS-11.1** THE SYSTEM SHALL make each run's gate socket reachable only by the owner's user, and accept on it only the one connection whose hello carries that run's nonce, closing any other with no decision given, verified by a unit test that connects a second client. [agent-decided]
+- **Reliability:** **RENOHARNESS-11.2** THE SYSTEM SHALL hold at most a bounded number of unanswered gate requests per run, and deny each request beyond the bound, verified by a test that floods the socket. [agent-decided; ARCH-11]
+- **Reliability:** **RENOHARNESS-11.3** WHEN a run on `reno` ends, however it ends, THE SYSTEM SHALL remove its socket and the files Reno wrote for it, verified by a test that ends runs as done, failed, cancelled and with Pi killed. [agent-decided]
 - **Accessibility:** None — this feature adds no screen. The app names the executor by its generic rule (`apps/reno-app/src/summary.rs:272-287`).
 
 ## Out of Scope
 
 - What the policy allows, asks or refuses, and per-bot tool and domain lists: ROAD-63. With the shipped defaults (`supervised`, policy `ask`), a `reno` bot asks about every call that the shipped policy rules, the built-in protection, the repeat-denial rule and Reno's own MCP tools do not answer, until ROAD-63 sets its bounds.
 - How finely the ladder tells calls apart. A subject's digest leaves out its raw arguments, so two calls with the same tool, command and paths count as one for repeat denial and standing rules. For an MCP tool, every call to that tool in a run counts as one. This feature keeps the ladder as shipped; finer subjects are ROAD-63's.
-- `max_wall_time` defaults and cost display: ROAD-64.
+- `max_wall_time` defaults and cost display: ROAD-64. With the shipped default `max_wall_time = 45m` (`crates/reno-proto/src/defs/bot.rs:165-166`), a run on `reno` is still stopped at 45 minutes until ROAD-64 changes it. GOAL-10's "nothing caps a run by default" is not met by this feature alone.
 - Showing usage per call. Pi reports usage per assistant turn, and this feature records it per turn. MILE-11's "the owner sees each call with its usage" is not met by this feature alone; its display is ROAD-64's, and the MILE-11 assessment checks it.
 - The bot's computer, VM, egress allowlist and browser: MILE-12.
 - Runs the owner starts on other harnesses deciding their own permissions (ROAD-4), and harness questions in general (ROAD-1).
-- Argument rewrite by the gate, `auto_accept_edits` on `reno`, a new wire method, a migration or new persisted format, and any new screen.
+- Argument rewrite by the gate, `auto_accept_edits` on `reno`, a new wire method, a migration or new persisted format, a new variant of a persisted or wire enum (`RejectReason`, `StartRefusal`, `ExecEvent`), and any new screen.
 - Exfiltration of the provider key. A model-run command can read the key from the run's environment, because secrets are environment variables of the run. This is an accepted risk handed to ROAD-63.
 
 ## Open Questions
