@@ -44,6 +44,9 @@ RENO_PI_LIVE=1 cargo test -p reno-harness --test pi a_real_pi_behind -- --ignore
 Without the `--skip`, that filter also runs `a_real_pi_behind_the_gate_reports_how_long_two_hundred_allowed_calls_take`,
 a measurement of 200 allowed calls rather than a check.
 
+On a Pi bump also re-check which tools Pi activates by default: 1.5.0 activates only `read`,
+`bash`, `edit` and `write`, so the live checks drive no `grep`, `find` or `ls` call.
+
 Then re-check, against the new Pi, the two things the gate's safety rests on, both written up in
 `docs/specs/2026-11-22-reno-harness/design.md`: the reload paths (what in RPC mode can reload
 settings or extensions, so that nothing can displace the gate mid-attempt: "Reload paths in RPC
