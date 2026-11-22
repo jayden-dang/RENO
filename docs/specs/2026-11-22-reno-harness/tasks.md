@@ -8,7 +8,8 @@
 > The chosen skill writes `Execution-mode:`. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Feature code: RENOHARNESS
-Status: Draft
+Status: Approved
+Approval: Approved by the operator (Jayden Đặng), 2026-11-22, after reading the spec sheet at 02afd14: "approve"
 Date: 2026-11-22
 Execution-mode: unset
 Max-concurrency: auto

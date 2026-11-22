@@ -1,7 +1,8 @@
 # Design: Bots run on Reno's own harness, with every tool call seen by Reno
 
 Feature code: RENOHARNESS
-Status: Draft
+Status: Approved
+Approval: Approved by the operator (Jayden Đặng), 2026-11-22, after reading the spec sheet at 02afd14: "approve"
 Date: 2026-11-22
 Requirements: ./requirements.md
 
