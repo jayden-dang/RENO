@@ -276,15 +276,15 @@ and `prefs.rs`
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `in_auto_reasoning_is_open_while_it_streams_and_closes_when_it_ends`;
   - `an_owner_toggle_while_streaming_keeps_the_owners_choice`;
   - `preview_caps_streaming_reasoning_at_sixteen_lines`;
   - `the_thinking_setting_round_trips_and_a_missing_key_is_auto`.
   Run: `cargo test -p reno-app thinking` — expect: fails.
-- [ ] **Step 2:** Implement the four modes and the Settings › General row. Add the key to `KEYS`. Run:
+- [x] **Step 2:** Implement the four modes and the Settings › General row. Add the key to `KEYS`. Run:
   `cargo test -p reno-app` — expect: pass.
-- [ ] **Step 3:** Commit `transcript: reasoning opens while it streams; Thinking setting in General`.
+- [x] **Step 3:** Commit `transcript: reasoning opens while it streams; Thinking setting in General`.
 
 _Requirements: TRANSCRIPT-13.3, TRANSCRIPT-13.17_
 
