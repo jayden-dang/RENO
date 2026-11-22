@@ -21,6 +21,7 @@ use gpui::{
 };
 
 use super::RunScreen;
+use crate::actions::{End, Home, LineDown, LineUp, NextPrompt, PageDown, PageUp, PrevPrompt};
 use crate::transcript::Key;
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
@@ -42,7 +43,17 @@ const SCROLL_STEP_MAX: f32 = 48.0;
 const SCROLL_EVERY: Duration = Duration::from_millis(16);
 
 pub(super) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("cmd-c", CopyTranscript, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("cmd-c", CopyTranscript, Some(CONTEXT)),
+        KeyBinding::new("pageup", PageUp, Some(CONTEXT)),
+        KeyBinding::new("pagedown", PageDown, Some(CONTEXT)),
+        KeyBinding::new("up", LineUp, Some(CONTEXT)),
+        KeyBinding::new("down", LineDown, Some(CONTEXT)),
+        KeyBinding::new("home", Home, Some(CONTEXT)),
+        KeyBinding::new("end", End, Some(CONTEXT)),
+        KeyBinding::new("shift-pageup", PrevPrompt, Some(CONTEXT)),
+        KeyBinding::new("shift-pagedown", NextPrompt, Some(CONTEXT)),
+    ]);
 }
 
 #[derive(Clone, Copy)]
@@ -551,6 +562,14 @@ impl RunScreen {
             .key_context(CONTEXT)
             .track_focus(&self.transcript_focus)
             .on_action(cx.listener(|this, _: &CopyTranscript, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.key_page(-1, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.key_page(1, cx)))
+            .on_action(cx.listener(|this, _: &LineUp, _, cx| this.key_lines(-1, cx)))
+            .on_action(cx.listener(|this, _: &LineDown, _, cx| this.key_lines(1, cx)))
+            .on_action(cx.listener(|this, _: &Home, _, cx| this.key_home(cx)))
+            .on_action(cx.listener(|this, _: &End, _, cx| this.jump_to_latest(cx)))
+            .on_action(cx.listener(|this, _: &PrevPrompt, w, cx| this.step_prompt(-1, w, cx)))
+            .on_action(cx.listener(|this, _: &NextPrompt, w, cx| this.step_prompt(1, w, cx)))
             .into_any_element();
         let tracker = DragTracker {
             screen: cx.entity(),

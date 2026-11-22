@@ -32,6 +32,16 @@ actions!(
         ToggleMatchCase,
         ToggleWholeWord,
         ToggleRegex,
+        // The transcript, while it has the keyboard: page, three lines, either end, and the
+        // previous or next prompt.
+        PageUp,
+        PageDown,
+        LineUp,
+        LineDown,
+        Home,
+        End,
+        PrevPrompt,
+        NextPrompt,
         // The sidebar's thread menu: Escape closes what is open; the others act on the thread.
         DismissSidebar,
         PinThread,

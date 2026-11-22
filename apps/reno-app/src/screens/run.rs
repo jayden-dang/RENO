@@ -72,6 +72,13 @@ const CHANGES_EVERY: Duration = Duration::from_secs(1);
 const COLUMN: f32 = 760.0;
 /// Width of the tick rail at the column's left edge.
 const RAIL: f32 = 16.0;
+/// A page of the keyboard is this much of the viewport.
+const PAGE_OF_VIEWPORT: f32 = 0.9;
+/// Three lines of the transcript's body text (24 px each), the step of the arrow keys.
+const LINE_STEP: f32 = 3.0 * 24.0;
+/// A message's text starts this far or less below the view's top: it is the one at the top (a
+/// bubble's padding sits above its text).
+const PROMPT_AT_TOP: f32 = 48.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
 /// How many items from the top of the view are measured again when the renderers settle.
@@ -1178,6 +1185,108 @@ impl RunScreen {
         });
         self.note_place(cx);
         cx.notify();
+    }
+
+    /// How far the view is scrolled, in pixels from the start of the transcript. At the tail the
+    /// list's own scroll top is the end of the content, not the top of the view, so it is
+    /// clamped.
+    fn scrolled_px(&self) -> f32 {
+        let end = f32::from(self.list.max_offset_for_scrollbar().y);
+        (-f32::from(self.list.scroll_px_offset_for_scrollbar().y)).clamp(0.0, end)
+    }
+
+    /// Puts the top of the view `to` pixels from the start of the transcript; the end of the
+    /// thread is the tail, which the list follows again.
+    fn scroll_to_px(&mut self, to: f32) {
+        let to = to.clamp(0.0, f32::from(self.list.max_offset_for_scrollbar().y));
+        if to == 0.0 {
+            // Rows not measured yet count for no height, so a pixel offset of 0 could land past
+            // them.
+            self.list.scroll_to(ListOffset::default());
+        } else {
+            self.list
+                .set_offset_from_scrollbar(gpui::point(px(0.0), px(-to)));
+        }
+    }
+
+    /// Scrolls by a page, 90 % of the viewport, up (`dir` -1) or down (1).
+    fn scroll_page(&mut self, dir: i8) {
+        let page = f32::from(self.list.viewport_bounds().size.height) * PAGE_OF_VIEWPORT;
+        self.scroll_to_px(self.scrolled_px() + f32::from(dir) * page);
+    }
+
+    /// Scrolls by three lines of body text, up (`dir` -1) or down (1).
+    fn scroll_lines(&mut self, dir: i8) {
+        self.scroll_to_px(self.scrolled_px() + f32::from(dir) * LINE_STEP);
+    }
+
+    fn scroll_home(&mut self) {
+        self.scroll_to_px(0.0);
+    }
+
+    /// Runs a key's move of the view and keeps the reading place: no wheel event says it moved.
+    fn moved_by_key(&mut self, cx: &mut Context<Self>, step: impl FnOnce(&mut Self)) {
+        step(self);
+        self.note_place(cx);
+        cx.notify();
+    }
+
+    pub(super) fn key_page(&mut self, dir: i8, cx: &mut Context<Self>) {
+        self.moved_by_key(cx, |s| s.scroll_page(dir));
+    }
+
+    pub(super) fn key_lines(&mut self, dir: i8, cx: &mut Context<Self>) {
+        self.moved_by_key(cx, |s| s.scroll_lines(dir));
+    }
+
+    pub(super) fn key_home(&mut self, cx: &mut Context<Self>) {
+        self.moved_by_key(cx, Self::scroll_home);
+    }
+
+    /// Takes the view to the user message before (`dir` -1) or after (1) the one at its top.
+    /// A message whose text starts above the view's top is above it; one that starts within
+    /// `PROMPT_AT_TOP` of it is the one in view. With none that way, the view stays.
+    pub(super) fn step_prompt(&mut self, dir: i8, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.prompt_beside(dir) else {
+            return;
+        };
+        self.scroll_to_row(row, cx);
+        // A message near the end cannot reach the top: the list settles at the tail on its next
+        // layout, and the place is read again from there.
+        let screen = cx.weak_entity();
+        window.on_next_frame(move |_, cx| {
+            screen.update(cx, |this, cx| this.note_place(cx)).ok();
+        });
+    }
+
+    fn prompt_beside(&self, dir: i8) -> Option<usize> {
+        let top = f32::from(self.select.list.get().top());
+        let painted = self.select.registry.borrow();
+        let first_painted = painted
+            .iter()
+            .filter_map(|p| self.items.item_of(p.key))
+            .min()?;
+        // Where a message's text starts, from the view's top; a message not painted is above the
+        // first thing that is, or below the last.
+        let start = |mark: &convo::TickMark| -> f32 {
+            let key = self.rows[mark.row].key();
+            painted
+                .iter()
+                .filter(|p| p.key == key)
+                .map(|p| f32::from(p.bounds.top()) - top)
+                .reduce(f32::min)
+                .unwrap_or(if self.items.item_of_top(mark.row) < first_painted {
+                    f32::NEG_INFINITY
+                } else {
+                    f32::INFINITY
+                })
+        };
+        let row = if dir < 0 {
+            self.ticks.iter().rev().find(|m| start(m) < 0.0)
+        } else {
+            self.ticks.iter().find(|m| start(m) > PROMPT_AT_TOP)
+        };
+        row.map(|m| m.row)
     }
 
     /// The thin rail at the column's left edge: one tick for each user message; a click scrolls

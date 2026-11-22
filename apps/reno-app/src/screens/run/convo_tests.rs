@@ -472,3 +472,208 @@ fn always_open_and_always_closed_hold_while_streaming_and_after(cx: &mut TestApp
     click(vcx, &format!("reasoning-{}", later.0));
     assert!(!body_painted(vcx, later), "the owner can close it");
 }
+
+/// A long thread of two prompts with the transcript's keys bound and the transcript holding the
+/// keyboard, as it does after the owner selects text in it.
+fn keyed_thread(
+    cx: &mut TestAppContext,
+) -> (Entity<RootView>, &mut VisualTestContext, Entity<RunScreen>) {
+    cx.update(|cx| {
+        crate::actions::bind_keys(cx);
+        crate::ui::composer::bind_keys(cx);
+        super::bind_keys(cx);
+    });
+    let (root, vcx, screen) = long_thread(cx);
+    wait_drawn(vcx, |vcx| painted(vcx, "tick-rail"));
+    vcx.update(|window, cx| {
+        let focus = screen.read(cx).transcript_focus.clone();
+        window.focus(&focus, cx);
+    });
+    draw(vcx);
+    (root, vcx, screen)
+}
+
+/// Presses the keys and lets the frame they cause come and go, as the app would.
+fn press(vcx: &mut VisualTestContext, keys: &str) {
+    vcx.simulate_keystrokes(keys);
+    draw(vcx);
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    draw(vcx);
+}
+
+/// How far the view is scrolled, in pixels from the very top of the transcript.
+fn scrolled(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> f32 {
+    screen.read_with(vcx, |s, _| {
+        let max = f32::from(s.list.max_offset_for_scrollbar().y);
+        (-f32::from(s.list.scroll_px_offset_for_scrollbar().y)).min(max)
+    })
+}
+
+fn viewport_and_longest(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> (f32, f32) {
+    screen.read_with(vcx, |s, _| {
+        (
+            f32::from(s.list.viewport_bounds().size.height),
+            f32::from(s.list.max_offset_for_scrollbar().y),
+        )
+    })
+}
+
+fn following(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> bool {
+    screen.read_with(vcx, |s, _| s.is_following_tail())
+}
+
+fn near(got: f32, want: f32, what: &str) {
+    assert!((got - want).abs() <= 1.5, "{what}: {got} is not {want}");
+}
+
+const THREE_LINES: f32 = 72.0;
+
+#[gpui::test]
+fn page_line_home_and_end_keys_scroll_the_transcript(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = keyed_thread(cx);
+    let (viewport, end) = viewport_and_longest(vcx, &screen);
+    assert!(
+        end > viewport * 2.0,
+        "the thread is long: {end} vs {viewport}"
+    );
+    assert!(following(vcx, &screen), "a thread opens at its tail");
+    near(scrolled(vcx, &screen), end, "at the tail");
+
+    press(vcx, "pageup");
+    near(
+        scrolled(vcx, &screen),
+        end - viewport * 0.9,
+        "page up from the tail",
+    );
+    assert!(!following(vcx, &screen));
+
+    press(vcx, "up");
+    near(
+        scrolled(vcx, &screen),
+        end - viewport * 0.9 - THREE_LINES,
+        "three lines up",
+    );
+    press(vcx, "down");
+    near(
+        scrolled(vcx, &screen),
+        end - viewport * 0.9,
+        "three lines down",
+    );
+
+    press(vcx, "pagedown");
+    near(scrolled(vcx, &screen), end, "page down back to the end");
+    assert!(following(vcx, &screen), "the end of the thread is its tail");
+
+    press(vcx, "home");
+    near(scrolled(vcx, &screen), 0.0, "home");
+    assert!(!following(vcx, &screen));
+    press(vcx, "up");
+    near(scrolled(vcx, &screen), 0.0, "up at the top stays");
+    press(vcx, "pagedown");
+    near(
+        scrolled(vcx, &screen),
+        viewport * 0.9,
+        "page down from the top",
+    );
+
+    press(vcx, "end");
+    // Walking the thread measured the rows it passed, so its length is truer now.
+    let (_, end) = viewport_and_longest(vcx, &screen);
+    near(scrolled(vcx, &screen), end, "end");
+    assert!(following(vcx, &screen));
+    press(vcx, "down");
+    near(scrolled(vcx, &screen), end, "down at the tail stays");
+}
+
+#[gpui::test]
+fn shift_page_keys_go_to_the_previous_and_next_prompt(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = keyed_thread(cx);
+    let users = user_rows(vcx, &screen);
+    let top_row = |vcx: &VisualTestContext| screen.read_with(vcx, |s, _| s.top_row());
+    let (viewport, _) = viewport_and_longest(vcx, &screen);
+
+    // From the tail the last prompt is in view, so the one before it is the previous.
+    press(vcx, "shift-pageup");
+    assert_eq!(top_row(vcx), users[0]);
+    assert!(!following(vcx, &screen));
+    near(
+        scrolled(vcx, &screen),
+        0.0,
+        "the first prompt is at the top",
+    );
+    press(vcx, "shift-pageup");
+    assert_eq!(top_row(vcx), users[0], "no prompt above the first");
+    near(scrolled(vcx, &screen), 0.0, "and the view stays");
+
+    // The prompt at the top is the one in view: next is the following one, the last, which is
+    // near the end of the thread, so the view ends at the tail.
+    press(vcx, "shift-pagedown");
+    assert!(following(vcx, &screen), "the last prompt is near the end");
+    assert!(top_row(vcx) >= users[1]);
+    press(vcx, "shift-pagedown");
+    assert!(
+        following(vcx, &screen),
+        "no prompt after the last: the view stays"
+    );
+
+    // A prompt partly scrolled off the top is the previous one.
+    press(vcx, "home");
+    press(vcx, "pagedown");
+    assert!(scrolled(vcx, &screen) > viewport * 0.8);
+    press(vcx, "shift-pageup");
+    near(
+        scrolled(vcx, &screen),
+        0.0,
+        "back to the prompt that started this page",
+    );
+    assert_eq!(top_row(vcx), users[0]);
+}
+
+#[gpui::test]
+fn the_composers_keys_are_unchanged_while_it_has_the_keyboard(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = keyed_thread(cx);
+    press(vcx, "pageup");
+    let before = scrolled(vcx, &screen);
+    let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+    vcx.update(|window, cx| {
+        steer.update(cx, |c, cx| c.fill("one line", window, cx));
+        window.focus(&steer.read(cx).focus_handle_ref().clone(), cx);
+    });
+    draw(vcx);
+    for keys in [
+        "pageup",
+        "pagedown",
+        "up",
+        "down",
+        "home",
+        "end",
+        "shift-pageup",
+    ] {
+        press(vcx, keys);
+        near(scrolled(vcx, &screen), before, keys);
+    }
+}
+
+#[gpui::test]
+fn every_key_that_moves_the_view_keeps_the_reading_place(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = keyed_thread(cx);
+    let in_step = |vcx: &mut VisualTestContext, keys: &str, at_tail: bool| {
+        press(vcx, keys);
+        screen.read_with(vcx, |s, _| {
+            let want = s.saved_place();
+            assert_eq!(want.is_none(), at_tail, "{keys}: place {want:?}");
+            assert_eq!(s.panel_state().place(), want, "{keys} left a stale place");
+        });
+    };
+    in_step(vcx, "pageup", false);
+    in_step(vcx, "up", false);
+    in_step(vcx, "down", false);
+    in_step(vcx, "pagedown", true);
+    in_step(vcx, "pageup", false);
+    in_step(vcx, "end", true);
+    in_step(vcx, "pageup", false);
+    in_step(vcx, "home", false);
+    in_step(vcx, "pagedown", false);
+    in_step(vcx, "shift-pageup", false);
+    in_step(vcx, "shift-pagedown", true);
+}
