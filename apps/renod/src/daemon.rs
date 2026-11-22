@@ -286,7 +286,7 @@ impl Daemon {
                 hold_mock,
                 stream_mock,
                 harnesses,
-            } => executors::discover(hold_mock, stream_mock, harnesses)?,
+            } => executors::discover(hold_mock, stream_mock, harnesses, &paths.data_dir)?,
             ExecutorSource::Given(set) => set,
         };
         let db = paths.db();

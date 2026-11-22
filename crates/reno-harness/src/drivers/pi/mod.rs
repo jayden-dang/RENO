@@ -95,10 +95,45 @@ const CONTRACT_VERSION: u32 = 1;
 /// The id this executor registers under.
 pub const EXECUTOR_ID: &str = "pi";
 
+/// The id of the Reno-governed flavor of this driver.
+pub const RENO_EXECUTOR_ID: &str = "reno";
+
 static ID: LazyLock<ExecutorId> = LazyLock::new(|| match EXECUTOR_ID.parse() {
     Ok(id) => id,
     Err(error) => unreachable!("{EXECUTOR_ID} is a valid executor id: {error}"),
 });
+
+static RENO_ID: LazyLock<ExecutorId> = LazyLock::new(|| match RENO_EXECUTOR_ID.parse() {
+    Ok(id) => id,
+    Err(error) => unreachable!("{RENO_EXECUTOR_ID} is a valid executor id: {error}"),
+});
+
+/// Who governs the tool calls of a run: Pi's own behavior for the owner (`pi`), or Reno (`reno`).
+#[derive(Debug, Clone)]
+#[expect(dead_code, reason = "read once a Reno run is armed")]
+enum Flavor {
+    Owner,
+    Reno { sessions_root: PathBuf },
+}
+
+impl Flavor {
+    fn id(&self) -> &ExecutorId {
+        match self {
+            Self::Owner => &ID,
+            Self::Reno { .. } => &RENO_ID,
+        }
+    }
+
+    fn access_modes(&self) -> Vec<AccessMode> {
+        match self {
+            Self::Owner => vec![AccessMode::FullAccess],
+            Self::Reno { .. } => vec![AccessMode::Supervised, AccessMode::FullAccess],
+        }
+    }
+}
+
+/// How long arming a run's gate may take, unless tuned.
+const ARMING_BUDGET: Duration = Duration::from_secs(10);
 
 /// What the stream carries before the consumer reads.
 const EVENT_CAPACITY: usize = 256;
@@ -187,17 +222,22 @@ fn is_default_model(model: Option<&str>) -> bool {
     model.is_none_or(|m| m.is_empty() || m == "default")
 }
 
-/// The Pi executor. Construct with [`PiExecutor::new`]; tests point it at a fake Pi with
+/// The Pi executor. Construct with [`PiExecutor::new`] (the owner's `pi`) or
+/// [`PiExecutor::reno`] (the `reno` executor); tests point it at a fake Pi with
 /// [`PiExecutor::with_executable`].
+///
+/// `reno` runs the same CLI but is refused a run until it is armed: a run on it never starts
+/// without Reno deciding its tool calls.
 ///
 /// # Access modes
 ///
-/// Pi asks for no approval before a tool call, so there is nothing for Reno to decide: the
+/// For `pi`: Pi asks for no approval before a tool call, so there is nothing for Reno to decide: the
 /// executor honours [`AccessMode::FullAccess`] and the unrestricted sandbox only, and `start`
 /// refuses anything else before spawning (ARCH-15), like Grok and Devin. Pi's own tool allowlist
 /// (`--tools read,grep,find,ls`) would make a read-only mode, but it also applies to the tools of
 /// MCP servers and extensions, and has not been checked to hold; it is not claimed.
 pub struct PiExecutor {
+    flavor: Flavor,
     executable: Option<PathBuf>,
     /// Grace between asking Pi to abort and ending it.
     interrupt_grace: Duration,
@@ -209,6 +249,8 @@ pub struct PiExecutor {
     models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
     /// How long `probe` lets its short-lived Pi take in all.
     probe_budget: Duration,
+    /// How long arming a run's gate may take.
+    arming_budget: Duration,
     tracker: TaskTracker,
     unknown: UnknownFrames,
 }
@@ -224,12 +266,14 @@ impl std::fmt::Debug for PiExecutor {
 impl Default for PiExecutor {
     fn default() -> Self {
         Self {
+            flavor: Flavor::Owner,
             executable: None,
             interrupt_grace: Duration::from_secs(5),
             kill_grace: Duration::from_secs(3),
             cli_version: Arc::new(Mutex::new(None)),
             models: Arc::new(Mutex::new(None)),
             probe_budget: probe::WIRE_BUDGET,
+            arming_budget: ARMING_BUDGET,
             tracker: TaskTracker::new(),
             unknown: UnknownFrames::new(),
         }
@@ -241,6 +285,15 @@ impl PiExecutor {
     /// location.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The `reno` executor: the same Pi CLI, governed by Reno. Each run keeps its Pi sessions
+    /// under `sessions_root`.
+    pub fn reno(sessions_root: PathBuf) -> Self {
+        Self {
+            flavor: Flavor::Reno { sessions_root },
+            ..Self::default()
+        }
     }
 
     /// Use a fixed CLI binary instead of PATH and known-location resolution.
@@ -262,6 +315,13 @@ impl PiExecutor {
     #[must_use]
     pub fn with_probe_budget(mut self, budget: Duration) -> Self {
         self.probe_budget = budget;
+        self
+    }
+
+    /// Bound how long arming a run's gate may take (tests shrink it; default 10 s).
+    #[must_use]
+    pub fn with_arming_budget(mut self, budget: Duration) -> Self {
+        self.arming_budget = budget;
         self
     }
 
@@ -337,7 +397,10 @@ impl PiExecutor {
 #[async_trait]
 impl Executor for PiExecutor {
     fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
-        crate::exec::maintenance::declaration(&HarnessId::Pi)
+        match self.flavor {
+            Flavor::Owner => crate::exec::maintenance::declaration(&HarnessId::Pi),
+            Flavor::Reno { .. } => None,
+        }
     }
 
     fn descriptor(&self) -> ExecutorDescriptor {
@@ -353,7 +416,7 @@ impl Executor for PiExecutor {
             .clone()
             .unwrap_or_else(default_models);
         ExecutorDescriptor {
-            id: ID.clone(),
+            id: self.flavor.id().clone(),
             contract_version: CONTRACT_VERSION,
             adapter_version: match cli {
                 Some(cli) => format!(
@@ -373,8 +436,9 @@ impl Executor for PiExecutor {
                 // A steering message lands after the current assistant turn's tool calls.
                 steering: Steering::StepBoundary,
                 resume: true,
-                // Pi asks nothing before a tool call: full access, unrestricted, or refused.
-                access_modes: vec![AccessMode::FullAccess],
+                // `pi` asks nothing before a tool call: full access, unrestricted, or refused.
+                // `reno` also takes supervised: Reno decides each call.
+                access_modes: self.flavor.access_modes(),
                 sandbox_levels: vec![SandboxLevel::Unrestricted],
                 mcp_injection: true,
                 structured_output: false,
@@ -435,8 +499,10 @@ impl Executor for PiExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
         );
-        let (signed_in, models) = if matches!(version_gate, VersionGate::TooOld { .. }) {
-            // A Pi this old is not launched.
+        let owner = matches!(self.flavor, Flavor::Owner);
+        let (signed_in, models) = if !owner || matches!(version_gate, VersionGate::TooOld { .. }) {
+            // A Pi this old is not launched, and the owner's credentials are never read for
+            // `reno`: its models are the curated ones.
             (SignedIn::Unknown, fallback())
         } else {
             match self.query_models(&exe, self.probe_budget).await {
@@ -469,8 +535,13 @@ impl Executor for PiExecutor {
         controls: ExecControls,
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
-        require_access(spec.access, &[AccessMode::FullAccess])?;
+        require_access(spec.access, &self.flavor.access_modes())?;
         require_sandbox(spec.sandbox, &[SandboxLevel::Unrestricted])?;
+        if matches!(self.flavor, Flavor::Reno { .. }) {
+            return Err(ExecError::InvalidSpec(
+                "the Reno harness is not armed in this build".into(),
+            ));
+        }
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }

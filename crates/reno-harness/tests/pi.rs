@@ -1046,6 +1046,107 @@ fn the_descriptor_matches_what_the_driver_does() {
     assert!(declared.updaters.is_empty());
 }
 
+fn reno_executor(bench: &Bench) -> PiExecutor {
+    PiExecutor::reno(bench.sessions())
+        .with_executable(fake())
+        .with_graces(Duration::from_millis(500), Duration::from_millis(300))
+}
+
+#[test]
+fn reno_declares_supervised_and_full_access_with_no_sandbox_ceiling() {
+    let bench = Bench::new();
+    let descriptor = reno_executor(&bench).descriptor();
+    assert_eq!(descriptor.id.as_str(), reno_harness::pi::RENO_EXECUTOR_ID);
+    assert_eq!(descriptor.id.as_str(), "reno");
+    assert_eq!(
+        descriptor.caps.access_modes,
+        [AccessMode::Supervised, AccessMode::FullAccess]
+    );
+    assert_eq!(descriptor.caps.sandbox_levels, [SandboxLevel::Unrestricted]);
+    assert!(descriptor.caps.resume);
+    assert!(descriptor.caps.isolates_user_config);
+    assert_eq!(descriptor.cli_verified.min, "1.5.0");
+    assert_eq!(descriptor.cli_verified.verified, "1.5.0");
+}
+
+#[test]
+fn reno_flavor_leaves_the_pi_descriptor_as_it_was() {
+    let descriptor = PiExecutor::new().descriptor();
+    assert_eq!(descriptor.id.as_str(), "pi");
+    assert_eq!(descriptor.caps.access_modes, [AccessMode::FullAccess]);
+    assert_eq!(descriptor.caps.sandbox_levels, [SandboxLevel::Unrestricted]);
+    assert!(descriptor.caps.resume);
+    assert!(descriptor.caps.isolates_user_config);
+    assert!(PiExecutor::new().maintenance().is_some());
+}
+
+#[test]
+fn reno_has_no_install_update_or_sign_in_row_of_its_own() {
+    let bench = Bench::new();
+    assert!(reno_executor(&bench).maintenance().is_none());
+}
+
+#[tokio::test]
+async fn reno_probe_does_not_ask_pi_for_the_owners_credentials() {
+    let bench = Bench::new();
+    let wrapper = wrapped(
+        bench.dir.path(),
+        &[("FAKE_PI_LOG", bench.log().to_str().unwrap())],
+    );
+    let exec = PiExecutor::reno(bench.sessions()).with_executable(wrapper);
+    let probe = exec.probe().await;
+    assert!(matches!(
+        &probe.installed,
+        InstallStatus::Installed { version: Some(v), .. } if v == "1.5.0"
+    ));
+    assert_eq!(probe.version_gate, VersionGate::Ok);
+    assert_eq!(probe.signed_in, SignedIn::Unknown);
+    assert_eq!(probe.models.source, ModelSource::Curated);
+    assert!(!probe.models.models.is_empty());
+    assert_eq!(exec.descriptor().caps.models, probe.models.models);
+    assert!(bench.logged().is_empty(), "no Pi was started to be asked");
+}
+
+#[tokio::test]
+async fn reno_refuses_a_run_until_it_is_armed() {
+    let bench = Bench::new();
+    for access in [AccessMode::Supervised, AccessMode::FullAccess] {
+        let mut spec = bench.spec("hello");
+        spec.access = access;
+        let (controls, _h) = ExecControls::new(4);
+        let error = reno_executor(&bench)
+            .start(spec, controls)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&error, ExecError::InvalidSpec(why) if why.contains("not armed")),
+            "{error:?}"
+        );
+    }
+    assert!(bench.logged().is_empty(), "nothing was spawned");
+}
+
+#[tokio::test]
+async fn reno_still_refuses_an_access_mode_it_does_not_declare() {
+    let bench = Bench::new();
+    let mut spec = bench.spec("hello");
+    spec.access = AccessMode::AutoAcceptEdits;
+    let (controls, _h) = ExecControls::new(4);
+    let error = reno_executor(&bench)
+        .start(spec, controls)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        ExecError::UnsupportedAccess {
+            requested: AccessMode::AutoAcceptEdits,
+            ..
+        }
+    ));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Live (a real Pi with a local mock provider; no model, no network, no API spend)
 // ---------------------------------------------------------------------------------------------

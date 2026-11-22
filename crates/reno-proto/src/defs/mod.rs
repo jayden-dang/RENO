@@ -122,6 +122,7 @@ pub const BUILTIN_EXECUTORS: &[&str] = &[
     "claude-code",
     "codex",
     "pi",
+    "reno",
     "muse",
     "cursor",
     "opencode",
