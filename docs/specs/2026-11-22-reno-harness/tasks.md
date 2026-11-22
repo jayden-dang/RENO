@@ -516,7 +516,7 @@ _Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.
 
 **Depends-on:** Task 7
 
-- [ ] Write failing tests:
+- [x] Write failing tests:
   - `gate-close`: the gate's connection drops mid-run, and the run ends `Done{stop: Error}` with the "lost its watch"
     reason.
   - `gate-auth-json`: a non-empty `auth.json` written into the agent dir ends the run at the next call, denying it.
@@ -527,10 +527,10 @@ _Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.
   - A `reno` run's client refuses `{"type":"bash"}`.
   - The settings deny-list still refuses `set_auto_compaction` on both flavors, and a `pi` client is otherwise
     unchanged.
-- [ ] Run `cargo test -p reno-harness --test pi reno_watch`, and expect the run to go on after the close.
-- [ ] Implement the three endings and the client flag.
-- [ ] Run, and expect a pass.
-- [ ] `git commit -m "feat(harness): fail a Reno-harness run when its gate goes or a stored credential appears"`
+- [x] Run `cargo test -p reno-harness --test pi reno_watch`, and expect the run to go on after the close.
+- [x] Implement the three endings and the client flag.
+- [x] Run, and expect a pass.
+- [x] `git commit -m "feat(harness): fail a Reno-harness run when its gate goes or a stored credential appears"`
 
 _Requirements: RENOHARNESS-2.7, RENOHARNESS-6.6, RENOHARNESS-7.2, RENOHARNESS-10.2_
 
