@@ -430,7 +430,10 @@ mod tests {
 
     #[test]
     fn a_drag_from_the_middle_of_the_prompt_to_the_middle_of_the_reply_copies_in_order() {
-        let rows = [user(0, "fix the handshake please"), prose(2, "It waits on **the supervisor** to start.")];
+        let rows = [
+            user(0, "fix the handshake please"),
+            prose(2, "It waits on **the supervisor** to start."),
+        ];
         let w = World::new();
         let got = w.copy(&rows, drag(at(0, 4), at(1, 20)));
         assert_eq!(got, "the handshake please\n\nIt waits on the su");
@@ -458,9 +461,21 @@ mod tests {
         assert_eq!(
             a,
             vec![
-                Anchor { key: Key(0), slot: Slot::WHOLE, range: Some(7..13) },
-                Anchor { key: Key::fold(Key(2)), slot: Slot::HEAD, range: None },
-                Anchor { key: Key(8), slot: Slot::WHOLE, range: Some(0..4) },
+                Anchor {
+                    key: Key(0),
+                    slot: Slot::WHOLE,
+                    range: Some(7..13)
+                },
+                Anchor {
+                    key: Key::fold(Key(2)),
+                    slot: Slot::HEAD,
+                    range: None
+                },
+                Anchor {
+                    key: Key(8),
+                    slot: Slot::WHOLE,
+                    range: Some(0..4)
+                },
             ]
         );
         // Every range ends on a character boundary of its source.
@@ -489,7 +504,10 @@ mod tests {
         let long = "word ".repeat(200);
         let rows = [
             user(0, &long),
-            Row::Reasoning { key: Key(2), text: "secret thoughts".into() },
+            Row::Reasoning {
+                key: Key(2),
+                text: "secret thoughts".into(),
+            },
         ];
         let mut w = World::new();
         let all = drag(at(0, 0), at(1, 0));
@@ -499,7 +517,17 @@ mod tests {
         assert!(got.ends_with("Reasoning"), "{got}");
         assert!(got.len() < long.len() / 2, "the cut part is not copied");
         w.open.insert(Key(2));
-        let got = w.copy(&rows, drag(at(0, 0), Pos { ordinal: 1, slot: Slot::WHOLE, off: 6 }));
+        let got = w.copy(
+            &rows,
+            drag(
+                at(0, 0),
+                Pos {
+                    ordinal: 1,
+                    slot: Slot::WHOLE,
+                    off: 6,
+                },
+            ),
+        );
         assert!(got.ends_with("Reasoning\nsecret"), "{got}");
     }
 
@@ -538,7 +566,10 @@ mod tests {
     fn a_click_selects_nothing_and_an_entry_without_texts_is_skipped() {
         let rows = [
             user(0, "a"),
-            Row::Asked { key: Key(2), line: "asked".into() },
+            Row::Asked {
+                key: Key(2),
+                line: "asked".into(),
+            },
             prose(4, "b"),
         ];
         let w = World::new();

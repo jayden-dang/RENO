@@ -611,7 +611,10 @@ mod tests {
         p.reproject(&rows, 0, none);
         assert_eq!(p.len(), 5);
         let visual = |i: usize| p.items[i].visual;
-        assert_eq!((visual(0), visual(1), visual(2), visual(3), visual(4)), (None, None, Some(0), Some(1), None));
+        assert_eq!(
+            (visual(0), visual(1), visual(2), visual(3), visual(4)),
+            (None, None, Some(0), Some(1), None)
+        );
         // The visuals have keys of their own, and show no row.
         assert_eq!(p.item_of(Key::visual(0)), Some(2));
         assert_eq!(p.row(&rows, 2), None);
@@ -623,7 +626,12 @@ mod tests {
 
     #[test]
     fn a_visual_posted_inside_a_fold_shows_with_the_fold_open() {
-        let rows = vec![user(0), worked(2, vec![prose(2, "a")]), prose(8, "end"), done(9)];
+        let rows = vec![
+            user(0),
+            worked(2, vec![prose(2, "a")]),
+            prose(8, "end"),
+            done(9),
+        ];
         let fold = Key::fold(Key(2));
         let mut p = Projection::default();
         p.set_posted(posted(&[(Key(2), &[0])]));
@@ -652,7 +660,10 @@ mod tests {
         let rows = vec![
             user(0),
             prose(3, "reply"),
-            Row::Tools { key: Key(5), calls: vec![] },
+            Row::Tools {
+                key: Key(5),
+                calls: vec![],
+            },
             done(6),
             user(1 << 40),
             prose(3 | 1 << 40, "second"),

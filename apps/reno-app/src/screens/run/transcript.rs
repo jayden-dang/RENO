@@ -18,12 +18,7 @@ use crate::vm::selection::{self, Slot};
 impl RunScreen {
     /// One list item: its row, with the space below it, the subagent chips that hang on it and,
     /// under the last item of a live run, "Thinking".
-    pub(super) fn render_row(
-        &mut self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme::current(cx);
         let variant = Self::variant(cx);
         let Some(item) = self.items.items.get(ix).copied() else {
@@ -44,7 +39,7 @@ impl RunScreen {
             return div().into_any_element();
         };
         let top = item.inner.is_none().then_some(ix);
-        let body = self.row_body(row, top, &theme, variant, window, cx);
+        let body = self.row_body(row, top, &theme, variant, cx);
         // "Thinking" under the last row while the agent works between steps.
         let thinking = item.decor.last && self.is_thinking(cx);
         // A row inside an open fold sits a step closer to its neighbours than a top-level row.
@@ -142,7 +137,6 @@ impl RunScreen {
         top: Option<usize>,
         theme: &Theme,
         variant: Variant,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
@@ -164,21 +158,17 @@ impl RunScreen {
                 // The reply is drawn for this run's worktree, with its find hits painted over the
                 // words and its texts tracked for selection.
                 let client = self.store.read(cx).client();
-                let host = Host::transcript(
-                    Some(self.run_of(*key)),
-                    client,
-                    Some(self.file_links(cx)),
-                )
-                .while_streaming(streaming)
-                .marked(self.find_marks(*key, variant))
-                .selectable(Some(Rc::new(SelectHost {
-                    registry: self.select.registry.clone(),
-                    key: *key,
-                    atoms: stream.atoms(),
-                    selected: self.selected_in_prose(*key, text.len()),
-                    style: pick::selection_style(theme, variant),
-                })));
-                let _ = window;
+                let host =
+                    Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
+                        .while_streaming(streaming)
+                        .marked(self.find_marks(*key, variant))
+                        .selectable(Some(Rc::new(SelectHost {
+                            registry: self.select.registry.clone(),
+                            key: *key,
+                            atoms: stream.atoms(),
+                            selected: self.selected_in_prose(*key, text.len()),
+                            style: pick::selection_style(theme, variant),
+                        })));
                 div()
                     .flex()
                     .flex_col()

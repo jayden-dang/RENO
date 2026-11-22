@@ -291,7 +291,9 @@ impl Builder<'_> {
             };
         }
         if style.math {
-            let src = self.find_math(&run.text).unwrap_or(self.cursor..self.cursor);
+            let src = self
+                .find_math(&run.text)
+                .unwrap_or(self.cursor..self.cursor);
             return Atom {
                 copy: format!("${}$", run.text),
                 text: run.text.clone(),
@@ -355,7 +357,11 @@ impl Builder<'_> {
                 let pairs: Vec<_> = pairs.iter().map(|(s, t)| (from + s, *t)).collect();
                 self.cursor = from + len;
                 let exact = len == text.len() && self.source[from..self.cursor] == *text;
-                let shape = if exact { Shape::Exact } else { Shape::Walk(pairs) };
+                let shape = if exact {
+                    Shape::Exact
+                } else {
+                    Shape::Walk(pairs)
+                };
                 return (from..self.cursor, shape);
             }
         }
@@ -505,7 +511,10 @@ mod tests {
     #[test]
     fn math_copies_with_dollars_whatever_delimiter_the_source_used() {
         assert_eq!(all(r"see \(a+b\) ok"), "see $a+b$ ok");
-        assert_eq!(all("x\n\n$$\\int_0^1 x\\,dx$$\n\ny"), "x\n\n$$\\int_0^1 x\\,dx$$\n\ny");
+        assert_eq!(
+            all("x\n\n$$\\int_0^1 x\\,dx$$\n\ny"),
+            "x\n\n$$\\int_0^1 x\\,dx$$\n\ny"
+        );
         assert_eq!(all("\\[a=b\\]"), "$$a=b$$");
     }
 
@@ -517,7 +526,10 @@ mod tests {
 
     #[test]
     fn an_image_copies_as_its_alt_text_in_brackets() {
-        assert_eq!(all("see ![build graph](docs/graph.png) now"), "see [build graph] now");
+        assert_eq!(
+            all("see ![build graph](docs/graph.png) now"),
+            "see [build graph] now"
+        );
     }
 
     #[test]
@@ -571,7 +583,10 @@ mod tests {
         assert_eq!(bold.src_at(2), 4 + 2);
         assert_eq!(bold.text_at(bold.src.start + 1), 1);
         // On an atomic run the nearer edge wins.
-        let m = atoms_of("p $x$ q").into_iter().find(Atom::is_atomic).unwrap();
+        let m = atoms_of("p $x$ q")
+            .into_iter()
+            .find(Atom::is_atomic)
+            .unwrap();
         assert_eq!(m.src_at(0), m.src.start);
         assert_eq!(m.src_at(m.text.len()), m.src.end);
     }

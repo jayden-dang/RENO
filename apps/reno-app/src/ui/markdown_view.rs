@@ -270,28 +270,37 @@ impl RenderOnce for Markdown {
             base,
         };
         let last = self.tree.blocks.len().saturating_sub(1);
-        div().flex().flex_col().gap(px(10.0)).children(
-            self.tree
-                .blocks
-                .iter()
-                .enumerate()
-                .map(|(at, top)| match &top.block {
-                    Block::CodeBlock { code, language }
-                        if self.host.streaming && at == last && is_mermaid(language) =>
-                    {
-                        env.take_atoms(1);
-                        code_block(
-                            code.trim_end_matches('\n'),
-                            language.as_deref(),
-                            None,
-                            &env,
-                            cx,
-                        )
-                    }
-                    other => block(other, &env, cx),
-                })
-                .collect::<Vec<_>>(),
-        )
+        let blocks = self
+            .tree
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(at, top)| match &top.block {
+                Block::CodeBlock { code, language }
+                    if self.host.streaming && at == last && is_mermaid(language) =>
+                {
+                    env.take_atoms(1);
+                    code_block(
+                        code.trim_end_matches('\n'),
+                        language.as_deref(),
+                        None,
+                        &env,
+                        cx,
+                    )
+                }
+                other => block(other, &env, cx),
+            })
+            .collect::<Vec<_>>();
+        // The draw took exactly the atoms the anchors made for this tree, in the same order:
+        // selection maps painted text to source through them.
+        if let Some(select) = &self.host.select {
+            debug_assert_eq!(
+                env.atom_at.get(),
+                select.atoms.len(),
+                "atoms and drawing differ"
+            );
+        }
+        div().flex().flex_col().gap(px(10.0)).children(blocks)
     }
 }
 
@@ -636,12 +645,7 @@ fn find_hits(env: &Env, text: &str, base: usize) -> Vec<(Range<usize>, bool)> {
 }
 
 /// Files a painted text with the transcript's selection, when the host tracks one.
-fn tracked(
-    env: &Env,
-    element: AnyElement,
-    layout: gpui::TextLayout,
-    segs: Vec<Seg>,
-) -> AnyElement {
+fn tracked(env: &Env, element: AnyElement, layout: gpui::TextLayout, segs: Vec<Seg>) -> AnyElement {
     match &env.host.select {
         Some(select) if !segs.is_empty() => Track::new(
             element,
@@ -895,7 +899,13 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
         mermaid::Drawing::Ready(diagram) => frame(diagram_picture(&diagram, key ^ ordinal as u64)),
         mermaid::Drawing::Rendering => frame(
             div()
-                .child(code_body(source, (None, None), false, key ^ ordinal as u64, env))
+                .child(code_body(
+                    source,
+                    (None, None),
+                    false,
+                    key ^ ordinal as u64,
+                    env,
+                ))
                 .child(
                     div()
                         .px(px(14.0))
@@ -1263,7 +1273,11 @@ mod tests {
             let first = find_hits(&env, "draws it", 0);
             let second = find_hits(&env, "a Draw and draw", 8);
             assert_eq!(first, vec![(0..4, false)]);
-            assert_eq!(second, vec![(10..14, true), (19..23, false)], "the second hit is the current one");
+            assert_eq!(
+                second,
+                vec![(10..14, true), (19..23, false)],
+                "the second hit is the current one"
+            );
             // What is painted over the text: the hits, the current one with its own style.
             let hits: Vec<_> = first.into_iter().chain(second).collect();
             let layers = layers(&env, &[], 23, &hits);

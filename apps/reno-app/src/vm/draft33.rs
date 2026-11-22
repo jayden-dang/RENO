@@ -196,4 +196,11 @@ mod tests {
         assert_eq!(OpenHook::parse("find"), None);
         assert_eq!(OpenHook::parse(""), None);
     }
+
+    #[test]
+    fn the_selection_and_code_copy_hooks_are_open_hooks() {
+        assert_eq!(OpenHook::parse("select"), Some(OpenHook::Select));
+        assert_eq!(OpenHook::parse("CopyCode"), Some(OpenHook::CopyCode));
+        assert_eq!(FindHook::parse("select"), None);
+    }
 }

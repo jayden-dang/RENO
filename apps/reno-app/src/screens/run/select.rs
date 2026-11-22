@@ -15,10 +15,10 @@ use std::time::Duration;
 
 use gpui::Action as _;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId,
-    GlobalElementId, InspectorElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, Task, Window, actions,
-    div, point, prelude::*, px,
+    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, GlobalElementId,
+    InspectorElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, SharedString, StyledText, Task, Window, actions, div, prelude::*,
+    px,
 };
 
 use super::RunScreen;
@@ -196,7 +196,11 @@ impl RunScreen {
             .iter()
             .filter(|p| p.bounds.intersects(&area) || area.size.width == px(0.0))
             .filter(|p| self.select.order.contains_key(&p.key))
-            .min_by(|a, b| gap(a).partial_cmp(&gap(b)).unwrap_or(std::cmp::Ordering::Equal))?;
+            .min_by(|a, b| {
+                gap(a)
+                    .partial_cmp(&gap(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })?;
         let off = if piece.map.is_sourceless() {
             0
         } else {
@@ -210,7 +214,7 @@ impl RunScreen {
     }
 
     /// The left button went down in the transcript: a drag may start.
-    pub(super) fn select_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+    pub(super) fn select_down(&mut self, event: &MouseDownEvent) {
         if event.button != MouseButton::Left || event.modifiers.platform || event.modifiers.shift {
             return;
         }
@@ -219,7 +223,6 @@ impl RunScreen {
             last: event.position,
             moved: false,
         });
-        let _ = cx;
     }
 
     /// The pointer moved with the button down.
@@ -282,12 +285,14 @@ impl RunScreen {
         if was_drag || event.button != MouseButton::Left {
             return;
         }
-        let inside = self.select.current.zip(self.position_at(event.position)).is_some_and(
-            |(sel, at)| {
+        let inside = self
+            .select
+            .current
+            .zip(self.position_at(event.position))
+            .is_some_and(|(sel, at)| {
                 let (a, b) = sel.ordered();
                 a <= at && at <= b
-            },
-        );
+            });
         if !inside && self.select.current.take().is_some() {
             cx.notify();
         }
@@ -311,7 +316,11 @@ impl RunScreen {
             0.0
         };
         let step = past.signum() * (past.abs() / EDGE_FULL_SPEED).min(1.0) * SCROLL_STEP_MAX;
-        self.select.scroll = if past == 0.0 { 0.0 } else { step.max(2.0 * past.signum()) };
+        self.select.scroll = if past == 0.0 {
+            0.0
+        } else {
+            step.max(2.0 * past.signum())
+        };
         if self.select.scroll == 0.0 {
             self.select.task = None;
             return;
@@ -355,9 +364,8 @@ impl RunScreen {
     // --- copying -------------------------------------------------------------------------------
 
     /// What ⌘C copies: the selected text in order, with a blank line between entries.
-    pub(crate) fn selected_text(&self, cx: &App) -> Option<String> {
+    pub(crate) fn selected_text(&self) -> Option<String> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
-        let _ = cx;
         let open = |k: Key| self.open.contains(&k);
         let out_open = |id: &str| self.outputs_open.contains(&id.to_owned());
         let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
@@ -404,15 +412,8 @@ impl RunScreen {
 
     /// ⌘C in the transcript.
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text(cx) {
+        if let Some(text) = self.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
-    }
-
-    /// Clears the selection.
-    pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if self.select.current.take().is_some() {
-            cx.notify();
         }
     }
 
@@ -438,6 +439,12 @@ impl RunScreen {
     /// The registry is emptied before each draw of the list: texts file themselves as they paint.
     pub(super) fn begin_paint(&self) {
         self.select.registry.borrow_mut().clear();
+    }
+
+    /// `RENO_DRAFT33_OPEN=render|select|copycode`: the view at the top of the thread.
+    pub(crate) fn demo_scroll_top(&mut self, cx: &mut Context<Self>) {
+        self.list.pause_following_tail();
+        self.scroll_to_row(0, cx);
     }
 
     /// `RENO_DRAFT33_OPEN=select|copycode`: the walk's step 8 or 9, then the clipboard's text on
@@ -489,20 +496,21 @@ impl RunScreen {
                 window.dispatch_action(CopyTranscript.boxed_clone(), cx);
             });
         } else {
-            let code = self.rows.iter().find_map(|row| match row {
-                Row::Prose { text, .. } => reno_markdown::parse_full(text)
-                    .blocks
-                    .iter()
-                    .find_map(|top| match &top.block {
-                        reno_markdown::Block::CodeBlock { code, language }
-                            if language.as_deref() == Some("rust") =>
-                        {
-                            Some(code.trim_end_matches('\n').to_owned())
-                        }
-                        _ => None,
-                    }),
-                _ => None,
-            });
+            let code =
+                self.rows.iter().find_map(|row| match row {
+                    Row::Prose { text, .. } => reno_markdown::parse_full(text)
+                        .blocks
+                        .iter()
+                        .find_map(|top| match &top.block {
+                            reno_markdown::Block::CodeBlock { code, language }
+                                if language.as_deref() == Some("rust") =>
+                            {
+                                Some(code.trim_end_matches('\n').to_owned())
+                            }
+                            _ => None,
+                        }),
+                    _ => None,
+                });
             match code {
                 Some(code) => crate::ui::markdown_view::chrome::copy(&code, "code", cx),
                 None => println!("clipboard: (no Rust code block)"),
@@ -520,13 +528,6 @@ impl RunScreen {
             println!("clipboard: {}", text.replace('\n', "\\n"));
         })
         .detach();
-    }
-
-    /// Sets the selection, as a drag would have.
-    #[cfg(test)]
-    pub(crate) fn set_selection(&mut self, sel: Option<Selection>, cx: &mut Context<Self>) {
-        self.select.current = sel;
-        cx.notify();
     }
 }
 
@@ -566,13 +567,18 @@ impl Element for DragTracker {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let mut style = gpui::Style::default();
-        style.position = gpui::Position::Absolute;
-        style.inset.top = px(0.0).into();
-        style.inset.left = px(0.0).into();
-        style.size = gpui::Size {
-            width: gpui::relative(1.0).into(),
-            height: gpui::relative(1.0).into(),
+        let style = gpui::Style {
+            position: gpui::Position::Absolute,
+            inset: gpui::Edges {
+                top: px(0.0).into(),
+                left: px(0.0).into(),
+                ..gpui::Edges::default()
+            },
+            size: gpui::Size {
+                width: gpui::relative(1.0).into(),
+                height: gpui::relative(1.0).into(),
+            },
+            ..gpui::Style::default()
         };
         (window.request_layout(style, [], cx), ())
     }
@@ -611,6 +617,5 @@ impl Element for DragTracker {
                 screen.update(cx, |this, cx| this.select_up(event, cx));
             }
         });
-        let _ = point(px(0.0), px(0.0));
     }
 }

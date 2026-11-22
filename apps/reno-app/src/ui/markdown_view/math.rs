@@ -123,6 +123,7 @@ fn draw(tex: &str, display: bool, size: f32, color: [u8; 4], scale: f32) -> Resu
         tiny_skia::Transform::identity(),
         &mut pixmap.as_mut(),
     );
+    thicken(pixmap.data_mut(), w as usize, h as usize, INK_WEIGHT);
     let png = pixmap.encode_png().map_err(|e| e.to_string())?;
     Ok(Raster {
         png,
@@ -130,6 +131,47 @@ fn draw(tex: &str, display: bool, size: f32, color: [u8; 4], scale: f32) -> Resu
         above: above as f32,
         below: below as f32,
     })
+}
+
+/// How far a formula's strokes are thickened: the math faces are drawn with hairline stems that
+/// read faint beside the text face at body sizes. Zero leaves the rasterised strokes as they are,
+/// one adds a whole pixel of coverage around each.
+const INK_WEIGHT: f32 = 0.3;
+
+/// Thickens the strokes of premultiplied RGBA `pixels` (`w` by `h`) by `weight` of a pixel: each
+/// pixel moves that share of the way towards the strongest of its eight neighbours, taking their
+/// colour where they are stronger.
+pub(crate) fn thicken(pixels: &mut [u8], w: usize, h: usize, weight: f32) {
+    let before = pixels.to_vec();
+    let at = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        [before[i], before[i + 1], before[i + 2], before[i + 3]]
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let own = at(x, y);
+            let mut strongest = own;
+            for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                    let n = at(nx, ny);
+                    if n[3] > strongest[3] {
+                        strongest = n;
+                    }
+                }
+            }
+            if strongest[3] == own[3] {
+                continue;
+            }
+            let alpha = f32::from(own[3]) + (f32::from(strongest[3]) - f32::from(own[3])) * weight;
+            // Premultiplied colour of the stronger neighbour at the new coverage.
+            let keep = alpha / f32::from(strongest[3]);
+            let i = (y * w + x) * 4;
+            for c in 0..3 {
+                pixels[i + c] = (f32::from(strongest[c]) * keep).round() as u8;
+            }
+            pixels[i + 3] = alpha.round() as u8;
+        }
+    }
 }
 
 /// `Rgba` bytes of a theme colour.
@@ -264,6 +306,41 @@ mod tests {
                 [c.red(), c.green(), c.blue(), c.alpha()]
             })
             .collect()
+    }
+
+    #[test]
+    fn thickening_adds_coverage_beside_a_stroke_and_leaves_the_stroke_and_empty_space() {
+        // A 5x5 pixmap with one opaque white pixel in the middle.
+        let mut px = vec![0u8; 5 * 5 * 4];
+        let mid = (2 * 5 + 2) * 4;
+        px[mid..mid + 4].copy_from_slice(&[255, 255, 255, 255]);
+        thicken(&mut px, 5, 5, 0.5);
+        let alpha = |x: usize, y: usize| px[(y * 5 + x) * 4 + 3];
+        assert_eq!(alpha(2, 2), 255, "the stroke itself stays");
+        for (x, y) in [(1, 2), (3, 2), (2, 1), (2, 3), (1, 1), (3, 3)] {
+            assert_eq!(
+                alpha(x, y),
+                128,
+                "({x}, {y}) gains half a pixel of coverage"
+            );
+            // Premultiplied: white at half coverage.
+            assert_eq!(px[(y * 5 + x) * 4], 128);
+        }
+        assert_eq!(alpha(0, 0), 0, "two pixels away is still empty");
+    }
+
+    #[test]
+    fn the_rasterised_formula_has_more_ink_than_its_unthickened_strokes_would() {
+        let raster = rasterize("l", false, 15.0, WHITE, 1.0).unwrap();
+        let pixmap = tiny_skia::Pixmap::decode_png(&raster.png).unwrap();
+        // The thickened stem and serifs carry more ink per row than the face's own hairlines (1.4 px).
+        let ink: f32 = pixmap
+            .pixels()
+            .iter()
+            .map(|p| f32::from(p.alpha()) / 255.0)
+            .sum();
+        let rows = pixmap.height() as f32;
+        assert!(ink / rows > 1.7, "the stem is {} px wide", ink / rows);
     }
 
     #[test]

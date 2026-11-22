@@ -277,7 +277,6 @@ mod tests {
         assert_eq!(paths_in(&tree), ["src/a.rs", "b.txt", "docs/g.png"]);
     }
 
-
     fn target(path: &str, line: Option<u32>) -> Option<FileTarget> {
         Some(FileTarget {
             path: path.to_owned(),

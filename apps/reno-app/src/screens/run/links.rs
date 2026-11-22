@@ -83,13 +83,22 @@ impl RunScreen {
     }
 
     /// Asks the worktree about the files `tree` names, the first time its text is seen.
-    pub(super) fn probe_files(&mut self, key: Key, text_len: usize, tree: &BlockTree, cx: &mut Context<Self>) {
+    pub(super) fn probe_files(
+        &mut self,
+        key: Key,
+        text_len: usize,
+        tree: &BlockTree,
+        cx: &mut Context<Self>,
+    ) {
         if self.probed.insert(key, text_len) == Some(text_len) {
             return;
         }
         let mut dirs: Vec<String> = link::paths_in(tree)
             .iter()
-            .map(|p| p.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_owned()))
+            .map(|p| {
+                p.rsplit_once('/')
+                    .map_or(String::new(), |(d, _)| d.to_owned())
+            })
             .collect();
         dirs.sort();
         dirs.dedup();
@@ -97,7 +106,10 @@ impl RunScreen {
             if self.file_index.borrow().dirs.contains_key(&dir) {
                 continue;
             }
-            self.file_index.borrow_mut().dirs.insert(dir.clone(), Dir::Loading);
+            self.file_index
+                .borrow_mut()
+                .dirs
+                .insert(dir.clone(), Dir::Loading);
             let (ask, named) = (dir.clone(), dir);
             self.files_call(
                 cx,

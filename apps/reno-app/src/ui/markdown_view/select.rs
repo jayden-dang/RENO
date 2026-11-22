@@ -89,7 +89,11 @@ impl Map {
                     // The ellipsis after a cut text is selected with the text before it.
                     return None;
                 }
-                let end = if to == base + len { text_len } else { to - base };
+                let end = if to == base + len {
+                    text_len
+                } else {
+                    to - base
+                };
                 Some(from - base..end)
             }
             Self::Sourceless => sourceless_selected.then_some(0..text_len),
@@ -264,10 +268,7 @@ pub(crate) fn highlight_runs(
     if layers.is_empty() {
         return runs;
     }
-    let mut cuts: Vec<usize> = layers
-        .iter()
-        .flat_map(|(r, _)| [r.start, r.end])
-        .collect();
+    let mut cuts: Vec<usize> = layers.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
     cuts.sort_unstable();
     cuts.dedup();
     let mut out = Vec::with_capacity(runs.len() + cuts.len());
@@ -340,7 +341,7 @@ pub(crate) fn flatten_layers(
 mod tests {
     use super::*;
     use crate::vm::anchor;
-    use gpui::{Hsla, font, px, rgb};
+    use gpui::{Hsla, font, rgb};
 
     fn run(len: usize) -> TextRun {
         TextRun {
@@ -395,7 +396,6 @@ mod tests {
     #[test]
     fn no_layers_leave_the_runs_alone() {
         assert_eq!(highlight_runs(vec![run(4)], &[]).len(), 1);
-        let _ = px(1.0);
     }
 
     fn atoms_map(src: &str) -> (Map, usize) {

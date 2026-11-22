@@ -8,8 +8,8 @@ use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, pr
 use reno_proto::ToolOutput;
 
 use super::RunScreen;
-use crate::transcript::{Key, Outcome, ToolEntry};
 use super::select::Spot;
+use crate::transcript::{Key, Outcome, ToolEntry};
 use crate::ui::find as find_look;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::MONO;
@@ -166,9 +166,7 @@ impl RunScreen {
                 ))
             });
         let block = output.filter(|_| shown).and_then(|c| {
-            c.output
-                .as_ref()
-                .map(|out| {
+            c.output.as_ref().map(|out| {
                 self.output_block(theme, variant, (key, ln), (at.unwrap_or(0), c), out, cx)
             })
         });

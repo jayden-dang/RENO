@@ -606,10 +606,7 @@ impl RunScreen {
         let end = (top + SETTLED_ITEMS).min(self.items.len());
         for ix in top..end {
             let holds_output = self.items.items[ix].visual.is_some()
-                || matches!(
-                    self.items.row(&self.rows, ix),
-                    Some(Row::Prose { .. })
-                );
+                || matches!(self.items.row(&self.rows, ix), Some(Row::Prose { .. }));
             if holds_output {
                 self.list.remeasure_items(ix..ix + 1);
             }
@@ -1076,15 +1073,15 @@ impl Render for RunScreen {
                     .pl(px(RAIL))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, event, _, cx| this.select_down(event, cx)),
+                        cx.listener(|this, event, _, _| this.select_down(event)),
                     )
                     .child(
-                    list(
-                        self.list.clone(),
-                        cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx)),
-                    )
-                    .size_full(),
-                ),
+                        list(
+                            self.list.clone(),
+                            cx.processor(|this, ix, _, cx| this.render_row(ix, cx)),
+                        )
+                        .size_full(),
+                    ),
             )
             // After the list, so it is on top of it and takes the clicks.
             .children(self.select_nodes(cx))
@@ -1168,12 +1165,12 @@ mod files_tests;
 #[cfg(test)]
 mod find_tests;
 #[cfg(test)]
-mod select_tests;
-#[cfg(test)]
 mod history_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
 mod persist_tests;
+#[cfg(test)]
+mod select_tests;
 #[cfg(test)]
 mod terminal_tests;

@@ -11,8 +11,8 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, Focusable as _, FontWeight, ListOffset, Subscription,
-    Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, Focusable as _, FontWeight, ListOffset, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 
 use super::RunScreen;

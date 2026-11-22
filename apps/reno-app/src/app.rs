@@ -580,11 +580,29 @@ pub(crate) fn open_window(
                                 }
                             }
                         }
+                        if matches!(
+                            hook,
+                            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode
+                        ) {
+                            // The walk starts at the top of the thread, not at its tail; the
+                            // diagram and pictures landing move the tail, so say it a few times.
+                            for _ in 0..8 {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(2000))
+                                    .await;
+                                root.update(cx, |root, cx| {
+                                    if let Some(screen) = root.run_screen().cloned() {
+                                        screen.update(cx, |screen, cx| screen.demo_scroll_top(cx));
+                                    }
+                                })
+                                .ok();
+                            }
+                        }
                         if matches!(hook, Draft33Hook::Select | Draft33Hook::CopyCode) {
                             // The reply has to be drawn (and its diagram and picture landed)
                             // before there is anything to select.
                             cx.background_executor()
-                                .timer(Duration::from_millis(5000))
+                                .timer(Duration::from_millis(1500))
                                 .await;
                             root.update_in(cx, |root, window, cx| {
                                 if let Some(screen) = root.run_screen().cloned() {

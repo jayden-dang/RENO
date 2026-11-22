@@ -291,7 +291,12 @@ fn display_math_reads_at_one_and_a_fifth_of_the_text_size_times_the_math_setting
     cx: &mut TestAppContext,
 ) {
     let tex = r"\int_0^1 x^2\,dx = \tfrac13";
-    let (_view, vcx) = probe(cx, &format!("$$ {tex} $$"), Host::preview(), Appearance::Dark);
+    let (_view, vcx) = probe(
+        cx,
+        &format!("$$ {tex} $$"),
+        Host::preview(),
+        Appearance::Dark,
+    );
     // The probe's text is 15 px; the box adds 4 px above and below the picture.
     let height = |vcx: &mut VisualTestContext| {
         let bounds = vcx.debug_bounds("md-math-display").expect("painted");
@@ -306,7 +311,11 @@ fn display_math_reads_at_one_and_a_fifth_of_the_text_size_times_the_math_setting
     vcx.update(|_, cx| crate::prefs::update(cx, |p| p.math_size = 150));
     draw(vcx);
     let got = height(vcx);
-    assert!((got - at(15.0 * 1.2 * 1.5)).abs() < 1.5, "{got} vs {}", at(27.0));
+    assert!(
+        (got - at(15.0 * 1.2 * 1.5)).abs() < 1.5,
+        "{got} vs {}",
+        at(27.0)
+    );
 }
 
 #[gpui::test]

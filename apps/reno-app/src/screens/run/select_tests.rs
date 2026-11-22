@@ -119,7 +119,10 @@ fn row_of(screen: &RunScreen, key: crate::transcript::Key) -> Option<&Row> {
 }
 
 /// The centre of the first painted text of the prompt and of the reply.
-fn centres(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> (Point<gpui::Pixels>, Point<gpui::Pixels>) {
+fn centres(
+    vcx: &VisualTestContext,
+    screen: &Entity<RunScreen>,
+) -> (Point<gpui::Pixels>, Point<gpui::Pixels>) {
     screen.read_with(vcx, |s, _| {
         let mut user = None;
         let mut prose: Option<gpui::Bounds<gpui::Pixels>> = None;
@@ -171,10 +174,19 @@ fn a_drag_from_the_prompt_to_the_reply_and_cmd_c_copies_both_in_order(cx: &mut T
     let copied = clipboard(vcx).expect("something was copied");
     // From the middle of the prompt to the middle of the first paragraph, a blank line between.
     let (head, tail) = copied.split_once("\n\n").expect("two entries");
-    assert!(PROMPT.ends_with(head) && head.len() > 8 && head.len() < PROMPT.len(), "{copied:?}");
-    assert!(FIRST_PARAGRAPH.starts_with(tail) && tail.len() > 8, "{copied:?}");
+    assert!(
+        PROMPT.ends_with(head) && head.len() > 8 && head.len() < PROMPT.len(),
+        "{copied:?}"
+    );
+    assert!(
+        FIRST_PARAGRAPH.starts_with(tail) && tail.len() > 8,
+        "{copied:?}"
+    );
     // No control text: the quiet Copy, the code block's buttons and "Rendering" never go along.
-    assert!(!copied.contains("Copy") && !copied.contains("Thinking"), "{copied:?}");
+    assert!(
+        !copied.contains("Copy") && !copied.contains("Thinking"),
+        "{copied:?}"
+    );
 }
 
 #[gpui::test]
@@ -262,10 +274,15 @@ fn a_selection_holds_while_its_start_scrolls_out_of_view_and_the_drag_scrolls_th
         draw(vcx);
     }
     let after = screen.read_with(vcx, |s, _| s.scroll_offset());
-    assert!(after != before, "the list scrolled while the pointer was past its edge");
+    assert!(
+        after != before,
+        "the list scrolled while the pointer was past its edge"
+    );
     vcx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
     assert!(screen.read_with(vcx, |s, _| s.has_selection()));
-    let copied = screen.read_with(vcx, |s, cx| s.selected_text(cx)).expect("text");
+    let copied = screen
+        .read_with(vcx, |s, _| s.selected_text())
+        .expect("text");
     assert!(copied.starts_with("draw") || PROMPT.contains(copied.split("\n\n").next().unwrap()));
 }
 
@@ -277,7 +294,9 @@ fn agent_posted_visuals_are_items_after_their_entry_with_the_fake_and_none_with_
     let visuals = |vcx: &VisualTestContext| {
         screen.read_with(vcx, |s, _| {
             let items = s.items();
-            let at: Vec<usize> = (0..items.len()).filter(|&i| items.items[i].visual.is_some()).collect();
+            let at: Vec<usize> = (0..items.len())
+                .filter(|&i| items.items[i].visual.is_some())
+                .collect();
             let reply = s
                 .rows()
                 .iter()
@@ -288,10 +307,19 @@ fn agent_posted_visuals_are_items_after_their_entry_with_the_fake_and_none_with_
     };
     let (at, reply) = visuals(vcx);
     assert_eq!(at.len(), 2, "both posted visuals are items");
-    assert_eq!(at[0], reply.unwrap() + 1, "right after the reply they were posted with");
+    assert_eq!(
+        at[0],
+        reply.unwrap() + 1,
+        "right after the reply they were posted with"
+    );
     // They sit under the reply: bring them into view.
     screen.update(vcx, |s, cx| {
-        let first = s.items().items.iter().position(|i| i.visual.is_some()).unwrap();
+        let first = s
+            .items()
+            .items
+            .iter()
+            .position(|i| i.visual.is_some())
+            .unwrap();
         s.list.scroll_to(gpui::ListOffset {
             item_ix: first,
             offset_in_item: px(0.0),
@@ -301,14 +329,15 @@ fn agent_posted_visuals_are_items_after_their_entry_with_the_fake_and_none_with_
     wait_for(vcx, "the visuals draw", |vcx| painted(vcx, "visual"));
     store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
     draw(vcx);
-    assert!(visuals(vcx).0.is_empty(), "no visual items and no placeholder");
+    assert!(
+        visuals(vcx).0.is_empty(),
+        "no visual items and no placeholder"
+    );
     assert!(!painted(vcx, "visual"));
 }
 
 #[gpui::test]
-fn the_find_bar_hands_a_reply_its_needle_and_which_of_its_hits_is_current(
-    cx: &mut TestAppContext,
-) {
+fn the_find_bar_hands_a_reply_its_needle_and_which_of_its_hits_is_current(cx: &mut TestAppContext) {
     let (_store, _root, vcx, screen) = open(cx, Some(Variant::C));
     vcx.simulate_keystrokes("cmd-f");
     draw(vcx);
@@ -330,7 +359,11 @@ fn the_find_bar_hands_a_reply_its_needle_and_which_of_its_hits_is_current(
     assert!(marks.current.is_some(), "the bar is on a hit in this reply");
     // And a row with no hit gets none.
     let user = screen.read_with(vcx, |s, _| s.rows()[0].key());
-    assert!(screen.read_with(vcx, |s, _| s.find_marks(user, Variant::C)).is_none());
+    assert!(
+        screen
+            .read_with(vcx, |s, _| s.find_marks(user, Variant::C))
+            .is_none()
+    );
 }
 
 #[gpui::test]
