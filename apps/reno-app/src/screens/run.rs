@@ -302,10 +302,16 @@ impl RunScreen {
         let key = panel_key_for(store.read(cx), &run);
         let own = Saved::get(&key, cx);
         let own_place = own.as_ref().and_then(|d| d.place);
-        let saved = own
-            .filter(Descriptors::has_panel)
-            .or_else(|| migrated(store.read(cx), &key, cx));
-        let place = own_place.or(saved.as_ref().and_then(|d| d.place));
+        let own = own.filter(Descriptors::has_panel);
+        // A record under the run id holds tabs only when the owner used them; one that is only a
+        // place is read for the place and leaves the first tabs unchosen.
+        let old = match own {
+            Some(_) => None,
+            None => migrated(store.read(cx), &key, cx),
+        };
+        let old_place = old.as_ref().and_then(|d| d.place);
+        let saved = own.or(old.filter(Descriptors::has_panel));
+        let place = own_place.or(old_place);
         // What was saved names terminals by id; the panel names them by slot.
         let (terms, saved) = match saved {
             Some(saved) => {

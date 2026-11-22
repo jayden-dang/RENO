@@ -555,6 +555,50 @@ fn a_saved_place_waits_until_the_thread_has_reached_it(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn a_place_only_run_record_does_not_stand_in_for_a_named_threads_tabs(cx: &mut TestAppContext) {
+    let mut f = long_thread(cx);
+    let other = open(&mut f, "keeper1");
+    let store = other.read_with(f.vcx, |s, _| s.store.clone());
+    // A thread of one run: the case a run-id record is taken over for.
+    let run = store
+        .read_with(f.vcx, |s, _| {
+            s.state()
+                .threads()
+                .into_iter()
+                .find_map(|t| match t.runs.as_slice() {
+                    [only] => Some(only.run_id.clone()),
+                    _ => None,
+                })
+        })
+        .expect("the fake daemon has a thread of one run");
+    // Written while the thread was unnamed: the place, and no tabs.
+    let place = Place {
+        key: 3,
+        offset_pt: 0,
+    };
+    f.vcx.update(|_, cx| {
+        Saved::put(
+            PanelKey(run.to_string()),
+            Descriptors {
+                place: Some(place),
+                ..Descriptors::default()
+            },
+            cx,
+        );
+    });
+    // As built, before the first draw makes the first-tabs choice.
+    let screen = f
+        .vcx
+        .new(|cx| RunScreen::new(store.clone(), run.clone(), cx));
+    let (key, seeded, pending) = screen.read_with(f.vcx, |s, _| {
+        (s.panel_key.clone(), s.panel_seeded, s.place_pending)
+    });
+    assert!(key.0.starts_with("thr_"), "the thread is named: {key:?}");
+    assert!(!seeded, "the first-tabs choice is still to be made");
+    assert_eq!(pending, Some(place), "the place is still waiting");
+}
+
+#[gpui::test]
 fn scrolling_before_the_first_tabs_are_chosen_saves_only_the_place(cx: &mut TestAppContext) {
     let mut f = long_thread(cx);
     let screen = open_long(&mut f);
