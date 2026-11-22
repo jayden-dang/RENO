@@ -799,6 +799,20 @@ fn open_session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Cloud credential files a Reno attempt points at missing paths.
+const BLANKED_CREDENTIALS: [&str; 3] = [
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+];
+
+fn child_driver_env(flavor: &Flavor) -> crate::child_env::DriverEnv {
+    match flavor {
+        Flavor::Owner => crate::child_env::PI,
+        Flavor::Reno { .. } => crate::child_env::RENO,
+    }
+}
+
 async fn launch_pi(
     tracker: &TaskTracker,
     exe: &Path,
@@ -832,22 +846,11 @@ async fn launch_pi(
     };
     let bridge = mcp::install(files, &spec.mcp)?;
     let mut cmd = Command::new(exe);
-    crate::child_env::restrict(
-        &mut cmd,
-        if reno {
-            crate::child_env::RENO
-        } else {
-            crate::child_env::PI
-        },
-    );
+    crate::child_env::restrict(&mut cmd, child_driver_env(flavor));
     if let Some(gate) = &gate {
         // Missing paths, so no ambient cloud credential file is read; a bot secret of the same
         // name is applied next and wins.
-        for name in [
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "AWS_SHARED_CREDENTIALS_FILE",
-            "AWS_CONFIG_FILE",
-        ] {
+        for name in BLANKED_CREDENTIALS {
             cmd.env(name, gate.agent.join(name.to_ascii_lowercase()));
         }
     }
@@ -1914,11 +1917,17 @@ mod tests {
             spec
         }
 
-        const BLANKS: [&str; 3] = [
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "AWS_SHARED_CREDENTIALS_FILE",
-            "AWS_CONFIG_FILE",
-        ];
+        const BLANKS: [&str; 3] = BLANKED_CREDENTIALS;
+
+        #[test]
+        fn a_reno_attempt_is_restricted_to_the_base_set_and_the_owners_to_pis_list() {
+            let reno = Flavor::Reno {
+                sessions_root: PathBuf::from("/unused"),
+            };
+            assert_eq!(child_driver_env(&reno), crate::child_env::RENO);
+            assert_eq!(child_driver_env(&Flavor::Owner), crate::child_env::PI);
+            assert_ne!(crate::child_env::RENO, crate::child_env::PI);
+        }
 
         #[tokio::test]
         async fn a_reno_child_sees_only_the_bots_key_its_own_agent_dir_and_three_blanks() {
@@ -2000,7 +2009,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn the_owners_child_gets_no_blanks_and_keeps_its_own_agent_dir_variable() {
+        async fn the_owners_child_gets_no_blanks_and_no_agent_dir_of_the_attempts() {
             let bench = Bench::new();
             let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
             let pi = bench.launch(&spec, &Flavor::Owner).await;
