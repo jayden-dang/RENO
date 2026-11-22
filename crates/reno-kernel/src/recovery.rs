@@ -176,7 +176,13 @@ async fn retain_resumable(shared: &Shared) -> Result<()> {
         .filter(|row| match row.status {
             RunStatus::Failed | RunStatus::Interrupted => true,
             RunStatus::Queued => row.session_ref.is_some(),
-            _ => false,
+            RunStatus::Leased
+            | RunStatus::Running
+            | RunStatus::WaitingInput
+            | RunStatus::WaitingApproval
+            | RunStatus::Evaluating
+            | RunStatus::Succeeded
+            | RunStatus::Cancelled => false,
         })
         .map(|row| row.id)
         .collect();
