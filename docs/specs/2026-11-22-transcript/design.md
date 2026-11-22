@@ -128,8 +128,8 @@ Reuse: none — new code (rung 7) for the projection `vm/items.rs`, which is new
 it builds on rung 2 (`transcript.rs` `build_rows`, `fold_turns`, `Key`) and rung 4 (GPUI `ListState::remeasure_items`).
 Respects: ARCH-12, ARCH-10
 Surface:
-- `RunScreen::rows()`, `top_row()`, `older_builds()`, `facts()`: cfg(test) accessors read by `tests.rs:327`,
-  `convo_tests.rs:228`, `thread_tests.rs:151` and the other lock tests. **frozen**: built around, since `rows()` stays the
+- `RunScreen::rows()`, `top_row()`, `older_builds()`, `facts()`: cfg(test) accessors read by `apps/reno-app/src/tests.rs:327`,
+  `apps/reno-app/src/screens/run/convo_tests.rs:228`, `apps/reno-app/src/thread_tests.rs:151` and the other lock tests. **frozen**: built around, since `rows()` stays the
   nested model and `top_row()` stays a top-level index.
 - `run.rs` `rebuild_rows` (:627): **replace** with the incremental builder; its only caller is `refresh`.
 - `list.splice` at `run.rs:513` (`apply_plan`): **replace**, splice only for a fold replacing its turn; growth uses
