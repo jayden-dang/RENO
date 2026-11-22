@@ -1318,9 +1318,19 @@ impl Run {
     async fn start_up(&mut self) -> Startup {
         let mut backlog = Vec::new();
         if let Err(why) = self.arm(&mut backlog).await {
+            tracing::warn!(
+                target: "reno_harness::pi",
+                run = %self.spec.run_id,
+                "Reno's gate did not arm: {why}"
+            );
             return Startup::Failed(format!("Reno's gate did not arm: {why}"));
         }
         if self.gated && self.pi.holds_credential() {
+            tracing::warn!(
+                target: "reno_harness::pi",
+                run = %self.spec.run_id,
+                "{CREDENTIAL_APPEARED}: the attempt fails before any prompt"
+            );
             return Startup::Failed(CREDENTIAL_APPEARED.into());
         }
         match self.set_up(&mut backlog).await {
@@ -1795,17 +1805,23 @@ impl<'a> Player<'a> {
             }
         }
         // Nothing is left open on the ladder: each gate call still waiting is denied, once.
+        let why = self.why_stopped();
         for (_, open) in self.calls.drain() {
             if let crate::exec::Open::Approval(GatePayload { id }) = open {
-                self.decide_call(id, crate::exec::Decision::Deny, Some(RUN_STOPPED.into()));
+                self.decide_call(id, crate::exec::Decision::Deny, Some(why.into()));
             }
         }
         if let Some(call) = self.parked.take() {
-            self.decide_call(
-                call.id,
-                crate::exec::Decision::Deny,
-                Some(RUN_STOPPED.into()),
-            );
+            self.decide_call(call.id, crate::exec::Decision::Deny, Some(why.into()));
+        }
+    }
+
+    /// What a call still open when the run ends is told: a run a credential ended says so.
+    fn why_stopped(&self) -> &'static str {
+        if self.credential {
+            CREDENTIAL_APPEARED
+        } else {
+            RUN_STOPPED
         }
     }
 
@@ -1835,6 +1851,11 @@ impl<'a> Player<'a> {
     async fn raise(&mut self, call: GateCall) -> Result<(), ()> {
         if self.run.pi.holds_credential() {
             self.credential = true;
+            tracing::warn!(
+                target: "reno_harness::pi",
+                run = %self.run.spec.run_id,
+                "{CREDENTIAL_APPEARED}: the run ends"
+            );
             self.decide_call(
                 call.id,
                 crate::exec::Decision::Deny,
@@ -1896,6 +1917,11 @@ impl<'a> Player<'a> {
             .gate
             .as_ref()
             .map_or("the gate's connection closed", GateHost::lost_because);
+        tracing::warn!(
+            target: "reno_harness::pi",
+            run = %self.run.spec.run_id,
+            "Reno lost its watch over the run: {because}"
+        );
         (
             StopReason::Error,
             None,
@@ -1907,6 +1933,11 @@ impl<'a> Player<'a> {
     /// connection is closed with the run's end.
     fn flooded(&mut self) -> Ended {
         self.watching = false;
+        tracing::warn!(
+            target: "reno_harness::pi",
+            run = %self.run.spec.run_id,
+            "the gate left too many calls unanswered: the run ends"
+        );
         self.dismiss_all();
         (
             StopReason::Error,
@@ -2359,6 +2390,25 @@ mod tests {
             for extension in started["extensions"].as_object().unwrap().values() {
                 assert_eq!(extension, true);
             }
+        }
+
+        #[tokio::test]
+        async fn a_bot_secret_cannot_override_the_gates_socket_or_nonce() {
+            let bench = Bench::new();
+            let spec = with_env(
+                bench.spec("01HZX9"),
+                &[
+                    ("RENO_GATE_SOCKET", "/tmp/not-the-gate.sock"),
+                    ("RENO_GATE_NONCE", "not-the-nonce"),
+                ],
+            );
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let gate = pi.gate_files.as_ref().unwrap();
+            let socket = gate.socket.display().to_string();
+            let nonce = gate.nonce.clone();
+            let started = bench.started(pi).await;
+            assert_eq!(started["gate_socket"], socket);
+            assert_eq!(started["gate_nonce"], nonce);
         }
 
         #[tokio::test]
@@ -2924,6 +2974,66 @@ mod tests {
                         .iter()
                         .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
                 );
+            }
+
+            #[tokio::test]
+            async fn a_credential_ends_every_open_call_with_the_credential_reason() {
+                let mut rig = Rig::new().await;
+                for (id, call_id) in [(1, "c1"), (2, "c2"), (3, "c3")] {
+                    rig.send_call(id, call_id).await;
+                }
+                let mut player = rig.player();
+                for call_id in ["c1", "c2"] {
+                    player.frame(tool_start(call_id)).await.unwrap();
+                    let call = next_call(&mut player).await;
+                    player.hold(call).await.unwrap();
+                }
+                let agent = player
+                    .run
+                    .pi
+                    .gate_files
+                    .as_ref()
+                    .unwrap()
+                    .agent
+                    .join(AUTH_FILE);
+                std::fs::write(agent, r#"{"anthropic":{"type":"api_key"}}"#).unwrap();
+                player.frame(tool_start("c3")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                let ended = player.ended().unwrap();
+                assert_eq!(ended.2.as_deref(), Some(CREDENTIAL_APPEARED));
+                let mut decided = Vec::new();
+                for _ in 0..3 {
+                    decided.push(rig.decision().await);
+                }
+                decided.sort_by_key(|decision| decision["id"].as_u64());
+                for (n, decision) in decided.iter().enumerate() {
+                    assert_eq!(decision["id"], n as u64 + 1);
+                    assert_eq!(decision["decision"], "deny");
+                    assert_eq!(decision["reason"], CREDENTIAL_APPEARED, "{decision}");
+                }
+            }
+
+            #[tokio::test]
+            async fn a_gate_line_that_is_too_long_ends_the_run_saying_so() {
+                let mut rig = Rig::new().await;
+                let mut stream =
+                    std::mem::replace(&mut rig.gate, BufReader::new(UnixStream::pair().unwrap().0))
+                        .into_inner();
+                let flood = tokio::spawn(async move {
+                    let _ = stream
+                        .write_all(&vec![b'a'; gate::MAX_CALL_LINE + 100])
+                        .await;
+                });
+                let mut player = rig.player();
+                assert!(gate_next(player.run.gate.as_mut()).await.is_none());
+                let (stop, _, diagnostic) = player.lost_watch().await;
+                assert_eq!(stop, StopReason::Error);
+                assert_eq!(
+                    diagnostic.as_deref(),
+                    Some("Reno lost its watch over the run: the gate sent a line that is too long")
+                );
+                flood.await.unwrap();
             }
 
             #[tokio::test]

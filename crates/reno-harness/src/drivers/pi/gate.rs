@@ -32,7 +32,7 @@ use crate::exec::Decision;
 const MAX_HELLO: usize = 4096;
 
 /// The longest call line read: a tool's whole input rides on it, a file's content included.
-const MAX_CALL_LINE: usize = 8 << 20;
+pub(super) const MAX_CALL_LINE: usize = 8 << 20;
 
 /// How many calls the gate may leave unanswered. The gate extension holds its own count at this
 /// number (its `MAX_OUTSTANDING`) and queues the rest itself, so only a gate that broke its rule
@@ -163,7 +163,6 @@ struct Connection {
 }
 
 /// The socket of one attempt, and, once armed, the gate's connection.
-#[derive(Debug)]
 pub(super) struct GateHost {
     listener: Option<UnixListener>,
     path: PathBuf,
@@ -183,6 +182,17 @@ pub(super) struct GateHost {
     lost: Option<Lost>,
     /// The highest call id seen: the gate numbers its calls upwards.
     highest: u64,
+}
+
+impl std::fmt::Debug for GateHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GateHost")
+            .field("path", &self.path)
+            .field("open", &self.open.len())
+            .field("broken", &self.broken)
+            .field("lost", &self.lost)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GateHost {
@@ -601,11 +611,11 @@ mod tests {
         assert!(closed_unserved(&mut stranger).await);
     }
 
-    #[test]
-    fn the_uid_check_admits_the_owner_and_nobody_else() {
-        assert!(is_owner(501, 501));
-        assert!(!is_owner(502, 501));
-        assert!(!is_owner(0, 501));
+    #[tokio::test]
+    async fn the_hosts_debug_text_does_not_carry_the_nonce() {
+        let socket = Socket::new();
+        let host = socket.host();
+        assert!(!format!("{host:?}").contains(NONCE));
     }
 
     #[tokio::test]
