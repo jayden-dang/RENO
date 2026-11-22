@@ -122,7 +122,7 @@ gains `"reno"`.
 
 **Depends-on:** none
 
-- [ ] Write failing tests:
+- [x] Write failing tests:
   - The `reno` descriptor declares `[Supervised, FullAccess]`, `[Unrestricted]`, `resume: true` and
     `isolates_user_config: true`.
   - Its probe reports `SignedIn::Unknown` and the curated models, never reading the owner's credentials.
@@ -131,9 +131,9 @@ gains `"reno"`.
   - `start` on `reno` returns `InvalidSpec`.
   - `harness_candidates(tmp)` holds one `pi` and one `reno`.
   - A bot listing `reno` validates offline, while `pi` and every other built-in id still validate as today.
-- [ ] Run `cargo test -p reno-harness --test pi reno_ && cargo test -p renod executors && cargo test -p reno-proto defs`.
+- [x] Run `cargo test -p reno-harness --test pi reno_ && cargo test -p renod executors && cargo test -p reno-proto defs`.
   Expect: unresolved `PiExecutor::reno` / `RENO_EXECUTOR_ID`, and unknown executor `reno`.
-- [ ] Implement:
+- [x] Implement:
   - the `Flavor` field and the builders, with the branches in `descriptor`, `probe` and `maintenance`;
   - `require_access` against the flavor's modes;
   - in `start`, `Flavor::Reno` returns `ExecError::InvalidSpec("the Reno harness is not armed in this build")`
@@ -141,8 +141,8 @@ gains `"reno"`.
   - `harness_candidates` and the `discover` parameter, with `data_dir.join("harness/.reno/pi-sessions")` as
     `sessions_root`, and the daemon call site;
   - `"reno"` in `BUILTIN_EXECUTORS`.
-- [ ] Run the same commands, and expect a pass. Then run `cargo check --workspace --all-targets`.
-- [ ] `git commit -m "feat(harness): register the reno executor on the Pi driver, refusing runs until armed"`
+- [x] Run the same commands, and expect a pass. Then run `cargo check --workspace --all-targets`.
+- [x] `git commit -m "feat(harness): register the reno executor on the Pi driver, refusing runs until armed"`
 
 _Requirements: RENOHARNESS-1.1, RENOHARNESS-1.2, RENOHARNESS-1.7, RENOHARNESS-10.6, RENOHARNESS-10.7, RENOHARNESS-10.8_
 
