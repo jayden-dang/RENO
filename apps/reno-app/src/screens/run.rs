@@ -27,6 +27,7 @@ use reno_proto::{
 use super::ScreenEvent;
 use crate::panel::saved::Saved;
 use crate::panel::{PanelKey, PanelState};
+use crate::prefs::{Prefs, ThinkingMode};
 use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self as model, Change, Facts, Key, Row, ToolEntry, TurnBuilder};
@@ -191,6 +192,17 @@ pub(crate) struct RunScreen {
     /// Folds, tool groups, reasoning rows and long messages that are open: the owner's, and those
     /// find opened (which it closes again).
     open: Opens<Key>,
+    /// The reasoning row streaming now (the last row of a live run): a third open source, held
+    /// in neither set of `open`, that ends with the stream.
+    streaming_open: Option<Key>,
+    /// Reasoning rows the owner closed that the stream or the Thinking setting would show open.
+    reasoning_shut: HashSet<Key>,
+    /// The Thinking setting the item heights were last made for.
+    thinking_seen: ThinkingMode,
+    /// Where a Preview window is scrolled, and the row and length it was last taken to the end
+    /// for (so the owner can scroll up while no new text arrives).
+    reasoning_scroll: gpui::ScrollHandle,
+    reasoning_scrolled: std::cell::Cell<Option<(Key, usize)>>,
     /// Tool calls whose output shows, and those showing all of it.
     outputs_open: Opens<String>,
     outputs_full: Opens<String>,
@@ -334,6 +346,11 @@ impl RunScreen {
             markdown: Lru::new(PARSED_REPLIES, usize::MAX),
             live_reply: None,
             open: Opens::default(),
+            streaming_open: None,
+            reasoning_shut: HashSet::new(),
+            thinking_seen: Prefs::thinking(cx),
+            reasoning_scroll: gpui::ScrollHandle::new(),
+            reasoning_scrolled: std::cell::Cell::new(None),
             outputs_open: Opens::default(),
             outputs_full: Opens::default(),
             find: find::Find::default(),
@@ -501,6 +518,62 @@ impl RunScreen {
         }
     }
 
+    /// The owner opens or closes a reasoning row. What the stream or the Thinking setting shows
+    /// open is closed for good by a click, and what the owner opens stays open once the stream
+    /// ends.
+    pub(super) fn toggle_reasoning(&mut self, key: Key, cx: &mut Context<Self>) {
+        if self.reasoning_open(key, cx) {
+            if self.open.contains(&key) {
+                self.open.toggle(key);
+            }
+            self.reasoning_shut.insert(key);
+            self.reflow(key, cx);
+        } else {
+            self.reasoning_shut.remove(&key);
+            self.toggle(key, cx);
+        }
+    }
+
+    /// Whether the reasoning row `key` shows its text.
+    pub(super) fn reasoning_open(&self, key: Key, cx: &gpui::App) -> bool {
+        let by_setting = match Prefs::thinking(cx) {
+            ThinkingMode::Open => true,
+            ThinkingMode::Closed => false,
+            ThinkingMode::Auto | ThinkingMode::Preview => self.streaming_open == Some(key),
+        };
+        self.open.contains(&key) || (by_setting && !self.reasoning_shut.contains(&key))
+    }
+
+    /// The reasoning row that is the end of a live run is the one streaming; when that changes
+    /// the old and the new row are measured again.
+    fn track_streaming_reasoning(&mut self, cx: &Context<Self>) {
+        let streaming = match self.rows.last() {
+            Some(Row::Reasoning { key, .. }) if self.is_live(cx) => Some(*key),
+            _ => None,
+        };
+        if streaming == self.streaming_open {
+            return;
+        }
+        let before = std::mem::replace(&mut self.streaming_open, streaming);
+        for key in before.into_iter().chain(streaming) {
+            self.remeasure(key);
+        }
+    }
+
+    /// The Thinking setting changed: the reasoning rows are measured again.
+    fn follow_thinking_setting(&mut self, cx: &gpui::App) {
+        let now = Prefs::thinking(cx);
+        if now == self.thinking_seen {
+            return;
+        }
+        self.thinking_seen = now;
+        for ix in 0..self.items.len() {
+            if matches!(self.items.row(&self.rows, ix), Some(Row::Reasoning { .. })) {
+                self.measure_again(ix);
+            }
+        }
+    }
+
     /// Stops following the tail, with the item of `key` at the top of the view.
     pub(super) fn keep_in_view(&mut self, key: Key) {
         if let Some(ix) = self.items.item_of(key) {
@@ -645,6 +718,7 @@ impl RunScreen {
         if !self.advance_latest(routing.clone(), &pending, cx) {
             self.rebuild_rows(routing, &pending, cx);
         }
+        self.track_streaming_reasoning(cx);
         self.sync_visuals(cx);
         self.measure_activity_chips(cx);
         self.keep_menu(&pending);
@@ -1299,6 +1373,7 @@ impl Render for RunScreen {
             files.model.set_show_hidden(show_hidden);
         }
         self.remeasure_settled(cx);
+        self.follow_thinking_setting(cx);
         // The texts file themselves again as the list paints them.
         self.begin_paint();
         let rail = self.tick_rail(&theme, cx);

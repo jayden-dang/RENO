@@ -11,11 +11,15 @@ use reno_markdown::BlockTree;
 
 use super::select::Spot;
 use super::*;
+use crate::prefs::PREVIEW_LINES;
 use crate::ui::markdown_view::lru::Lru;
 use crate::ui::markdown_view::{Host, SelectHost, Streaming, select as pick, visual::visual_view};
 use crate::ui::motion;
 use crate::vm::find;
 use crate::vm::selection::{self, Slot};
+
+/// The line height of reasoning text.
+const REASONING_LINE: f32 = 21.0;
 
 impl RunScreen {
     /// One list item: its row, with the space below it, the subagent chips that hang on it and,
@@ -651,7 +655,7 @@ impl RunScreen {
         text: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.open.contains(&key);
+        let open = self.reasoning_open(key, cx);
         let hits = self.find_highlights(key, find::Part::Whole);
         div()
             .flex()
@@ -675,28 +679,45 @@ impl RunScreen {
                         &[],
                     ),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_reasoning(key, cx))),
             )
             .when(open, |d| {
-                d.child(
-                    div()
-                        .pl(px(24.0))
-                        .text_size(px(13.5))
-                        .line_height(px(21.0))
-                        .text_color(theme.muted)
-                        .child(self.text_piece(
-                            theme,
-                            Spot {
-                                key,
-                                slot: Slot::WHOLE,
-                                base: 0,
-                                len: text.len(),
-                                total: Some(text.len()),
-                            },
-                            text,
-                            &hits,
-                        )),
-                )
+                let body = div()
+                    .pl(px(24.0))
+                    .text_size(px(13.5))
+                    .line_height(px(REASONING_LINE))
+                    .text_color(theme.muted)
+                    .child(self.text_piece(
+                        theme,
+                        Spot {
+                            key,
+                            slot: Slot::WHOLE,
+                            base: 0,
+                            len: text.len(),
+                            total: Some(text.len()),
+                        },
+                        text,
+                        &hits,
+                    ));
+                let shell = div().debug_selector(move || format!("reasoning-body-{}", key.0));
+                if self.streaming_open == Some(key) && Prefs::thinking(cx) == ThinkingMode::Preview
+                {
+                    // Taken to its end only when text arrived, so the owner can scroll up.
+                    if self.reasoning_scrolled.get() != Some((key, text.len())) {
+                        self.reasoning_scrolled.set(Some((key, text.len())));
+                        self.reasoning_scroll.scroll_to_bottom();
+                    }
+                    d.child(
+                        shell
+                            .id("reasoning-window")
+                            .track_scroll(&self.reasoning_scroll)
+                            .max_h(px(f32::from(PREVIEW_LINES) * REASONING_LINE))
+                            .overflow_y_scroll()
+                            .child(body),
+                    )
+                } else {
+                    d.child(shell.child(body))
+                }
             })
             .into_any_element()
     }

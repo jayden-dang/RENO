@@ -77,7 +77,7 @@ fn toggle_theme_writes_the_mode(cx: &mut TestAppContext) {
 
 // --- The pages ---------------------------------------------------------------------------
 
-use crate::prefs::{Motion, SendWith};
+use crate::prefs::{Motion, SendWith, ThinkingMode};
 use crate::tests::{click, painted};
 use crate::ui::motion::{self, ReduceMotion};
 use crate::vm::settings_nav::Category;
@@ -214,4 +214,28 @@ fn appearance_has_typeset_math_and_its_size_beside_the_existing_controls(cx: &mu
         "no size to choose while math is off"
     );
     assert_eq!(saved(vcx).math_size, 120, "the size is kept");
+}
+
+#[gpui::test]
+fn general_has_a_thinking_choice_that_saves(cx: &mut TestAppContext) {
+    let store = fake(cx);
+    let (_root, vcx) = settings_at(cx, &store, Category::General);
+    for id in [
+        "thinking-auto",
+        "thinking-preview",
+        "thinking-open",
+        "thinking-closed",
+    ] {
+        assert!(painted(vcx, id), "{id}");
+    }
+    assert_eq!(saved(vcx).thinking, ThinkingMode::Auto, "the default");
+    for (id, mode) in [
+        ("thinking-preview", ThinkingMode::Preview),
+        ("thinking-open", ThinkingMode::Open),
+        ("thinking-closed", ThinkingMode::Closed),
+        ("thinking-auto", ThinkingMode::Auto),
+    ] {
+        click(vcx, id);
+        assert_eq!(saved(vcx).thinking, mode, "{id}");
+    }
 }

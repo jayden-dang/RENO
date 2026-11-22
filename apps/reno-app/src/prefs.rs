@@ -114,8 +114,32 @@ impl Word for SendWith {
         &[(Self::Enter, "enter"), (Self::CommandEnter, "cmdEnter")];
 }
 
+/// How reasoning blocks show in the transcript.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ThinkingMode {
+    /// Open while it streams, closed when it ends.
+    #[default]
+    Auto,
+    /// Like Auto, at most [`PREVIEW_LINES`] lines high while it streams.
+    Preview,
+    Open,
+    Closed,
+}
+
+impl Word for ThinkingMode {
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::Auto, "auto"),
+        (Self::Preview, "preview"),
+        (Self::Open, "open"),
+        (Self::Closed, "closed"),
+    ];
+}
+
+/// The height, in lines, of streaming reasoning in Preview.
+pub(crate) const PREVIEW_LINES: u16 = 16;
+
 /// The keys of the file this build reads besides the notification switches.
-const KEYS: [&str; 12] = [
+const KEYS: [&str; 13] = [
     "mode",
     "theme",
     "accent",
@@ -128,6 +152,7 @@ const KEYS: [&str; 12] = [
     "skippedUpdates",
     "typesetMath",
     "mathSize",
+    "thinking",
 ];
 
 /// The smallest, the default and the largest math size (a percentage of the text size) and the
@@ -169,6 +194,8 @@ pub(crate) struct Prefs {
     /// How large typeset math is drawn, as a percentage of the text size: one of
     /// [`MATH_SIZES`].
     pub(crate) math_size: u8,
+    /// How reasoning blocks show (Settings › General).
+    pub(crate) thinking: ThinkingMode,
     /// Keys of the file this build does not know, written back unchanged.
     rest: Map<String, Value>,
 }
@@ -192,6 +219,7 @@ impl Default for Prefs {
             skipped_updates: BTreeMap::new(),
             typeset_math: true,
             math_size: MATH_SIZE_DEFAULT,
+            thinking: ThinkingMode::Auto,
             rest: Map::new(),
         }
     }
@@ -226,6 +254,12 @@ impl Pref {
 }
 
 impl Prefs {
+    /// How reasoning blocks show, in the preferences in force.
+    pub(crate) fn thinking(cx: &gpui::App) -> ThinkingMode {
+        cx.try_global::<PrefStore>()
+            .map_or_else(ThinkingMode::default, |store| store.prefs.thinking)
+    }
+
     pub(crate) fn get(&self, pref: Pref) -> bool {
         match pref {
             Pref::Notifications => self.notifications,
@@ -294,6 +328,7 @@ impl Prefs {
             .and_then(|size| u8::try_from(size).ok())
             .filter(|size| MATH_SIZES.contains(size))
             .unwrap_or(MATH_SIZE_DEFAULT);
+        prefs.thinking = ThinkingMode::from_word(word("thinking"));
         prefs.rest = map
             .into_iter()
             .filter(|(key, _)| {
@@ -322,6 +357,7 @@ impl Prefs {
         put("onboarded", self.onboarded.into());
         put("typesetMath", self.typeset_math.into());
         put("mathSize", self.math_size.into());
+        put("thinking", self.thinking.word().into());
         put(
             "skippedUpdates",
             Value::Object(
@@ -672,6 +708,46 @@ mod tests {
         assert_eq!(json["someFuture"][0], 1);
         assert_eq!(json["mathSize"], 110);
         assert_eq!(json["typesetMath"], false);
+    }
+
+    #[test]
+    fn the_thinking_setting_round_trips_and_a_missing_key_is_auto() {
+        assert_eq!(Prefs::default().thinking, ThinkingMode::Auto);
+        assert_eq!(
+            Prefs::from_json(br#"{"mode": "dark"}"#).thinking,
+            ThinkingMode::Auto,
+            "a file from before the key existed"
+        );
+        for odd in [r#"{"thinking": "loud"}"#, r#"{"thinking": 3}"#] {
+            assert_eq!(
+                Prefs::from_json(odd.as_bytes()).thinking,
+                ThinkingMode::Auto,
+                "{odd}"
+            );
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        let mut store = PrefStore::at(path.clone());
+        for (mode, word) in [
+            (ThinkingMode::Preview, "preview"),
+            (ThinkingMode::Open, "open"),
+            (ThinkingMode::Closed, "closed"),
+            (ThinkingMode::Auto, "auto"),
+        ] {
+            store.update(|p| p.thinking = mode);
+            let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["thinking"], word);
+            assert_eq!(PrefStore::at(path.clone()).prefs().thinking, mode);
+        }
+    }
+
+    #[gpui::test]
+    fn the_app_reads_the_thinking_setting_from_the_store_in_force(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(Prefs::thinking(cx), ThinkingMode::Auto, "no store yet");
+            update(cx, |p| p.thinking = ThinkingMode::Preview);
+            assert_eq!(Prefs::thinking(cx), ThinkingMode::Preview);
+        });
     }
 
     #[test]

@@ -4,13 +4,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
+use reno_client::Update;
+use reno_proto::{ExecEvent, RunId};
 
 use super::RunScreen;
 use crate::app::RootView;
+use crate::prefs::{self, ThinkingMode};
+use crate::store::Store;
 use crate::tests::{
     click, draw, fake_store, kinds, painted, run_id, wait_drawn, wait_until, window,
 };
-use crate::transcript::Row;
+use crate::transcript::{Key, Row};
 use crate::ui::theme::Appearance;
 
 fn open<'a>(
@@ -264,4 +268,207 @@ fn the_side_panel_does_not_repeat_the_run_status(cx: &mut TestAppContext) {
     click(vcx, "panel-new-tab");
     wait_drawn(vcx, |vcx| painted(vcx, "home-add-action"));
     assert!(!painted(vcx, "home-now"));
+}
+
+// --- reasoning while it streams ----------------------------------------------------------------
+
+/// The live seeded run on screen, with its store to push events into.
+fn open_live(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Store>,
+    &mut VisualTestContext,
+    Entity<RunScreen>,
+    RunId,
+) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| s.state().approvals().len() == 2)
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let run = run_id("builder1");
+    root.update_in(vcx, |r, window, cx| r.open_run(run.clone(), window, cx));
+    let screen = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("a run screen");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    (store, vcx, screen, run)
+}
+
+/// Hands `events` to the store as the daemon would send them, one after the other.
+fn stream(vcx: &mut VisualTestContext, store: &Entity<Store>, run: &RunId, events: Vec<ExecEvent>) {
+    for event in events {
+        store.update(vcx, |s, cx| {
+            let seq = s
+                .state()
+                .transcript(run)
+                .and_then(|t| t.highest)
+                .and_then(reno_proto::Seq::next)
+                .unwrap_or(reno_proto::Seq(1));
+            s.apply(
+                Update::RunEvent {
+                    run: run.clone(),
+                    seq,
+                    event,
+                },
+                cx,
+            );
+        });
+    }
+    draw(vcx);
+}
+
+fn reasoning_text(text: &str) -> ExecEvent {
+    ExecEvent::Reasoning { text: text.into() }
+}
+
+fn reply_text(text: &str) -> ExecEvent {
+    ExecEvent::Text { text: text.into() }
+}
+
+/// The reasoning row at the end of the transcript.
+fn streaming_reasoning(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> Key {
+    match rows(vcx, screen).last() {
+        Some(Row::Reasoning { key, .. }) => *key,
+        other => panic!("the transcript ends in reasoning: {other:?}"),
+    }
+}
+
+fn body_painted(vcx: &mut VisualTestContext, key: Key) -> bool {
+    painted(vcx, &format!("reasoning-body-{}", key.0))
+}
+
+fn lines(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("considering option {i}\n"))
+        .collect()
+}
+
+#[gpui::test]
+fn in_auto_reasoning_is_open_while_it_streams_and_closes_when_it_ends(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live(cx);
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![reasoning_text("weighing the options")],
+    );
+    let key = streaming_reasoning(vcx, &screen);
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("reasoning-{}", key.0)));
+    assert!(body_painted(vcx, key), "open while it streams");
+
+    stream(vcx, &store, &run, vec![reasoning_text(" and the costs")]);
+    assert!(body_painted(vcx, key), "still open as it grows");
+
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![reply_text("Going with the mirror.")],
+    );
+    assert!(
+        painted(vcx, &format!("reasoning-{}", key.0)),
+        "the head is still there"
+    );
+    assert!(!body_painted(vcx, key), "closed once it ended");
+}
+
+#[gpui::test]
+fn an_owner_toggle_while_streaming_keeps_the_owners_choice(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live(cx);
+    stream(vcx, &store, &run, vec![reasoning_text("first thoughts")]);
+    let key = streaming_reasoning(vcx, &screen);
+    wait_drawn(vcx, |vcx| body_painted(vcx, key));
+
+    click(vcx, &format!("reasoning-{}", key.0));
+    assert!(!body_painted(vcx, key), "the owner closed it");
+    stream(vcx, &store, &run, vec![reasoning_text(" and more")]);
+    assert!(!body_painted(vcx, key), "a new delta does not reopen it");
+    stream(vcx, &store, &run, vec![reply_text("Done.")]);
+    assert!(!body_painted(vcx, key), "and its end leaves it closed");
+
+    click(vcx, &format!("reasoning-{}", key.0));
+    assert!(body_painted(vcx, key), "the owner opens it again");
+    assert!(screen.read_with(vcx, |s, _| s.is_open(key)));
+}
+
+#[gpui::test]
+fn the_owner_opening_a_reasoning_row_that_streamed_keeps_it_open_after_it_ends(
+    cx: &mut TestAppContext,
+) {
+    let (store, vcx, screen, run) = open_live(cx);
+    stream(vcx, &store, &run, vec![reasoning_text("first thoughts")]);
+    let key = streaming_reasoning(vcx, &screen);
+    wait_drawn(vcx, |vcx| body_painted(vcx, key));
+    click(vcx, &format!("reasoning-{}", key.0));
+    click(vcx, &format!("reasoning-{}", key.0));
+    assert!(body_painted(vcx, key));
+    stream(vcx, &store, &run, vec![reply_text("Done.")]);
+    assert!(
+        body_painted(vcx, key),
+        "the owner's choice outlives the stream"
+    );
+}
+
+#[gpui::test]
+fn preview_caps_streaming_reasoning_at_sixteen_lines(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live(cx);
+    let line = gpui::px(21.0);
+    stream(vcx, &store, &run, vec![reasoning_text(&lines(40))]);
+    let key = streaming_reasoning(vcx, &screen);
+    wait_drawn(vcx, |vcx| body_painted(vcx, key));
+    let name: &'static str = Box::leak(format!("reasoning-body-{}", key.0).into_boxed_str());
+    let auto = vcx.debug_bounds(name).unwrap().size.height;
+    assert!(auto > line * 30.0, "Auto shows it whole: {auto:?}");
+
+    vcx.update(|_, cx| prefs::update(cx, |p| p.thinking = ThinkingMode::Preview));
+    draw(vcx);
+    let capped = vcx.debug_bounds(name).unwrap().size.height;
+    assert!(
+        capped <= line * 16.0 + gpui::px(1.0),
+        "Preview stops at sixteen lines: {capped:?}"
+    );
+    assert!(capped > line * 8.0, "and still shows many: {capped:?}");
+    draw(vcx);
+    let scrolled = screen.read_with(vcx, |s, _| s.reasoning_scroll.offset().y);
+    assert!(
+        scrolled <= -line * 20.0,
+        "the window shows the newest lines: {scrolled:?}"
+    );
+
+    stream(vcx, &store, &run, vec![reply_text("Done.")]);
+    assert!(!body_painted(vcx, key), "Preview closes it when it ends");
+}
+
+#[gpui::test]
+fn always_open_and_always_closed_hold_while_streaming_and_after(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live(cx);
+    vcx.update(|_, cx| prefs::update(cx, |p| p.thinking = ThinkingMode::Closed));
+    stream(vcx, &store, &run, vec![reasoning_text("quiet thoughts")]);
+    let key = streaming_reasoning(vcx, &screen);
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("reasoning-{}", key.0)));
+    assert!(
+        !body_painted(vcx, key),
+        "Always closed: shut while it streams"
+    );
+    click(vcx, &format!("reasoning-{}", key.0));
+    assert!(body_painted(vcx, key), "the owner can still open it");
+
+    vcx.update(|_, cx| prefs::update(cx, |p| p.thinking = ThinkingMode::Open));
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![reply_text("Next."), reasoning_text("later thoughts")],
+    );
+    let later = streaming_reasoning(vcx, &screen);
+    wait_drawn(vcx, |vcx| body_painted(vcx, later));
+    stream(vcx, &store, &run, vec![reply_text("Done.")]);
+    assert!(
+        body_painted(vcx, later),
+        "Always open keeps it open after it ends"
+    );
+    click(vcx, &format!("reasoning-{}", later.0));
+    assert!(!body_painted(vcx, later), "the owner can close it");
 }

@@ -10,7 +10,7 @@ use gpui::{
 use reno_proto::InstallStatus;
 
 use super::SettingsScreen;
-use crate::prefs::{self, AccentName, Mode, Motion, Prefs, SendWith, ThemeName};
+use crate::prefs::{self, AccentName, Mode, Motion, Prefs, SendWith, ThemeName, ThinkingMode};
 use crate::summary;
 use crate::ui::kit;
 use crate::ui::motion::{self, ReduceMotion};
@@ -310,6 +310,27 @@ impl SettingsScreen {
             SendWith::Enter => "\u{21e7} Enter starts a new line.",
             SendWith::CommandEnter => "Enter starts a new line; \u{2318} Enter sends.",
         };
+        let thinking = choice(
+            theme,
+            "thinking",
+            &[
+                (ThinkingMode::Auto, "auto", "Auto"),
+                (ThinkingMode::Preview, "preview", "Preview"),
+                (ThinkingMode::Open, "open", "Always open"),
+                (ThinkingMode::Closed, "closed", "Always closed"),
+            ],
+            p.thinking,
+            |p, v| p.thinking = v,
+            cx,
+        );
+        let thinking_help = match p.thinking {
+            ThinkingMode::Auto => "Open while the agent reasons, closed once it has.",
+            ThinkingMode::Preview => {
+                "A window of up to 16 lines while the agent reasons, closed once it has."
+            }
+            ThinkingMode::Open => "Reasoning stays open.",
+            ThinkingMode::Closed => "Reasoning stays closed until you open it.",
+        };
         vec![
             page::title(
                 theme,
@@ -344,6 +365,13 @@ impl SettingsScreen {
                                 },
                                 cx,
                             ),
+                            false,
+                        ),
+                        row(
+                            theme,
+                            "Thinking",
+                            Some(thinking_help.into()),
+                            thinking,
                             true,
                         ),
                     ],
