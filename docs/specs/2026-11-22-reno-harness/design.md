@@ -106,7 +106,7 @@ pub const RENO_EXECUTOR_ID: &str = "reno";
 impl PiExecutor { pub fn reno(sessions_root: PathBuf) -> Self }
 // descriptor(): id "reno", caps.access_modes [Supervised, FullAccess], sandbox_levels [Unrestricted],
 //               resume true, isolates_user_config true; cli_verified as pi
-// probe(): installed + version as pi; signed_in Unknown; models curated (never the owner's credentials)
+// probe(): installed + version as pi; signed_in Unknown; models curated [agent-decided] (never the owner's credentials)
 // maintenance(): None (the CLI's update and sign-in rows stay on `pi`)
 ```
 Depth: n/a. This extends `PiExecutor`.
@@ -205,7 +205,7 @@ Details:
   including when Pi is killed. A daemon crash leaves them for the OS temp cleaner, and they hold no secret: the key
   is only in Pi's environment.
 - **Socket path.** It is about 82 bytes on this machine (design-scan §5), against the macOS `sun_path` limit of
-  104. When `<scratch>/.reno/gate.sock` would be 104 bytes or more (a long `TMPDIR`), the socket goes to a short
+  104 bytes (`char sun_path[104]`, the macOS SDK's `sys/un.h:79`). When `<scratch>/.reno/gate.sock` would be 104 bytes or more (a long `TMPDIR`), the socket goes to a short
   owner-only directory, `/tmp/reno-gate-<uuid>/.reno/gate.sock` (0700, removed with the attempt). If even that is
   too long, the attempt fails. The path is never truncated.
 - **Ambient cloud credentials (2.1).** `BASE` keeps `HOME`, and Pi's providers find file-based credentials under it:
@@ -240,6 +240,7 @@ hook returns: allow -> undefined (input untouched);  anything else -> {block: tr
 Depth: deletion test. If the gate vanished, a caller would still need to know only the three line shapes above and
 "anything but allow blocks". The implementation hides the connection, the waits, the outstanding cap and the
 failure paths.
+Respects: ARCH-11, ARCH-18
 Locality: new file `crates/reno-harness/src/drivers/pi/gate.mjs`, installed like `mcp.mjs`. Nothing existing
 moves.
 
@@ -252,8 +253,10 @@ Rules the file implements:
   - the handler throws (6.1).
 - No timer of its own (6.2). The kernel always answers: an expiry is a deny at the TTL, and a cancel denies
   everything open (`approval.rs:702,797-832`). So the gate waits until the decision arrives or the socket closes.
-- At most `MAX_OUTSTANDING` (16) calls are sent unanswered. Further calls wait inside the gate, in Pi's memory, so
-  the driver's bound (11.2) is never reached by a working gate.
+- At most `MAX_OUTSTANDING` (16) [agent-decided] calls are sent unanswered. Further calls wait inside the gate, so
+  the driver's bound (11.2) is never reached by a working gate. That wait queue is bounded too, at `MAX_WAITING`
+  (256) [agent-decided]. A call beyond it is blocked at once, with the reason "too many calls are waiting for Reno",
+  so the gate holds a bounded amount of state whatever the model asks for (ARCH-11).
 - No reconnect. After the socket is lost, every call blocks until Pi exits.
 
 ### The gate host (in the driver)
@@ -294,7 +297,7 @@ Flow:
 - **Arming, in `Run::start_up`** (`mod.rs:775-835`), for `Reno` only.
   - After Pi is up and before the first `prompt`, `GateHost::arm` waits for the one connection and its hello. In
     the same window, `Run::query(get_commands)` must list `reno-gate` with source `extension` (5.1). Both are
-    awaited as events, never polled (ARCH-10), within `ARMING_BUDGET` (30 s, inside `STARTUP_BUDGET` of 120 s).
+    awaited as events, never polled (ARCH-10), within `ARMING_BUDGET` (30 s [agent-decided], inside `STARTUP_BUDGET` of 120 s, `drivers/pi/mod.rs:108`).
   - A failure is `Startup::Failed("Reno's gate did not arm: <check>")`, which becomes `Done{stop: Error}` (5.2). The
     dispatcher sees a stream, not an `ExecError`, so it never falls back (5.3).
   - The gate says hello once, at `session_start` with reason `startup`. The listener accepts until the first
@@ -315,10 +318,11 @@ Flow:
   with `Done{stop: Error, diagnostic: "a credential file appeared in the run's Pi agent directory (auth.json)"}`. The
   check is in the driver rather than in `gate.mjs`, because the driver is out of the run's reach. This keeps the
   semantics of the interpret pick (Weigh) and moves only where it runs.
-- **Bound (11.2).** `GateHost` counts open calls. More than `MAX_OPEN_GATE_CALLS` (16) means a broken gate:
+- **Bound (11.2).** `GateHost` counts open calls. More than `MAX_OPEN_GATE_CALLS` (16) [agent-decided] means a broken gate:
   `next()` returns the excess call already denied, and the host closes the connection, which is 6.6. `decide` never
-  blocks (a bounded per-connection writer task), and `next()` is cancel-safe, because it sits in `Player::play`'s
-  `select!`.
+  blocks: it queues onto a bounded channel of `MAX_OPEN_GATE_CALLS` lines, drained by one writer task. That task is
+  spawned on the `PiExecutor`'s `TaskTracker` (`drivers/pi/mod.rs:200-214`), owned by the attempt's `Run`, and
+  aborted in `teardown` (ARCH-11). `next()` is cancel-safe, because it sits in `Player::play`'s `select!`.
 - **Lost connection (6.6).** `GateHost::next() == None` while the run goes on ends it as
   `Done{stop: Error, diagnostic: "Reno lost its watch over the run: the gate's connection closed"}`. A person may
   resume it, and resume re-arms.
@@ -397,6 +401,11 @@ Notes:
 - **Inherited behavior.** When the journal write after a decision fails, the run is cancelled, but an allow already
   committed to the approval history may reach the gate (`approval.rs:526-535`). The decision is on record in the
   store; this road does not change it.
+- **Paths are judged lexically.** The built-in protection judges a path as written, with no symlink resolution and
+  no `~` expansion (`crates/reno-proto/src/defs/eval.rs:25,48`). A symlink into the run's `.reno` directory, or a
+  relative path that reaches it without naming `.reno`, is part of the unrecognised-writes residual in Out of Scope.
+  The spike asked for paths to be resolved (`docs/roadmap/roads/ROAD-61.notes.md:19`, "resolve paths"); that belongs
+  with ROAD-63's command parsing.
 - **Event order.** Pi emits `tool_execution_start` before its hook runs (Pi `agent-loop.js:385-426`), so a call's
   `Tool` event is journaled just before its `NeedsApproval`. A blocked call then gets an error `ToolResult` with the
   gate's reason. The call still has its decision on record before it runs (4.1).
@@ -425,7 +434,9 @@ trait Executor {
 // PiExecutor{Reno}: run_closed first awaits the end of that run's attempt task (its teardown, so Pi is gone and the
 //                   ScratchDir is dropped), then removes <sessions_root>/<run>;
 //                   retain_runs removes every <sessions_root>/<dir> whose name is not in keep
-// kernel: workspaces::run_ended() -> if status ∈ {Succeeded, Cancelled} { executor_of(run).run_closed(run) } (own task)
+// kernel: workspaces::run_ended() -> if status ∈ {Succeeded, Cancelled} { executor_of(run).run_closed(run) }, on a task
+//         spawned with shared.spawn, as run_ended already spawns its idle-clock task (workspaces.rs:179-185), so the
+//         kernel's task set owns it and shutdown awaits it (ARCH-11)
 //         recovery (after step 2, before step 5's re-queue and before the dispatcher claims)
 //                  -> keep = runs with status ∈ {Failed, Interrupted} ∪ {Queued with a session_ref}
 //                  -> each executor.retain_runs(&keep).await
