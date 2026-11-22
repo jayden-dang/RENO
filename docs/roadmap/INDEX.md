@@ -1,6 +1,6 @@
 # Roadmap: Reno
 
-Status: Draft
+Status: Approved
 Date: 2026-11-22
 
 <!--

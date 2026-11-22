@@ -1,7 +1,8 @@
 # Requirements: Reading a conversation (transcript)
 
 Feature code: TRANSCRIPT
-Status: Draft
+Status: Approved
+Approved: 2026-11-22, the operator's word "approve" (relayed by the conductor; RUN operator-reply.md)
 Date: 2026-11-22
 
 Roadmap item ROAD-33 (MILE-10, designed on the mocked daemon and kept as real code). Frame: the operator's confirmed frame

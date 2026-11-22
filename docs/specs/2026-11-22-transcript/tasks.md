@@ -8,7 +8,8 @@
 > The chosen skill writes `Execution-mode:`. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Feature code: TRANSCRIPT
-Status: Draft
+Status: Approved
+Approved: 2026-11-22, the operator's word "approve" (relayed by the conductor; RUN operator-reply.md)
 Date: 2026-11-22
 Execution-mode: unset
 Max-concurrency: auto
