@@ -11,33 +11,35 @@ use serde_json::{Value, json};
 use super::normalize::action_class;
 
 /// The subject of the gate call `call_id` to `tool`, made by `parent` when another tool made it.
+/// `None` when the call cannot be read: a command, or the path of an edit or read, that is there
+/// but is not text. The caller denies such a call, since what it would run is not known.
 ///
 /// A command is `input.command`. Edits and reads name `input.path`; `grep`, `find` and `ls` may
 /// omit it (meaning the working directory), which leaves no path. A path is spelled as Pi will
 /// open it (see [`opened_paths`]). Pi expands `~` with its child's `os.homedir()`, which is the
-/// `HOME` the daemon's base environment passes on, so the caller passes the daemon user's home as
-/// `home`; without it `~/Library/Application Support/Reno` would read as a path inside the
-/// working directory. A `find` pattern and a `grep` glob are not
-/// paths and stay only in `raw`, which is the call as the gate sent it.
+/// `HOME` of the child's own environment, so the caller passes that as `home`; without it
+/// `~/Library/Application Support/Reno` would read as a path inside the working directory. A
+/// `find` pattern and a `grep` glob are not paths and stay only in `raw`, which is the call as
+/// the gate sent it.
 pub(crate) fn subject(
     tool: &str,
     call_id: &str,
     parent: Option<&str>,
     input: &Value,
     home: &Path,
-) -> ApprovalSubject {
+) -> Option<ApprovalSubject> {
     let action = action_class(tool);
-    let text = |key: &str| input.get(key).and_then(Value::as_str);
-    let command = (action == ActionClass::Command)
-        .then(|| text("command").map(str::to_owned))
-        .flatten();
+    let command = match action {
+        ActionClass::Command => text(input, "command")?.map(str::to_owned),
+        _ => None,
+    };
     let paths = match action {
-        ActionClass::Edit | ActionClass::Read => text("path")
+        ActionClass::Edit | ActionClass::Read => text(input, "path")?
             .map(|path| opened_paths(path, home))
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    ApprovalSubject {
+    Some(ApprovalSubject {
         action,
         tool: tool.to_owned(),
         command,
@@ -48,14 +50,23 @@ pub(crate) fn subject(
             "parentToolCallId": parent,
             "input": input,
         }),
+    })
+}
+
+/// The text argument `key`: `Some(None)` when it is absent, `None` when it is there and is not
+/// text.
+fn text<'a>(input: &'a Value, key: &str) -> Option<Option<&'a str>> {
+    match input.get(key) {
+        None => Some(None),
+        Some(value) => value.as_str().map(Some),
     }
 }
 
 /// The paths the protection should judge for a tool's `path` argument, spelled as Pi will open
 /// it, in Pi's order: Unicode spaces become plain spaces; one leading `@` is dropped; a leading `~`
 /// or `~/` is expanded against `home`; then a `file://` URL is read as node's `fileURLToPath`
-/// reads it. A URL that call would refuse (another host, an encoded `/`) still yields its decoded path and, besides, the
-/// text as written, so a protected component in either form is seen.
+/// reads it. A URL that call would refuse (another host, an encoded `/`) still yields its decoded
+/// path and, besides, the text as written, so a protected component in either form is seen.
 fn opened_paths(path: &str, home: &Path) -> Vec<PathBuf> {
     let spaced: String = path
         .chars()
@@ -130,7 +141,7 @@ mod tests {
 
     /// A call as the driver makes it, with a constructed home.
     fn subject(tool: &str, call_id: &str, parent: Option<&str>, input: &Value) -> ApprovalSubject {
-        super::subject(tool, call_id, parent, input, Path::new("/home/u"))
+        super::subject(tool, call_id, parent, input, Path::new("/home/u")).unwrap()
     }
 
     fn paths(subject: &ApprovalSubject) -> Vec<&str> {
@@ -302,9 +313,42 @@ mod tests {
     }
 
     #[test]
-    fn a_command_that_is_not_text_is_no_command() {
-        let subject = subject("bash", "c1", None, &json!({ "command": 7 }));
-        assert_eq!(subject.action, ActionClass::Command);
-        assert_eq!(subject.command, None);
+    fn a_command_or_path_that_is_not_text_is_a_call_that_cannot_be_read() {
+        let rows: &[(&str, Value)] = &[
+            ("bash", json!({ "command": 7 })),
+            ("bash", json!({ "command": null })),
+            ("bash", json!({ "command": ["rm", "-rf"] })),
+            ("bash", json!({ "command": { "line": "ls" } })),
+            ("powershell", json!({ "command": true })),
+            ("edit", json!({ "path": 7 })),
+            ("write", json!({ "path": null, "content": "x" })),
+            ("read", json!({ "path": [".reno/policy.toml"] })),
+            ("read", json!({ "path": { "p": ".git/config" } })),
+            ("ls", json!({ "path": false })),
+            ("grep", json!({ "path": 1, "pattern": "x" })),
+            ("find", json!({ "path": null, "pattern": "x" })),
+        ];
+        for (tool, input) in rows {
+            assert!(
+                super::subject(tool, "c1", None, input, Path::new("/home/u")).is_none(),
+                "{tool} {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_that_names_nothing_is_still_read() {
+        let bare_command = subject("bash", "c1", None, &json!({}));
+        assert_eq!(bare_command.action, ActionClass::Command);
+        assert_eq!(bare_command.command, None);
+        let no_path = subject("ls", "c2", None, &json!({}));
+        assert!(no_path.paths.is_empty());
+        let other = subject(
+            "extension_tool",
+            "c3",
+            None,
+            &json!({ "path": 1, "command": 2 }),
+        );
+        assert_eq!(other.action, ActionClass::Other);
     }
 }

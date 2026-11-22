@@ -207,6 +207,9 @@ const GATE_REQUEST_PREFIX: &str = "gate-";
 /// What the gate tells Pi's tool when a call is denied because the run stopped.
 const RUN_STOPPED: &str = "Reno stopped the run before it decided this call.";
 
+/// What a gate call whose command or path is not text is told.
+const UNREADABLE_CALL: &str = "Reno could not read this call.";
+
 /// The Pi CLI to launch: `PI_EXECUTABLE`, then our own PATH, the login-shell PATH and the known
 /// install locations. Resolved per call: cheap after the snapshot is cached.
 pub fn resolve_pi_executable() -> Option<PathBuf> {
@@ -1868,13 +1871,20 @@ impl<'a> Player<'a> {
             self.decide_call(call.id, crate::exec::Decision::Deny, None);
             return Ok(());
         };
-        let subject = subject(
+        let Some(subject) = subject(
             &call.tool,
             &call.call_id,
             call.parent.as_deref(),
             &call.input,
             home,
-        );
+        ) else {
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(UNREADABLE_CALL.into()),
+            );
+            return Ok(());
+        };
         let request_id = format!("{GATE_REQUEST_PREFIX}{}", call.id);
         self.calls
             .open_approval(request_id.clone(), GatePayload { id: call.id });
@@ -3012,6 +3022,27 @@ mod tests {
                     assert_eq!(decision["decision"], "deny");
                     assert_eq!(decision["reason"], CREDENTIAL_APPEARED, "{decision}");
                 }
+            }
+
+            #[tokio::test]
+            async fn a_call_whose_command_is_not_text_is_denied_and_never_raised() {
+                let mut rig = Rig::new().await;
+                let line = "{\"t\":\"call\",\"id\":1,\"toolName\":\"bash\",\
+                            \"toolCallId\":\"c1\",\"parentToolCallId\":null,\
+                            \"input\":{\"command\":7}}\n";
+                rig.gate.get_mut().write_all(line.as_bytes()).await.unwrap();
+                let mut player = rig.player();
+                player.frame(tool_start("c1")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                let decision = rig.decision().await;
+                assert_eq!(decision["decision"], "deny");
+                assert_eq!(decision["reason"], UNREADABLE_CALL);
+                assert!(
+                    rig.emitted()
+                        .iter()
+                        .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
+                );
             }
 
             #[tokio::test]
