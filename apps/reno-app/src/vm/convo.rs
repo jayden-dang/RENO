@@ -249,49 +249,6 @@ pub(crate) fn label_in_line(call: &ToolEntry, line: &str) -> Option<(usize, usiz
     Some((shown, at))
 }
 
-/// How many tool calls a fold holds: its "steps".
-pub(crate) fn steps_in(rows: &[Row]) -> usize {
-    rows.iter()
-        .map(|r| match r {
-            Row::Tools { calls, .. } => calls.len(),
-            _ => 0,
-        })
-        .sum()
-}
-
-/// The tools a fold used, by name, in the order they first appear: "cargo", "rg", "edit".
-pub(crate) fn tools_used(rows: &[Row], most: usize) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for call in rows.iter().flat_map(|r| match r {
-        Row::Tools { calls, .. } => calls.as_slice(),
-        _ => &[],
-    }) {
-        if seen.len() == most {
-            break;
-        }
-        let name = match call.kind {
-            ToolKind::Edit => "edit".to_owned(),
-            ToolKind::Command => call
-                .label
-                .split_whitespace()
-                .next()
-                .map_or_else(String::new, |w| {
-                    w.rsplit('/').next().unwrap_or(w).to_owned()
-                }),
-            ToolKind::Other => call
-                .label
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_lowercase(),
-        };
-        if !name.is_empty() && !seen.contains(&name) {
-            seen.push(name);
-        }
-    }
-    seen
-}
-
 /// "Worked for 12s", "Worked for 1m 5s", or "Worked" when the turn has no timing.
 pub(crate) fn worked_label(secs: Option<u64>) -> String {
     match secs {
@@ -894,34 +851,6 @@ mod tests {
         let edit = call("e", ToolKind::Edit, "edit src/a.rs", ok());
         let line = &step_lines(std::slice::from_ref(&edit))[0];
         assert_eq!(label_in_line(&edit, &line.text), None);
-    }
-
-    #[test]
-    fn a_fold_counts_its_steps_and_names_the_tools_it_used_once_each() {
-        let calls = |labels: &[(ToolKind, &str)]| Row::Tools {
-            key: Key(9),
-            calls: labels
-                .iter()
-                .enumerate()
-                .map(|(i, (k, l))| call(&format!("c{i}"), *k, l, ok()))
-                .collect(),
-        };
-        let rows = vec![
-            prose(1),
-            calls(&[
-                (ToolKind::Command, "cargo test -p a"),
-                (ToolKind::Command, "/usr/bin/rg -n x"),
-                (ToolKind::Command, "cargo build"),
-            ]),
-            calls(&[
-                (ToolKind::Edit, "edit a.rs"),
-                (ToolKind::Other, "Read a.rs"),
-            ]),
-        ];
-        assert_eq!(steps_in(&rows), 5);
-        assert_eq!(tools_used(&rows, 4), ["cargo", "rg", "edit", "read"]);
-        assert_eq!(tools_used(&rows, 2), ["cargo", "rg"]);
-        assert!(tools_used(&[prose(1)], 4).is_empty());
     }
 
     #[test]

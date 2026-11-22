@@ -17,7 +17,6 @@ use crate::ui::theme::Theme;
 use crate::ui::toast;
 use crate::vm::changes as facts;
 use crate::vm::convo;
-use crate::vm::draft33::Variant;
 use crate::vm::find;
 use crate::vm::selection::{Kind, Slot};
 
@@ -50,7 +49,6 @@ impl RunScreen {
     pub(super) fn step_row(
         &self,
         theme: &Theme,
-        variant: Variant,
         (key, ln): (Key, usize),
         line: &convo::StepLine,
         calls: &[ToolEntry],
@@ -139,7 +137,7 @@ impl RunScreen {
             ))
             .when(!unpainted.is_empty(), |d| {
                 let current = unpainted.iter().any(|(_, cur)| *cur);
-                let tint = find_look::hit_style(theme, variant, false)
+                let tint = find_look::hit_style(theme, false)
                     .background_color
                     .unwrap_or(theme.raised);
                 d.bg(tint)
@@ -161,7 +159,6 @@ impl RunScreen {
                     .when(line.live, |d| d.debug_selector(|| "step-live".to_owned()))
                     .child(self.text_piece(
                         theme,
-                        variant,
                         Spot {
                             key,
                             slot: Slot::new(ln, Kind::Step),
@@ -181,9 +178,9 @@ impl RunScreen {
                 ))
             });
         let block = output.filter(|_| shown).and_then(|c| {
-            c.output.as_ref().map(|out| {
-                self.output_block(theme, variant, (key, ln), (at.unwrap_or(0), c), out, cx)
-            })
+            c.output
+                .as_ref()
+                .map(|out| self.output_block(theme, (key, ln), (at.unwrap_or(0), c), out, cx))
         });
         div()
             .flex()
@@ -197,7 +194,6 @@ impl RunScreen {
     fn output_block(
         &self,
         theme: &Theme,
-        variant: Variant,
         (key, ln): (Key, usize),
         (at, call): (usize, &ToolEntry),
         out: &ToolOutput,
@@ -286,7 +282,6 @@ impl RunScreen {
                                 start += line.len() + 1;
                                 div().min_h(px(18.0)).child(self.text_piece(
                                     theme,
-                                    variant,
                                     Spot {
                                         key,
                                         slot: Slot::new(ln, Kind::Output),
@@ -320,7 +315,6 @@ impl RunScreen {
                                 .text_color(theme.faint)
                                 .child(self.text_piece(
                                     theme,
-                                    variant,
                                     Spot {
                                         key,
                                         slot: Slot::new(ln, Kind::Cut),

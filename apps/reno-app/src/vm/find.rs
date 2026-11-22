@@ -38,18 +38,6 @@ pub(crate) enum Source {
     Output,
 }
 
-impl Source {
-    pub(crate) const fn word(self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-            Self::Reply => "reply",
-            Self::Reasoning => "reasoning",
-            Self::Command => "command",
-            Self::Output => "output",
-        }
-    }
-}
-
 /// One match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Hit {
@@ -197,11 +185,6 @@ pub(crate) fn count_label(query: &str, hits: usize, current: Option<usize>) -> O
     })
 }
 
-/// "7 results" / "1 result", for the results list.
-pub(crate) fn results_label(hits: usize) -> String {
-    format!("{hits} result{}", if hits == 1 { "" } else { "s" })
-}
-
 /// The hits of the whole thread and which one is current.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Found {
@@ -248,6 +231,7 @@ impl Found {
         self.hits.get(at)
     }
 
+    #[cfg(test)]
     pub(crate) fn go_to(&mut self, at: usize) -> Option<&Hit> {
         let hit = self.hits.get(at)?;
         self.current = Some(at);
@@ -302,44 +286,6 @@ pub(crate) fn output_can_open(calls: &[ToolEntry], call: &str) -> bool {
     convo::step_lines(calls)
         .iter()
         .any(|l| l.call.as_deref() == Some(call))
-}
-
-/// A match with some of the line around it, for the results list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Snippet {
-    pub(crate) before: String,
-    pub(crate) matched: String,
-    pub(crate) after: String,
-}
-
-/// The line of `text` that holds `range`, cut to about `around` characters each side of the
-/// match, with an ellipsis where it was cut.
-pub(crate) fn snippet(text: &str, range: &Range<usize>, around: usize) -> Snippet {
-    let start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
-    let end = text[range.end..]
-        .find('\n')
-        .map_or(text.len(), |i| range.end + i);
-    let before = &text[start..range.start];
-    let after = &text[range.end..end];
-    let tail = |s: &str| -> String {
-        let n = s.chars().count();
-        if n <= around {
-            return s.trim_start().to_owned();
-        }
-        let from = s.char_indices().nth(n - around).map_or(0, |(i, _)| i);
-        format!("\u{2026}{}", s[from..].trim_start())
-    };
-    let head = |s: &str| -> String {
-        match s.char_indices().nth(around) {
-            Some((i, _)) => format!("{}\u{2026}", s[..i].trim_end()),
-            None => s.trim_end().to_owned(),
-        }
-    };
-    Snippet {
-        before: tail(before),
-        matched: text[range.clone()].to_owned(),
-        after: head(after),
-    }
 }
 
 /// A set of open things, and who opened them: the owner, or search. Search's are closed again
@@ -521,34 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn a_snippet_is_the_line_around_the_match_cut_with_ellipses() {
-        let text = "first line\npanicked at crates/reno-harness/src/acp/supervisor.rs:118:9:\nlast";
-        let hit = matches(text, "supervisor.rs")[0].clone();
-        let s = snippet(text, &hit, 12);
-        assert_eq!(s.matched, "supervisor.rs");
-        assert_eq!(s.before, "\u{2026}ess/src/acp/");
-        assert_eq!(s.after, ":118:9:");
-        let short = snippet("see supervisor.rs ok", &(4..17), 40);
-        assert_eq!(
-            (short.before.as_str(), short.after.as_str()),
-            ("see ", " ok".trim_end())
-        );
-        let cut = snippet(
-            "supervisor.rs and then a very long tail of words",
-            &(0..13),
-            10,
-        );
-        assert_eq!(cut.after, " and then\u{2026}");
-    }
-
-    #[test]
     fn the_count_reads_one_of_n_and_says_when_nothing_matches() {
         assert_eq!(count_label("x", 7, Some(0)).as_deref(), Some("1 of 7"));
         assert_eq!(count_label("x", 7, Some(2)).as_deref(), Some("3 of 7"));
         assert_eq!(count_label("x", 0, None).as_deref(), Some("No results"));
         assert_eq!(count_label("", 0, None), None);
-        assert_eq!(results_label(7), "7 results");
-        assert_eq!(results_label(1), "1 result");
     }
 
     fn found(n: usize) -> Found {

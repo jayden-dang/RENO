@@ -10,16 +10,13 @@ use reno_client::fake::FakeConfig;
 
 use super::RunScreen;
 use crate::app::RootView;
-use crate::panel::surface::Surface;
 use crate::store::Store;
 use crate::tests::{
-    approvals, click, draw, fake_store, one_window_test_at_a_time, painted, run_id, wait_drawn,
-    wait_until, window,
+    approvals, click, draw, fake_store, one_window_test_at_a_time, painted, run_id, wait_until,
+    window,
 };
 use crate::transcript::{Key, Row};
-use crate::ui::draft33;
 use crate::ui::theme::Appearance;
-use crate::vm::draft33::Variant;
 use crate::vm::find::Part;
 
 /// `wait_drawn` that says what it was waiting for.
@@ -50,19 +47,16 @@ type Opened<'a> = (
     Entity<RunScreen>,
 );
 
-fn bind(cx: &mut TestAppContext, on: Option<Variant>) {
+fn bind(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::actions::bind_keys(cx);
         crate::ui::composer::bind_keys(cx);
         super::bind_keys(cx);
-        if let Some(variant) = on {
-            draft33::install(variant, cx);
-        }
     });
 }
 
 /// The handshake thread's last run opened, with every turn's fold in.
-fn open(cx: &mut TestAppContext, on: Option<Variant>) -> Opened<'_> {
+fn open(cx: &mut TestAppContext) -> Opened<'_> {
     one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     let store = cx.new(|cx| {
@@ -80,7 +74,7 @@ fn open(cx: &mut TestAppContext, on: Option<Variant>) -> Opened<'_> {
     wait_until(cx, |cx| {
         store.read_with(cx, |s, _| s.thread_of(&run_id("acp8")).is_some())
     });
-    bind(cx, on);
+    bind(cx);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     root.update_in(vcx, |r, window, cx| r.open_run(run_id("acp8"), window, cx));
@@ -294,6 +288,39 @@ fn a_turn_that_folds_keeps_the_reading_place_below_it_and_lands_on_the_head(
     });
 }
 
+/// A fold's head stays the one line "Worked for <duration>" and its chevron: no count, no chips,
+/// no card around it.
+fn a_fold_head_is_the_single_line_worked_for_its_duration(
+    vcx: &mut VisualTestContext,
+    screen: &Entity<RunScreen>,
+) {
+    let (fold, _) = *folds(vcx, screen).last().unwrap();
+    let selector: &'static str = Box::leak(format!("worked-{}", fold.0).into_boxed_str());
+    wait_for(vcx, "the last fold's head is painted", |vcx| {
+        painted(vcx, selector)
+    });
+    let (label, head) = screen.read_with(vcx, |s, _| {
+        let Some(Row::Worked { secs, .. }) = s.rows().iter().find(|r| r.key() == fold) else {
+            panic!("a fold")
+        };
+        (
+            crate::vm::convo::worked_label(*secs),
+            s.painted_head(fold).expect("the head's words are painted"),
+        )
+    });
+    assert!(label.starts_with("Worked for "), "{label}");
+    assert_eq!(head.0, label);
+    // Its words are the head's only text: no count, no tool names with them.
+    let texts: Vec<_> = screen.read_with(vcx, |s, _| {
+        s.painted_pieces()
+            .into_iter()
+            .filter(|(key, _, _)| *key == fold)
+            .map(|(_, slot, _)| slot)
+            .collect()
+    });
+    assert_eq!(texts, [crate::vm::selection::Slot::HEAD]);
+}
+
 // --- find -------------------------------------------------------------------------------------
 
 fn find_counts_seven_and_the_first_is_turn_threes_cargo_test_step(
@@ -446,7 +473,7 @@ fn the_count_follows_changes_once_per_150_ms_and_keeps_the_current_match(
 fn with_the_bar_open_escape_closes_it_and_neither_denies_an_approval_nor_stops_the_run(
     cx: &mut TestAppContext,
 ) {
-    bind(cx, None);
+    bind(cx);
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -484,7 +511,7 @@ fn with_the_bar_open_escape_closes_it_and_neither_denies_an_approval_nor_stops_t
 
 #[gpui::test]
 fn escape_from_the_composer_closes_the_bar_before_it_stops_the_run(cx: &mut TestAppContext) {
-    bind(cx, None);
+    bind(cx);
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -535,6 +562,11 @@ fn jump_to_latest_shows_off_the_tail_and_takes_the_view_back_to_following(
         painted(vcx, "jump-latest")
     });
     assert!(!screen.read_with(vcx, |s, _| s.is_following_tail()));
+    // A round button: its box is square, and small beside the transcript.
+    let button = vcx.debug_bounds("jump-latest").unwrap();
+    assert_eq!(button.size.width, button.size.height, "round, so square");
+    let transcript = vcx.debug_bounds("transcript").unwrap();
+    assert!(button.size.width < transcript.size.width / 4.0, "a button");
     click(vcx, "jump-latest");
     draw(vcx);
     assert!(
@@ -569,17 +601,28 @@ fn opening_a_fold_while_following_stops_following(
     });
 }
 
-// --- the three variants --------------------------------------------------------------------------
+// --- the find strip ------------------------------------------------------------------------
 
-fn each_variant_shows_one_of_seven(
+/// ⌘F opens a strip pinned at the top of the transcript with the query field, "N of M",
+/// previous and next, and close; the buttons act and Escape closes it.
+fn the_find_strip_sits_above_the_transcript_with_its_field_count_and_buttons(
     vcx: &mut VisualTestContext,
     screen: &Entity<RunScreen>,
-    variant: Variant,
 ) {
     let screen = screen.clone();
+    assert!(!painted(vcx, "find-bar"), "closed until asked for");
     vcx.simulate_keystrokes("cmd-f");
     draw(vcx);
-    assert!(painted(vcx, "find-bar"), "{variant:?} draws its bar");
+    assert!(painted(vcx, "find-bar"), "⌘F opens the strip");
+    assert!(painted(vcx, "find-query"), "with the query field");
+    let (bar, transcript) = (
+        vcx.debug_bounds("find-bar").unwrap(),
+        vcx.debug_bounds("transcript").unwrap(),
+    );
+    assert!(
+        bar.bottom() <= transcript.top(),
+        "pinned above the transcript, not over it"
+    );
     vcx.simulate_keystrokes("cmd-a");
     type_query(vcx, "supervisor.rs");
     wait_for(
@@ -587,93 +630,30 @@ fn each_variant_shows_one_of_seven(
         "count(vcx, &screen).as_deref() == Some(\"1 of 7\")",
         |vcx| count(vcx, &screen).as_deref() == Some("1 of 7"),
     );
-    assert!(painted(vcx, "find-count"), "{variant:?} paints the count");
-    match variant {
-        Variant::A => {
-            let bar = vcx.debug_bounds("find-bar").unwrap();
-            assert_eq!(f32::from(bar.size.height), 36.0, "a 36 pt strip");
-            let canvas = vcx.debug_bounds("chat-canvas").unwrap();
-            assert!(bar.size.width > canvas.size.width * 0.9, "full width");
-        }
-        Variant::B => {
-            let bar = vcx.debug_bounds("find-bar").unwrap();
-            assert_eq!(f32::from(bar.size.width), 320.0, "a 320 pt panel");
-        }
-        Variant::C => {
-            // The side panel's Find tab: one row for each of the seven hits.
-            screen.read_with(vcx, |s, _| {
-                assert!(s.panel_state().tabs().contains(&Surface::Find));
-                assert_eq!(*s.panel_state().active(), Surface::Find);
-            });
-            assert!(painted(vcx, "find-results-count"));
-            for n in 0..7 {
-                assert!(painted(vcx, &format!("find-result-{n}")), "result {n}");
-            }
-            assert!(!painted(vcx, "find-result-7"));
-            // A click on a result goes to it: the third.
-            click(vcx, "find-result-2");
-            draw(vcx);
-            assert_eq!(count(vcx, &screen).as_deref(), Some("3 of 7"));
-        }
+    assert!(painted(vcx, "find-count"), "the count is on the strip");
+    for button in ["find-prev", "find-next", "find-close"] {
+        assert!(painted(vcx, button), "{button}");
     }
+    click(vcx, "find-next");
+    click(vcx, "find-next");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("2 of 7"));
+    click(vcx, "find-prev");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    click(vcx, "find-close");
+    draw(vcx);
+    assert!(!painted(vcx, "find-bar"), "the close button closes it");
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    assert!(painted(vcx, "find-bar"));
     vcx.simulate_keystrokes("escape");
     draw(vcx);
-    assert!(!painted(vcx, "find-bar"), "{variant:?} Escape closes it");
-    screen.read_with(vcx, |s, _| {
-        assert!(!s.panel_state().tabs().contains(&Surface::Find));
-    });
+    assert!(!painted(vcx, "find-bar"), "Escape closes it");
 }
 
 #[gpui::test]
-fn each_variant_shows_one_of_seven_and_has_its_own_jump_control(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
-    each_variant_shows_one_of_seven(vcx, &screen, Variant::A);
-    vcx.simulate_keystrokes("cmd-alt-right");
-    draw(vcx);
-    each_variant_shows_one_of_seven(vcx, &screen, Variant::B);
-    vcx.simulate_keystrokes("cmd-alt-right");
-    draw(vcx);
-    each_variant_shows_one_of_seven(vcx, &screen, Variant::C);
-    vcx.simulate_keystrokes("cmd-alt-right");
-    draw(vcx);
-    every_variant_has_its_own_jump_control(vcx, &screen);
-}
-
-fn every_variant_has_its_own_jump_control(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>) {
-    let screen = screen.clone();
-    vcx.update(|_, cx| draft33::cycle(true, cx));
-    draw(vcx);
-    screen.update(vcx, |s, cx| {
-        s.list.scroll_by(px(-2000.0));
-        cx.notify();
-    });
-    wait_for(vcx, "painted(vcx, \"jump-latest\")", |vcx| {
-        painted(vcx, "jump-latest")
-    });
-    let b = vcx.debug_bounds("jump-latest").unwrap();
-    assert_eq!(f32::from(b.size.height), 28.0, "B: a 28 pt bar");
-    let transcript = vcx.debug_bounds("transcript").unwrap();
-    assert_eq!(b.size.width, transcript.size.width, "B: the full width");
-    // A: a round 32 pt button.
-    vcx.simulate_keystrokes("cmd-alt-left");
-    wait_drawn(vcx, |vcx| {
-        vcx.debug_bounds("jump-latest")
-            .is_some_and(|b| f32::from(b.size.height) == 32.0)
-    });
-    let a = vcx.debug_bounds("jump-latest").unwrap();
-    assert_eq!(f32::from(a.size.width), 32.0, "A: round, 32 pt");
-    // C: a centred pill above the composer.
-    vcx.simulate_keystrokes("cmd-alt-right cmd-alt-right");
-    wait_drawn(vcx, |vcx| {
-        vcx.debug_bounds("jump-latest")
-            .is_some_and(|b| f32::from(b.size.height) != 32.0 && b.size.width < px(300.0))
-    });
-    let c = vcx.debug_bounds("jump-latest").unwrap();
-    let mid = c.center().x;
-    assert!(
-        (f32::from(mid - transcript.center().x)).abs() < 40.0,
-        "C: centred"
-    );
+fn find_opens_a_strip_pinned_above_the_transcript(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    the_find_strip_sits_above_the_transcript_with_its_field_count_and_buttons(vcx, &screen);
 }
 
 // The seeded world takes a while to load, so the checks that need it run in two sequences, one
@@ -681,8 +661,9 @@ fn every_variant_has_its_own_jump_control(vcx: &mut VisualTestContext, screen: &
 
 #[gpui::test]
 fn the_flat_list_keeps_the_anchor_and_follows_the_tail(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, None);
+    let (_store, _root, vcx, screen) = open(cx);
     an_open_fold_puts_its_rows_in_the_list_as_items_of_their_own(vcx, &screen);
+    a_fold_head_is_the_single_line_worked_for_its_duration(vcx, &screen);
     the_top_row_stays_a_top_level_row_index_while_a_fold_is_open(vcx, &screen);
     a_reply_that_grows_is_measured_in_place_and_the_view_does_not_move(vcx, &screen);
     // Close the fold again, back to the tail, and the checks that need a settled list first.
@@ -702,7 +683,7 @@ fn the_flat_list_keeps_the_anchor_and_follows_the_tail(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn find_goes_to_hits_opens_what_hides_them_and_closes_only_that(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, None);
+    let (_store, _root, vcx, screen) = open(cx);
     find_counts_seven_and_the_first_is_turn_threes_cargo_test_step(vcx, &screen);
     vcx.simulate_keystrokes("escape");
     draw(vcx);
@@ -715,7 +696,7 @@ fn find_goes_to_hits_opens_what_hides_them_and_closes_only_that(cx: &mut TestApp
 /// once they are all in, because no hit was gone to (TRANSCRIPT-3.2, 3.3).
 #[gpui::test]
 fn a_query_typed_while_the_thread_loads_ends_on_one_of_seven(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     let all = screen.read_with(vcx, |s, _| s.rows().to_vec());
     // Only the later runs are in when the query is typed...
     let later = all[all.len() / 2..].to_vec();
@@ -740,7 +721,7 @@ fn a_query_typed_while_the_thread_loads_ends_on_one_of_seven(cx: &mut TestAppCon
 /// What the owner's own order does on the seed: every fold open, ⌘F, `supervisor.rs`, Enter, Esc.
 #[gpui::test]
 fn the_cards_own_order_with_every_fold_open(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     screen.update(vcx, |s, cx| s.open_all_folds(cx));
     draw(vcx);
     vcx.simulate_keystrokes("cmd-f");
@@ -801,74 +782,51 @@ fn the_cards_own_order_with_every_fold_open(cx: &mut TestAppContext) {
     assert_eq!(escaped, (true, false, true, false), "after Esc");
 }
 
-/// The ledger's match ticks are the operator's pick for the quiet strip too (variants A and B);
-/// the results variant keeps its Find tab. They show while the bar holds a query.
+/// Every hit row is a tick on the prompt tick rail while the strip holds a query, the current hit
+/// marked; they go when the strip closes, and the prompt ticks stay.
 #[gpui::test]
-fn match_ticks_show_on_the_rail_in_a_and_b_while_find_holds_a_query(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
-    let ticked = |vcx: &mut VisualTestContext| {
+fn match_ticks_show_on_the_rail_while_find_holds_a_query(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let match_ticks = |vcx: &mut VisualTestContext| {
         draw(vcx);
         painted(vcx, "find-tick") || painted(vcx, "find-tick-current")
     };
-    assert!(!ticked(vcx), "no query, no ticks");
-    for variant in [Variant::A, Variant::B, Variant::C] {
-        vcx.simulate_keystrokes("cmd-f");
-        draw(vcx);
-        vcx.simulate_keystrokes("cmd-a");
-        type_query(vcx, "supervisor.rs");
-        assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
-        assert_eq!(ticked(vcx), variant != Variant::C, "{variant:?}");
-        if variant != Variant::C {
-            assert!(
-                painted(vcx, "find-tick-current"),
-                "{variant:?} marks the current one"
-            );
-        }
-        vcx.simulate_keystrokes("escape");
-        assert!(
-            !ticked(vcx),
-            "{variant:?}: the ticks go when the bar closes"
-        );
-        vcx.simulate_keystrokes("cmd-alt-right");
-        draw(vcx);
-    }
-}
-
-/// Cycling the draft's variants with find open keeps the count, the current hit and, in the
-/// results variant, the seven results.
-#[gpui::test]
-fn cycling_a_b_c_with_find_open_keeps_one_of_seven_and_the_current_hit(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    wait_for(vcx, "the prompt ticks", |vcx| painted(vcx, "tick-rail"));
+    assert!(painted(vcx, "tick-current"), "the prompt ticks are there");
+    assert!(!match_ticks(vcx), "no query, no match ticks");
     vcx.simulate_keystrokes("cmd-f");
     draw(vcx);
+    assert!(!match_ticks(vcx), "an open strip with no query has none");
     vcx.simulate_keystrokes("cmd-a");
     type_query(vcx, "supervisor.rs");
-    vcx.simulate_keystrokes("enter enter");
-    draw(vcx);
-    let current = |vcx: &VisualTestContext| {
-        screen.read_with(vcx, |s, _| {
-            let found = s.find_found();
-            (found.current, found.hits.len(), s.find_count_label())
-        })
-    };
-    let before = current(vcx);
-    assert_eq!(before.2.as_deref(), Some("2 of 7"));
-    for _ in 0..3 {
-        vcx.simulate_keystrokes("cmd-alt-right");
-        draw(vcx);
-        assert_eq!(
-            current(vcx),
-            before,
-            "the same hit and count after a switch"
-        );
-        assert!(screen.read_with(vcx, |s, _| s.find_is_open()));
-    }
-    // Back on A after three steps; go to C and see its results.
-    vcx.simulate_keystrokes("cmd-alt-left");
-    draw(vcx);
-    assert_eq!(current(vcx), before);
-    for n in 0..7 {
-        assert!(painted(vcx, &format!("find-result-{n}")), "result {n} in C");
-    }
-    assert!(!painted(vcx, "find-result-7"));
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    assert!(match_ticks(vcx), "a query puts ticks on the rail");
+    assert!(
+        painted(vcx, "find-tick-current"),
+        "the current hit is marked"
+    );
+    assert!(painted(vcx, "tick-current"), "beside the prompt ticks");
+    // One for each row that holds a hit (a hit inside a fold is its fold's row).
+    let (ticks, rows) = screen.read_with(vcx, |s, _| {
+        let mut holders: Vec<_> = s
+            .find_found()
+            .hits
+            .iter()
+            .map(|h| h.fold.unwrap_or(h.key))
+            .collect();
+        holders.dedup();
+        (
+            s.find_rail_ticks(&crate::ui::theme::Theme::for_appearance(Appearance::Dark))
+                .len(),
+            holders.len(),
+        )
+    });
+    assert_eq!(ticks, rows);
+    assert!(ticks > 1);
+    vcx.simulate_keystrokes("escape");
+    assert!(
+        !match_ticks(vcx),
+        "the match ticks go when the strip closes"
+    );
+    assert!(painted(vcx, "tick-rail"), "the prompt ticks stay");
 }

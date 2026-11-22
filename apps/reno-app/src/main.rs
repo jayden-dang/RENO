@@ -35,8 +35,6 @@ mod composer_surface_tests;
 #[cfg(test)]
 mod composer_tests;
 #[cfg(test)]
-mod draft33_tests;
-#[cfg(test)]
 #[cfg(test)]
 mod new_thread_tests;
 #[cfg(test)]

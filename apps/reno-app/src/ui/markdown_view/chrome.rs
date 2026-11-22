@@ -1,46 +1,33 @@
-//! The frame around a code block or a diagram: its Copy and wrap controls (TRANSCRIPT-7.1,
-//! 7.2, 10.6). The frame is one family with three looks, chosen live by the ROAD-33 draft switch
-//! (`ui::draft33::current`) and variant A outside it:
-//!
-//! - A: Copy and wrap are icon buttons at the top right, shown while the pointer is over the
-//!   block (or a button has keyboard focus).
-//! - B: a permanent header, the language and the line count on the left (Geist Mono 11), Copy
-//!   and wrap on the right.
-//! - C: a tab-like header carrying the language; Copy and wrap show on hover.
+//! The frame around a code block or a diagram: its Copy and wrap controls (TRANSCRIPT-7.1, 7.2,
+//! 10.6). They are icon buttons at the top right, shown only while the pointer is over the block
+//! (or a button has keyboard focus).
 //!
 //! Copy puts only the block's code on the clipboard and says so with a toast. Whether a block
 //! wraps is remembered per block in a bounded store, so it survives the row scrolling away.
 
 use std::hash::{Hash, Hasher};
 
-use gpui::{
-    AnyElement, App, ClipboardItem, ElementId, FontWeight, SharedString, Stateful, div, prelude::*,
-    px,
-};
+use gpui::{AnyElement, App, ClipboardItem, ElementId, Stateful, div, prelude::*, px};
 
 use super::lru::Lru;
 use crate::ui::icon::Icon;
-use crate::ui::kit::{self, MONO};
+use crate::ui::kit;
 use crate::ui::theme::Theme;
 use crate::ui::toast;
-use crate::vm::draft33::Variant;
 
 /// Blocks whose wrap choice is remembered.
 const WRAP_ENTRIES: usize = 512;
 
 /// What a frame is around.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Kind<'a> {
-    Code {
-        language: Option<&'a str>,
-        lines: usize,
-    },
+pub(crate) enum Kind {
+    Code,
     Diagram,
 }
 
 /// A frame's contents and what its controls do.
 pub(crate) struct Card<'a> {
-    pub(crate) kind: Kind<'a>,
+    pub(crate) kind: Kind,
     /// What Copy puts on the clipboard.
     pub(crate) copy: &'a str,
     /// Identifies the block for its remembered wrap choice.
@@ -95,34 +82,25 @@ pub(crate) fn copy(text: &str, what: &'static str, cx: &mut App) {
     toast::push(cx, toast::Tone::Info, "Copied", what);
 }
 
-fn button(
-    theme: &Theme,
-    label: &'static str,
-    glyph: Icon,
-    hide_until_hover: bool,
-) -> Stateful<gpui::Div> {
+/// A control that shows only while the pointer is over the block or it has keyboard focus.
+fn button(theme: &Theme, label: &'static str, glyph: Icon) -> Stateful<gpui::Div> {
     let accent = theme.accent;
-    let b = kit::icon_button(theme, label, glyph, 24.0);
-    if hide_until_hover {
-        b.opacity(0.0)
-            .group_hover("md-card", |s| s.opacity(1.0))
-            .focus_visible(move |s| s.opacity(1.0).border_1().border_color(accent))
-    } else {
-        b
-    }
+    kit::icon_button(theme, label, glyph, 24.0)
+        .opacity(0.0)
+        .group_hover("md-card", |s| s.opacity(1.0))
+        .focus_visible(move |s| s.opacity(1.0).border_1().border_color(accent))
 }
 
-fn controls(card: &Card<'_>, theme: &Theme, hover_only: bool) -> Vec<AnyElement> {
+fn controls(card: &Card<'_>, theme: &Theme) -> Vec<Stateful<gpui::Div>> {
     let code = card.copy.to_owned();
     let what = match card.kind {
-        Kind::Code { .. } => "code",
+        Kind::Code => "code",
         Kind::Diagram => "diagram source",
     };
     let mut out = vec![
-        button(theme, "Copy code", Icon::Copy, hover_only)
+        button(theme, "Copy code", Icon::Copy)
             .tooltip(kit::tip("Copy"))
-            .on_click(move |_, _, cx| copy(&code, what, cx))
-            .into_any_element(),
+            .on_click(move |_, _, cx| copy(&code, what, cx)),
     ];
     if card.wrappable {
         let key = card.key;
@@ -131,13 +109,13 @@ fn controls(card: &Card<'_>, theme: &Theme, hover_only: bool) -> Vec<AnyElement>
         } else {
             ("Wrap lines", "Wrap long lines")
         };
-        let mut b = button(theme, label, Icon::Wrap, hover_only)
+        let mut b = button(theme, label, Icon::Wrap)
             .tooltip(kit::tip(tip))
             .on_click(move |_, _, cx| toggle_wrap(key, cx));
         if card.wrapped {
             b = b.bg(theme.raised);
         }
-        out.push(b.into_any_element());
+        out.push(b);
     }
     out
 }
@@ -156,121 +134,26 @@ fn frame(theme: &Theme) -> gpui::Div {
         .overflow_hidden()
 }
 
-/// "rust", "mermaid", or "text" for a block that names no language.
-fn language_label(kind: Kind<'_>) -> SharedString {
-    match kind {
-        Kind::Code { language, .. } => language
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .unwrap_or("text")
-            .to_owned()
-            .into(),
-        Kind::Diagram => "mermaid".into(),
-    }
-}
-
-fn lines_label(kind: Kind<'_>) -> Option<String> {
-    match kind {
-        Kind::Code { lines, .. } => Some(format!(
-            "{lines} {}",
-            if lines == 1 { "line" } else { "lines" }
-        )),
-        Kind::Diagram => None,
-    }
-}
-
-/// `body` inside the frame of `variant`.
-pub(crate) fn card(
-    card: &Card<'_>,
-    variant: Variant,
-    theme: &Theme,
-    body: AnyElement,
-) -> AnyElement {
+/// `body` inside its frame, with the controls at the top right.
+pub(crate) fn card(card: &Card<'_>, theme: &Theme, body: AnyElement) -> AnyElement {
     let id = ElementId::Name(format!("md-card-{}-{}", card.key, card.ordinal).into());
     let surface = theme.surface.opacity(0.92);
-    match variant {
-        Variant::A => frame(theme)
-            .id(id)
-            .child(body)
-            .child(
-                div()
-                    .absolute()
-                    .top(px(6.0))
-                    .right(px(6.0))
-                    .flex()
-                    .gap(px(2.0))
-                    .p(px(1.0))
-                    .rounded(px(9.0))
-                    .group_hover("md-card", move |s| s.bg(surface))
-                    .children(controls(card, theme, true)),
-            )
-            .into_any_element(),
-        Variant::B => frame(theme)
-            .id(id)
-            .child(
-                div()
-                    .debug_selector(|| "md-card-header".to_owned())
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(30.0))
-                    .pl(px(14.0))
-                    .pr(px(4.0))
-                    .border_b_1()
-                    .border_color(theme.hairline)
-                    .font_family(MONO)
-                    .text_size(px(11.0))
-                    .text_color(theme.faint)
-                    .child(div().child(language_label(card.kind)))
-                    .children(lines_label(card.kind).map(|l| div().child(format!("\u{b7} {l}"))))
-                    .child(div().flex_1())
-                    .children(controls(card, theme, false)),
-            )
-            .child(body)
-            .into_any_element(),
-        Variant::C => frame(theme)
-            .id(id)
-            .child(
-                div()
-                    .debug_selector(|| "md-card-header".to_owned())
-                    .flex()
-                    .items_end()
-                    .h(px(30.0))
-                    .pl(px(8.0))
-                    .pr(px(4.0))
-                    .pt(px(6.0))
-                    .bg(theme.canvas.opacity(0.5))
-                    .border_b_1()
-                    .border_color(theme.hairline)
-                    .child(
-                        div()
-                            .px(px(10.0))
-                            .h(px(24.0))
-                            .flex()
-                            .items_center()
-                            .rounded_t(px(6.0))
-                            .bg(theme.surface)
-                            .border_1()
-                            .border_b_0()
-                            .border_color(theme.hairline)
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted)
-                            .child(language_label(card.kind)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .pb(px(3.0))
-                            .children(controls(card, theme, true)),
-                    ),
-            )
-            .child(body)
-            .into_any_element(),
-    }
+    frame(theme)
+        .id(id)
+        .child(body)
+        .child(
+            div()
+                .absolute()
+                .top(px(6.0))
+                .right(px(6.0))
+                .flex()
+                .gap(px(2.0))
+                .p(px(1.0))
+                .rounded(px(9.0))
+                .group_hover("md-card", move |s| s.bg(surface))
+                .children(controls(card, theme)),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -294,21 +177,24 @@ mod tests {
         });
     }
 
+    /// Copy and Wrap are hidden until the pointer is over the block: at rest they have no
+    /// opacity. A diagram has the same Copy, and no Wrap.
     #[test]
-    fn the_labels_say_what_the_block_is() {
-        let code = Kind::Code {
-            language: Some(" rust "),
-            lines: 11,
+    fn the_controls_are_hidden_at_rest_on_a_code_block_and_a_diagram() {
+        let theme = Theme::for_appearance(crate::ui::theme::Appearance::Dark);
+        let card = |kind, wrappable| Card {
+            kind,
+            copy: "x",
+            key: 1,
+            wrappable,
+            wrapped: false,
+            ordinal: 0,
         };
-        assert_eq!(language_label(code), "rust");
-        assert_eq!(lines_label(code).as_deref(), Some("11 lines"));
-        let plain = Kind::Code {
-            language: None,
-            lines: 1,
-        };
-        assert_eq!(language_label(plain), "text");
-        assert_eq!(lines_label(plain).as_deref(), Some("1 line"));
-        assert_eq!(language_label(Kind::Diagram), "mermaid");
-        assert_eq!(lines_label(Kind::Diagram), None);
+        let code = controls(&card(Kind::Code, true), &theme);
+        let diagram = controls(&card(Kind::Diagram, false), &theme);
+        assert_eq!((code.len(), diagram.len()), (2, 1), "Copy and Wrap; Copy");
+        for mut control in code.into_iter().chain(diagram) {
+            assert_eq!(control.style().opacity, Some(0.0));
+        }
     }
 }

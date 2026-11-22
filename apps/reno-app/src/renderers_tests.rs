@@ -31,7 +31,6 @@ use crate::ui::markdown_view::visual::visual_view;
 use crate::ui::markdown_view::{self, Host, Streaming};
 use crate::ui::theme::{Appearance, Theme};
 use crate::vm::capabilities::Capabilities;
-use crate::vm::draft33::Variant;
 
 /// Counts every request the app's HTTP client is asked to make, and answers none.
 struct Counting(Arc<AtomicUsize>);
@@ -230,7 +229,7 @@ fn a_file_the_run_does_not_have_is_not_opened(cx: &mut TestAppContext) {
     assert!(files.opened.borrow().is_empty());
 }
 
-/// A code block's Copy puts only its code on the clipboard, in every variant.
+/// A code block's Copy puts only its code on the clipboard.
 #[gpui::test]
 fn copy_puts_only_the_blocks_code_on_the_clipboard(cx: &mut TestAppContext) {
     let text = "Before.\n\n```rust\nfn a() {}\nlet b = 2;\n```\n\nAfter.";
@@ -240,36 +239,24 @@ fn copy_puts_only_the_blocks_code_on_the_clipboard(cx: &mut TestAppContext) {
     assert_eq!(copied.as_deref(), Some("fn a() {}\nlet b = 2;"));
 }
 
+/// A code block has Copy and Wrap and no permanent header; Wrap flips and flips back. (That they
+/// are hidden until the pointer is over the block is `chrome`'s own test.)
 #[gpui::test]
-fn every_variant_has_copy_and_wrap_and_the_chrome_that_variant_names(cx: &mut TestAppContext) {
-    one_window_test_at_a_time();
-    for (variant, header) in [(Variant::A, false), (Variant::B, true), (Variant::C, true)] {
-        cx.update(|cx| crate::ui::draft33::install(variant, cx));
-        let (_view, vcx) = probe(
-            cx,
-            "```rust\nfn a() {}\n```",
-            Host::preview(),
-            Appearance::Light,
-        );
-        assert_eq!(painted(vcx, "md-card-header"), header, "{variant:?}");
-        assert!(painted(vcx, "Copy code"), "{variant:?}");
-        assert!(painted(vcx, "Wrap lines"), "{variant:?}");
-        click(vcx, "Wrap lines");
-        assert!(
-            painted(vcx, "Unwrap lines"),
-            "{variant:?}: the wrap toggle flipped"
-        );
-        click(vcx, "Unwrap lines");
-        assert!(painted(vcx, "Wrap lines"), "{variant:?}");
-    }
-}
-
-#[gpui::test]
-fn outside_the_draft_a_code_block_has_the_quiet_variant(cx: &mut TestAppContext) {
-    let (_view, vcx) = probe(cx, "```\nplain\n```", Host::preview(), Appearance::Dark);
+fn a_code_block_has_copy_and_wrap_in_its_frame_and_no_header(cx: &mut TestAppContext) {
+    let (_view, vcx) = probe(
+        cx,
+        "```rust\nfn a() {}\n```",
+        Host::preview(),
+        Appearance::Light,
+    );
     assert!(painted(vcx, "md-card"));
     assert!(!painted(vcx, "md-card-header"));
     assert!(painted(vcx, "Copy code"));
+    assert!(painted(vcx, "Wrap lines"));
+    click(vcx, "Wrap lines");
+    assert!(painted(vcx, "Unwrap lines"), "the wrap toggle flipped");
+    click(vcx, "Unwrap lines");
+    assert!(painted(vcx, "Wrap lines"));
 }
 
 #[gpui::test]

@@ -11,7 +11,6 @@ use super::select::Spot;
 use super::*;
 use crate::ui::markdown_view::{Host, SelectHost, select as pick, visual::visual_view};
 use crate::ui::motion;
-use crate::vm::draft33::Variant;
 use crate::vm::find;
 use crate::vm::selection::{self, Slot};
 
@@ -20,7 +19,6 @@ impl RunScreen {
     /// under the last item of a live run, "Thinking".
     pub(super) fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme::current(cx);
-        let variant = Self::variant(cx);
         let Some(item) = self.items.items.get(ix).copied() else {
             return div().into_any_element();
         };
@@ -39,7 +37,7 @@ impl RunScreen {
             return div().into_any_element();
         };
         let top = item.inner.is_none().then_some(ix);
-        let body = self.row_body(row, top, &theme, variant, cx);
+        let body = self.row_body(row, top, &theme, cx);
         // "Thinking" under the last row while the agent works between steps.
         let thinking = item.decor.last && self.is_thinking(cx);
         // A row inside an open fold sits a step closer to its neighbours than a top-level row.
@@ -136,7 +134,6 @@ impl RunScreen {
         row: &Row,
         top: Option<usize>,
         theme: &Theme,
-        variant: Variant,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
@@ -161,13 +158,13 @@ impl RunScreen {
                 let host =
                     Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
                         .while_streaming(streaming)
-                        .marked(self.find_marks(*key, variant))
+                        .marked(self.find_marks(*key))
                         .selectable(Some(Rc::new(SelectHost {
                             registry: self.select.registry.clone(),
                             key: *key,
                             atoms: stream.atoms(),
                             selected: self.selected_in_prose(*key, text.len()),
-                            style: pick::selection_style(theme, variant),
+                            style: pick::selection_style(theme),
                         })));
                 div()
                     .flex()
@@ -182,8 +179,8 @@ impl RunScreen {
                     .children(actions)
                     .into_any_element()
             }
-            Row::Reasoning { key, text } => self.reasoning(theme, variant, *key, text, cx),
-            Row::Tools { key, calls } => self.steps(theme, variant, *key, calls, cx),
+            Row::Reasoning { key, text } => self.reasoning(theme, *key, text, cx),
+            Row::Tools { key, calls } => self.steps(theme, *key, calls, cx),
             Row::Question {
                 questions,
                 resolution,
@@ -224,7 +221,7 @@ impl RunScreen {
                 )
             }
             Row::Routing { key, view } => self.routing_card(theme, *key, view, cx),
-            Row::Worked { key, secs, rows } => self.worked(theme, variant, *key, *secs, rows, cx),
+            Row::Worked { key, secs, .. } => self.worked(theme, *key, *secs, cx),
             Row::Done {
                 stop,
                 result,
@@ -256,21 +253,18 @@ impl RunScreen {
 
     /// "Worked for 3m 12s ›": a disclosure that opens the turn's interim text and steps in place.
     /// This is the fold's head only; while it is open its rows are list items of their own, right
-    /// after it. Its look is the variant's: A today's muted line, B a ledger line with the step
-    /// count behind a raised rule, C a quiet card with the tools used as small chips.
+    /// after it.
     fn worked(
         &self,
         theme: &Theme,
-        variant: Variant,
         key: Key,
         secs: Option<u64>,
-        rows: &[Row],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.open.contains(&key);
         let text = theme.text;
         let label = convo::worked_label(secs);
-        let head = div()
+        div()
             .id(SharedString::from(format!("worked-{}", key.0)))
             .debug_selector({
                 let id = format!("worked-{}", key.0);
@@ -279,13 +273,12 @@ impl RunScreen {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .text_size(px(if variant == Variant::B { 12.0 } else { 13.0 }))
+            .text_size(px(13.0))
             .text_color(theme.muted)
             .cursor_pointer()
             .hover(move |s| s.text_color(text))
             .child(self.text_piece(
                 theme,
-                variant,
                 Spot {
                     key,
                     slot: Slot::HEAD,
@@ -296,52 +289,13 @@ impl RunScreen {
                 &label,
                 &[],
             ))
-            .when(variant == Variant::B, |d| {
-                d.child(
-                    div()
-                        .font_family(MONO)
-                        .text_size(px(11.0))
-                        .text_color(theme.faint)
-                        .child(SharedString::from(format!(
-                            "\u{b7} {} steps",
-                            convo::steps_in(rows)
-                        ))),
-                )
-            })
             .child(icon(
                 if open { Icon::ChevDown } else { Icon::Fwd },
                 13.0,
                 theme.muted,
             ))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)));
-        match variant {
-            Variant::A => head.into_any_element(),
-            Variant::B => div()
-                .border_l_2()
-                .border_color(theme.raised)
-                .pl(px(10.0))
-                .py(px(2.0))
-                .child(head)
-                .into_any_element(),
-            Variant::C => div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(12.0))
-                .py(px(8.0))
-                .rounded(px(10.0))
-                .bg(theme.surface)
-                .border_1()
-                .border_color(theme.hairline)
-                .child(head)
-                .child(div().flex_1())
-                .children(
-                    convo::tools_used(rows, 4)
-                        .into_iter()
-                        .map(|name| kit::chip(theme, SharedString::from(name))),
-                )
-                .into_any_element(),
-        }
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
+            .into_any_element()
     }
 
     /// A user message: a neutral raised bubble on the right; the time and Copy show on hover, and
@@ -389,7 +343,6 @@ impl RunScreen {
         });
         let time = at_ms.map(|at| convo::clock_label(at, &chrono::Local));
         // The matches in the words shown (the cut part of a long message has none painted).
-        let variant = Self::variant(cx);
         let hits = self.find_highlights(key, find::Part::Whole);
         div()
             .group(group.clone())
@@ -417,7 +370,6 @@ impl RunScreen {
                     .line_height(px(23.0))
                     .child(self.text_piece(
                         theme,
-                        variant,
                         Spot {
                             key,
                             slot: Slot::WHOLE,
@@ -475,7 +427,6 @@ impl RunScreen {
     pub(super) fn steps(
         &self,
         theme: &Theme,
-        variant: Variant,
         key: Key,
         calls: &[ToolEntry],
         cx: &mut Context<Self>,
@@ -489,7 +440,7 @@ impl RunScreen {
                 lines
                     .iter()
                     .enumerate()
-                    .map(|(ln, line)| self.step_row(theme, variant, (key, ln), line, calls, cx)),
+                    .map(|(ln, line)| self.step_row(theme, (key, ln), line, calls, cx)),
             )
             .into_any_element()
     }
@@ -668,7 +619,6 @@ impl RunScreen {
     pub(super) fn reasoning(
         &self,
         theme: &Theme,
-        variant: Variant,
         key: Key,
         text: &str,
         cx: &mut Context<Self>,
@@ -686,7 +636,6 @@ impl RunScreen {
                     open,
                     self.text_piece(
                         theme,
-                        variant,
                         Spot {
                             key,
                             slot: Slot::HEAD,
@@ -709,7 +658,6 @@ impl RunScreen {
                         .text_color(theme.muted)
                         .child(self.text_piece(
                             theme,
-                            variant,
                             Spot {
                                 key,
                                 slot: Slot::WHOLE,

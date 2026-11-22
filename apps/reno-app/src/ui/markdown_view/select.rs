@@ -19,7 +19,6 @@ use gpui::{
 use crate::transcript::Key;
 use crate::ui::theme::{Appearance, Theme};
 use crate::vm::anchor::Atom;
-use crate::vm::draft33::Variant;
 use crate::vm::selection::Slot;
 
 /// How a laid-out text's bytes relate to its source.
@@ -233,29 +232,12 @@ impl Element for Track {
     }
 }
 
-/// How the selection is painted: the accent at low strength in A, an accent fill with an accent
-/// underline in B (the outline), a neutral lift of the text colour in C (a raised step that stays
-/// visible on the raised bubble too). Every colour is a theme token.
-pub(crate) fn selection_style(theme: &Theme, variant: Variant) -> HighlightStyle {
+/// How the selection is painted: the accent at low strength. Every colour is a theme token.
+pub(crate) fn selection_style(theme: &Theme) -> HighlightStyle {
     let dark = theme.appearance == Appearance::Dark;
-    match variant {
-        Variant::A => HighlightStyle {
-            background_color: Some(theme.accent.opacity(if dark { 0.32 } else { 0.26 })),
-            ..HighlightStyle::default()
-        },
-        Variant::B => HighlightStyle {
-            background_color: Some(theme.accent.opacity(if dark { 0.20 } else { 0.16 })),
-            underline: Some(gpui::UnderlineStyle {
-                thickness: gpui::px(1.0),
-                color: Some(theme.accent),
-                wavy: false,
-            }),
-            ..HighlightStyle::default()
-        },
-        Variant::C => HighlightStyle {
-            background_color: Some(theme.text.opacity(if dark { 0.20 } else { 0.16 })),
-            ..HighlightStyle::default()
-        },
+    HighlightStyle {
+        background_color: Some(theme.accent.opacity(if dark { 0.32 } else { 0.26 })),
+        ..HighlightStyle::default()
     }
 }
 

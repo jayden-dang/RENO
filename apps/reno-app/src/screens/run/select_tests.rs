@@ -18,10 +18,8 @@ use crate::app::RootView;
 use crate::store::Store;
 use crate::tests::{draw, one_window_test_at_a_time, painted, run_id, wait_until, window};
 use crate::transcript::Row;
-use crate::ui::draft33;
 use crate::ui::theme::Appearance;
 use crate::vm::capabilities::Capabilities;
-use crate::vm::draft33::Variant;
 use crate::vm::selection::Slot;
 
 const PROMPT: &str = "Show every kind of content the transcript has to draw.";
@@ -55,8 +53,8 @@ type Opened<'a> = (
     Entity<RunScreen>,
 );
 
-/// "Render check" opened in a window that is drawn, with the draft's variant on when asked.
-fn open(cx: &mut TestAppContext, on: Option<Variant>) -> Opened<'_> {
+/// "Render check" opened in a window that is drawn.
+fn open(cx: &mut TestAppContext) -> Opened<'_> {
     one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     let store = cx.new(|cx| {
@@ -80,9 +78,6 @@ fn open(cx: &mut TestAppContext, on: Option<Variant>) -> Opened<'_> {
         crate::actions::bind_keys(cx);
         crate::ui::composer::bind_keys(cx);
         super::bind_keys(cx);
-        if let Some(variant) = on {
-            draft33::install(variant, cx);
-        }
     });
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
@@ -92,7 +87,7 @@ fn open(cx: &mut TestAppContext, on: Option<Variant>) -> Opened<'_> {
     let screen = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
         .expect("a run screen");
-    // The thread follows its tail: take the view to the prompt, where the walk starts.
+    // The thread follows its tail: take the view to the prompt.
     wait_for(vcx, "the rows are in", |vcx| {
         screen.read_with(vcx, |s, _| s.items().len() >= 5)
     });
@@ -165,7 +160,7 @@ fn clipboard(vcx: &VisualTestContext) -> Option<String> {
 
 #[gpui::test]
 fn a_drag_from_the_prompt_to_the_reply_and_cmd_c_copies_both_in_order(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
     assert!(screen.read_with(vcx, |s, _| s.has_selection()));
@@ -191,7 +186,7 @@ fn a_drag_from_the_prompt_to_the_reply_and_cmd_c_copies_both_in_order(cx: &mut T
 
 #[gpui::test]
 fn a_selection_is_anchored_to_entry_keys_with_source_byte_ranges(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::B));
+    let (_store, _root, vcx, screen) = open(cx);
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
     let anchors = screen.read_with(vcx, |s, _| s.selection_anchors());
@@ -207,7 +202,7 @@ fn a_selection_is_anchored_to_entry_keys_with_source_byte_ranges(cx: &mut TestAp
 
 #[gpui::test]
 fn a_click_that_does_not_drag_clears_the_selection_and_one_on_it_keeps_it(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
     assert!(screen.read_with(vcx, |s, _| s.has_selection()));
@@ -234,7 +229,7 @@ fn a_click_that_does_not_drag_clears_the_selection_and_one_on_it_keeps_it(cx: &m
 
 #[gpui::test]
 fn cmd_c_in_the_composer_still_copies_the_composers_text(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
     // The owner goes back to the composer, types and selects it: ⌘C is the composer's.
@@ -254,7 +249,7 @@ fn cmd_c_in_the_composer_still_copies_the_composers_text(cx: &mut TestAppContext
 fn a_selection_holds_while_its_start_scrolls_out_of_view_and_the_drag_scrolls_the_list(
     cx: &mut TestAppContext,
 ) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     let (from, _) = centres(vcx, &screen);
     // Hold the pointer below the list: it scrolls on each tick, and the selection stays.
     vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
@@ -290,7 +285,7 @@ fn a_selection_holds_while_its_start_scrolls_out_of_view_and_the_drag_scrolls_th
 fn agent_posted_visuals_are_items_after_their_entry_with_the_fake_and_none_with_the_real_daemon(
     cx: &mut TestAppContext,
 ) {
-    let (store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (store, _root, vcx, screen) = open(cx);
     let visuals = |vcx: &VisualTestContext| {
         screen.read_with(vcx, |s, _| {
             let items = s.items();
@@ -338,7 +333,7 @@ fn agent_posted_visuals_are_items_after_their_entry_with_the_fake_and_none_with_
 
 #[gpui::test]
 fn the_find_bar_hands_a_reply_its_needle_and_which_of_its_hits_is_current(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::C));
+    let (_store, _root, vcx, screen) = open(cx);
     vcx.simulate_keystrokes("cmd-f");
     draw(vcx);
     vcx.simulate_keystrokes("n e g o t i a t i o n");
@@ -353,22 +348,18 @@ fn the_find_bar_hands_a_reply_its_needle_and_which_of_its_hits_is_current(cx: &m
             .unwrap()
     });
     let marks = screen
-        .read_with(vcx, |s, _| s.find_marks(key, Variant::C))
+        .read_with(vcx, |s, _| s.find_marks(key))
         .expect("the reply holds the word");
     assert_eq!(marks.needle, "negotiation");
     assert!(marks.current.is_some(), "the bar is on a hit in this reply");
     // And a row with no hit gets none.
     let user = screen.read_with(vcx, |s, _| s.rows()[0].key());
-    assert!(
-        screen
-            .read_with(vcx, |s, _| s.find_marks(user, Variant::C))
-            .is_none()
-    );
+    assert!(screen.read_with(vcx, |s, _| s.find_marks(user)).is_none());
 }
 
 #[gpui::test]
 fn a_file_link_in_a_reply_opens_the_files_tab_at_its_line(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+    let (_store, _root, vcx, screen) = open(cx);
     // The reply names `src/supervisor.rs:42`: once the worktree answers, it is a link.
     wait_for(vcx, "the worktree answered for src", |vcx| {
         screen.read_with(vcx, |s, cx| s.file_resolves("src/supervisor.rs", cx))
@@ -397,21 +388,35 @@ fn a_file_link_in_a_reply_opens_the_files_tab_at_its_line(cx: &mut TestAppContex
     assert_eq!(doc, Some(("src/supervisor.rs".to_owned(), Some(42))));
 }
 
+/// A selection is painted: the entries it covers carry a highlight over the selected words (that
+/// it is there, not what colour it is).
 #[gpui::test]
-fn a_selection_survives_switching_the_draft_variant(cx: &mut TestAppContext) {
-    let (_store, _root, vcx, screen) = open(cx, Some(Variant::A));
+fn a_selection_is_highlighted_over_the_words_it_covers(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let theme = crate::ui::theme::Theme::for_appearance(Appearance::Dark);
+    let prompt = screen.read_with(vcx, |s, _| {
+        s.rows()
+            .iter()
+            .find(|r| matches!(r, Row::User { .. }))
+            .map(Row::key)
+            .unwrap()
+    });
+    let highlighted = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            let spot = |key| super::select::Spot {
+                key,
+                slot: Slot::WHOLE,
+                base: 0,
+                len: PROMPT.len(),
+                total: Some(PROMPT.len()),
+            };
+            s.piece_layers(&theme, spot(prompt), PROMPT, &[])
+                .iter()
+                .any(|(range, style)| !range.is_empty() && style.background_color.is_some())
+        })
+    };
+    assert!(!highlighted(vcx), "nothing selected, nothing painted");
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
-    let copied = screen
-        .read_with(vcx, |s, _| s.selected_text())
-        .expect("selected");
-    for _ in 0..3 {
-        vcx.simulate_keystrokes("cmd-alt-right");
-        draw(vcx);
-        assert!(screen.read_with(vcx, |s, _| s.has_selection()));
-        assert_eq!(
-            screen.read_with(vcx, |s, _| s.selected_text()).as_deref(),
-            Some(copied.as_str())
-        );
-    }
+    assert!(highlighted(vcx), "the selected words carry a highlight");
 }

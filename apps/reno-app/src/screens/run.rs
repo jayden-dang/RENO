@@ -61,7 +61,6 @@ mod transcript;
 pub(crate) use dock::bind_keys;
 #[cfg(test)]
 pub(crate) use dock::keep_composer_under_panels;
-pub(crate) use find::Demo as FindDemo;
 pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.
@@ -828,12 +827,7 @@ impl RunScreen {
 
     /// The thin rail at the column's left edge: one tick for each user message; a click scrolls
     /// to it.
-    fn tick_rail(
-        &self,
-        theme: &Theme,
-        variant: crate::vm::draft33::Variant,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn tick_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let marks = self.ticks.as_slice();
         let scrolls = f32::from(self.list.max_offset_for_scrollbar().y);
         if marks.is_empty() || !convo::rail_visible(scrolls) {
@@ -880,13 +874,8 @@ impl RunScreen {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
                 }))
-                // Where the matches are, beside the prompt ticks: the ledger's (variant B), and the
-                // operator's pick of it for the quiet strip (variant A).
-                .children(if variant != crate::vm::draft33::Variant::C {
-                    self.find_rail_ticks(theme)
-                } else {
-                    Vec::new()
-                })
+                // Where the matches are, beside the prompt ticks.
+                .children(self.find_rail_ticks(theme))
                 .into_any_element(),
         )
     }
@@ -1054,12 +1043,10 @@ impl Render for RunScreen {
         if let Some(files) = self.files.as_mut() {
             files.model.set_show_hidden(show_hidden);
         }
-        let variant = Self::variant(cx);
-        self.sync_find_tab(variant);
         self.remeasure_settled(cx);
         // The texts file themselves again as the list paints them.
         self.begin_paint();
-        let rail = self.tick_rail(&theme, variant, cx);
+        let rail = self.tick_rail(&theme, cx);
         let transcript = div()
             .id("transcript")
             .debug_selector(|| "transcript".to_owned())
@@ -1091,8 +1078,7 @@ impl Render for RunScreen {
             // After the list, so it is on top of it and takes the clicks.
             .children(self.select_nodes(cx))
             .children(rail)
-            .children(self.jump_control(&theme, variant, cx))
-            .children(self.find_bar_over(&theme, variant, window, cx));
+            .children(self.jump_control(&theme, cx));
         let chat = div()
             .id("chat-canvas")
             .debug_selector(|| "chat-canvas".to_owned())
@@ -1106,7 +1092,7 @@ impl Render for RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
-            .children(self.find_bar_above(&theme, variant, window, cx))
+            .children(self.find_bar_above(&theme, window, cx))
             .child(
                 div()
                     .flex_1()

@@ -1,9 +1,8 @@
 //! Find in the conversation, and getting back to the live end.
 //!
-//! The search itself is `vm::find`, over the rows' text; this file is the screen's half: the bar
-//! (its look is the draft variant's), going to a hit (opening what hides it, scrolling to it),
-//! the recount that follows new events, and the "jump to latest" control that shares the
-//! transcript's corners with the bar. Search opens rows into its own set, apart from the owner's,
+//! The search itself is `vm::find`, over the rows' text; this file is the screen's half: the strip
+//! above the transcript, going to a hit (opening what hides it, scrolling to it), the match ticks
+//! on the rail, the recount that follows new events, and the "jump to latest" control. Search opens rows into its own set, apart from the owner's,
 //! so closing the bar closes again exactly what it opened.
 
 use std::collections::HashMap;
@@ -11,45 +10,26 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, Focusable as _, FontWeight, ListOffset, Subscription, Task,
-    Window, div, prelude::*, px,
+    AnyElement, Context, Entity, Focusable as _, ListOffset, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 
 use super::RunScreen;
-use crate::panel::surface::Surface;
 use crate::transcript::{Key, Row};
 use crate::ui::field::{Field, FieldEvent, Look};
+use crate::ui::find as look;
 use crate::ui::icon::{Icon, icon};
-use crate::ui::kit::{self, MONO, Tone};
+use crate::ui::kit::{self, MONO};
 use crate::ui::theme::Theme;
-use crate::ui::{find as look, menu};
-use crate::vm::draft33::Variant;
-use crate::vm::find::{self, Found, Part, Source};
+use crate::vm::find::{self, Found, Part};
 
 /// The recount follows new events and opening or closing rows at most this often.
 pub(super) const RECOUNT_EVERY: Duration = Duration::from_millis(150);
-/// The results list shows this many hits; the count says how many there are.
-const RESULTS_SHOWN: usize = 100;
-
 /// Where a line of an output is in its item: the step line above it and the block's padding, and
 /// the height of a line, in points; and how many points of context stay above the match.
 const OUTPUT_TOP: f32 = 40.0;
 const OUTPUT_LINE: f32 = 18.0;
 const OUTPUT_CONTEXT: f32 = 90.0;
-
-/// What a demo hook does once the hits are in (`RENO_DRAFT33_OPEN=enter`).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Demo {
-    /// Go to this hit.
-    pub(crate) goto: usize,
-    /// Wait for at least this many hits before going to it (the thread's runs arrive one by one).
-    pub(crate) min_hits: usize,
-    /// Then close search, a moment later.
-    pub(crate) then_close: bool,
-}
-
-/// How long a demo waits between going to a hit and closing search.
-const DEMO_CLOSE_AFTER: Duration = Duration::from_millis(1200);
 
 #[derive(Default)]
 pub(super) struct Find {
@@ -67,20 +47,11 @@ pub(super) struct Find {
     timer: Option<Task<()>>,
     /// The calls whose output search opened, with the row each is in, to measure them again.
     opened_outputs: Vec<(String, Key)>,
-    demo: Option<Demo>,
-    demo_close: Option<Task<()>>,
-    /// The demo hook reached its end: it went to its hit, and closed search if it had to.
-    demo_done: bool,
     #[cfg(test)]
     pub(super) recounts: usize,
 }
 
 impl RunScreen {
-    /// The draft variant showing; outside the draft, A's chrome.
-    pub(super) fn variant(cx: &gpui::App) -> Variant {
-        crate::ui::draft33::current(cx).unwrap_or(Variant::A)
-    }
-
     pub(crate) fn find_is_open(&self) -> bool {
         self.find.open
     }
@@ -158,9 +129,6 @@ impl RunScreen {
         if !self.find.open {
             self.find.open = true;
             crate::ui::find::set_open(cx, true);
-            if Self::variant(cx) == Variant::C {
-                self.open_surface(Surface::Find, window, cx);
-            }
             self.find_recount(cx);
         }
         window.focus(&field.read(cx).focus_handle(cx), cx);
@@ -187,7 +155,6 @@ impl RunScreen {
     fn end_find(&mut self, cx: &mut Context<Self>) {
         self.find.open = false;
         self.find.timer = None;
-        self.find.demo = None;
         self.find.found = Found::default();
         self.find.by_row.clear();
         crate::ui::find::set_open(cx, false);
@@ -195,10 +162,6 @@ impl RunScreen {
         self.outputs_full.end_search();
         self.outputs_open.end_search();
         let outputs = std::mem::take(&mut self.find.opened_outputs);
-        if self.panel.tabs().contains(&Surface::Find) {
-            self.panel.close(&Surface::Find);
-            self.persist_panel(cx);
-        }
         self.reopen_folds_closed(&rows, &outputs, cx);
         cx.notify();
     }
@@ -224,7 +187,6 @@ impl RunScreen {
         self.find.navigated = false;
         self.find.found = Found::new(find::find_all(&self.rows, &self.find.query));
         self.find_reindex();
-        self.find_demo_ready(cx);
         cx.notify();
     }
 
@@ -252,7 +214,6 @@ impl RunScreen {
         {
             self.find.recounts += 1;
         }
-        self.find_demo_ready(cx);
         cx.notify();
     }
 
@@ -292,14 +253,6 @@ impl RunScreen {
         }
         self.find.navigated = true;
         self.find_reveal(cx);
-    }
-
-    /// A result of the Find tab was chosen.
-    pub(super) fn find_go(&mut self, at: usize, cx: &mut Context<Self>) {
-        if self.find.found.go_to(at).is_some() {
-            self.find.navigated = true;
-            self.find_reveal(cx);
-        }
     }
 
     /// The row a hit is in.
@@ -414,7 +367,6 @@ impl RunScreen {
     pub(super) fn find_marks(
         &self,
         key: Key,
-        variant: Variant,
     ) -> Option<std::rc::Rc<crate::ui::markdown_view::Marks>> {
         if !self.find.open || self.find.query.is_empty() {
             return None;
@@ -425,155 +377,7 @@ impl RunScreen {
             current: hits
                 .iter()
                 .position(|&at| self.find.found.current == Some(at)),
-            variant,
         }))
-    }
-
-    // --- the demo hooks ------------------------------------------------------------------------
-
-    /// `RENO_DRAFT33_OPEN=find|enter|enter3|escape`: opens find with `query` and, once the hits
-    /// are in, goes to one and perhaps closes search.
-    pub(crate) fn demo_find(
-        &mut self,
-        query: &str,
-        demo: Option<Demo>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_find(window, cx);
-        if let Some((field, _)) = &self.find.field {
-            field.update(cx, |f, cx| f.set_text(query, cx));
-        }
-        self.find.demo = demo;
-        self.find_query_changed(query.to_owned(), cx);
-    }
-
-    fn find_demo_ready(&mut self, cx: &mut Context<Self>) {
-        let Some(demo) = self.find.demo else {
-            return;
-        };
-        if self.find.found.hits.len() < demo.min_hits.max(demo.goto + 1) {
-            return;
-        }
-        self.find.demo = None;
-        self.find.found.go_to(demo.goto);
-        self.find.navigated = true;
-        self.find_reveal(cx);
-        self.find.demo_done = !demo.then_close;
-        if demo.then_close {
-            self.find.demo_close = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(DEMO_CLOSE_AFTER).await;
-                this.update(cx, |this, cx| this.demo_close_find(cx)).ok();
-            }));
-        }
-    }
-
-    fn demo_close_find(&mut self, cx: &mut Context<Self>) {
-        self.find.demo_close = None;
-        if self.find.open {
-            self.end_find(cx);
-        }
-        self.find.demo_done = true;
-    }
-
-    /// `RENO_DRAFT33_OPEN=latest`: once the reply is long enough to scroll, the view is taken off
-    /// its tail, as a scroll up would. Whether it was.
-    pub(crate) fn demo_scroll_up(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.list.max_offset_for_scrollbar().y < px(1200.0) {
-            return false;
-        }
-        self.list.scroll_by(px(-1800.0));
-        self.select.demo_scrolled_up = true;
-        cx.notify();
-        true
-    }
-
-    /// Whether the state the hook `word` names is fully reached (it prints `ready <word>` then):
-    /// the thread's turns are in; the folds open; the query typed and counted; the hit gone to;
-    /// the render check at its top with its diagram and picture landed and still; the selection
-    /// copied; the long reply streaming and the view taken off its tail.
-    pub(crate) fn demo_ready(&mut self, word: &str, cx: &gpui::App) -> bool {
-        use reno_client::fake::transcript::{NEEDLE_HITS, TURNS};
-        let folds: Vec<Key> = self
-            .rows
-            .iter()
-            .filter(|r| matches!(r, Row::Worked { .. }))
-            .map(Row::key)
-            .collect();
-        let drawn = !self.select.registry.borrow().is_empty();
-        let thread = folds.len() == TURNS && drawn;
-        let counted = self.find.open
-            && self.find.query == crate::vm::draft33::FindHook::QUERY
-            && self.find.found.hits.len() == NEEDLE_HITS;
-        let current = self.find.found.current;
-        match word {
-            "thread" => thread,
-            "folds" => thread && folds.iter().all(|k| self.open.contains(k)),
-            "find" => {
-                // The rail's match ticks need the rail: the transcript tall enough to scroll.
-                let ticks = crate::vm::convo::rail_visible(f32::from(
-                    self.list.max_offset_for_scrollbar().y,
-                ));
-                counted && current == Some(0) && !self.find.navigated && ticks
-            }
-            "cardorder" => {
-                counted
-                    && self.find.demo_done
-                    && current == Some(0)
-                    && thread
-                    && folds.iter().all(|k| self.open.contains(k))
-            }
-            "rendertail" => self.list.is_following_tail() && self.render_is_still(cx, false),
-            "enter" => counted && self.find.demo_done && current == Some(0),
-            "enter3" => counted && self.find.demo_done && current == Some(2),
-            "escape" => thread && !self.find.open && self.find.demo_done,
-            "render" | "select" | "copycode" => {
-                if matches!(word, "select" | "copycode") {
-                    return self.select.demo_copied;
-                }
-                self.render_is_still(cx, true)
-            }
-            "stream" => self.rows.iter().any(|r| matches!(r, Row::Prose { .. })) && drawn,
-            "latest" => self.select.demo_scrolled_up && !self.list.is_following_tail(),
-            _ => false,
-        }
-    }
-
-    /// Whether a row in view is drawn over the one below it.
-    pub(crate) fn rows_overlap(&self) -> bool {
-        let top = self.list.logical_scroll_top().item_ix;
-        let bounds: Vec<_> = (top..(top + 40).min(self.items.len()))
-            .filter_map(|ix| self.list.bounds_for_item(ix))
-            .collect();
-        bounds
-            .windows(2)
-            .any(|w| w[0].bottom() > w[1].top() + px(0.5))
-    }
-
-    /// The Render check at the top of the thread, its prompt and reply drawn, and nothing the
-    /// renderers load (the diagram, the pictures) has settled for a moment.
-    pub(crate) fn render_is_still(&mut self, cx: &gpui::App, at_top: bool) -> bool {
-        let top = self.list.logical_scroll_top();
-        let rows_in = self.rows.iter().any(|r| matches!(r, Row::User { .. }))
-            && self.rows.iter().any(|r| matches!(r, Row::Prose { .. }));
-        if !rows_in
-            || self.select.registry.borrow().is_empty()
-            || (at_top && top.item_ix != 0)
-            || self.rows_overlap()
-        {
-            return false;
-        }
-        let seen = crate::ui::markdown_view::settled_generation(cx);
-        let now = std::time::Instant::now();
-        match self.select.demo_gen {
-            Some((gen_seen, since)) if gen_seen == seen => {
-                seen > 0 && now.duration_since(since) >= Duration::from_millis(1500)
-            }
-            _ => {
-                self.select.demo_gen = Some((seen, now));
-                false
-            }
-        }
     }
 
     // --- jump to latest ------------------------------------------------------------------------
@@ -584,22 +388,13 @@ impl RunScreen {
         cx.notify();
     }
 
-    /// "Jump to latest", while the view is not at the tail. Its place and look are the variant's.
-    pub(super) fn jump_control(
-        &self,
-        theme: &Theme,
-        variant: Variant,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// "Jump to latest": a round button at the bottom right, while the view is not at the tail.
+    pub(super) fn jump_control(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.list.is_following_tail() || self.rows.is_empty() {
             return None;
         }
-        let live = self
-            .summary(cx)
-            .is_some_and(|r| r.status == reno_proto::RunStatus::Running);
-        let go = cx.listener(|this, _, _, cx| this.jump_to_latest(cx));
-        Some(match variant {
-            Variant::A => div()
+        Some(
+            div()
                 .absolute()
                 .bottom(px(14.0))
                 .right(px(14.0))
@@ -610,55 +405,10 @@ impl RunScreen {
                         .border_color(theme.hairline)
                         .shadow_md()
                         .tooltip(kit::tip("Jump to latest"))
-                        .on_click(go),
+                        .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx))),
                 )
                 .into_any_element(),
-            Variant::B => div()
-                .id("jump-latest")
-                .debug_selector(|| "jump-latest".to_owned())
-                // Its own row under the list, not over its last line.
-                .relative()
-                .flex_none()
-                .w_full()
-                .h(px(28.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                // Opaque, so the words under it do not show through; the tint is laid over it.
-                .bg(theme.canvas)
-                .border_t_1()
-                .border_color(theme.accent.opacity(0.35))
-                .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.accent)
-                .cursor_pointer()
-                .child(div().absolute().inset_0().bg(theme.accent.opacity(0.16)))
-                .child(icon(Icon::ChevDown, 13.0, theme.accent))
-                .child(if live {
-                    "Latest \u{b7} streaming"
-                } else {
-                    "Latest"
-                })
-                .on_click(go)
-                .into_any_element(),
-            Variant::C => div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(px(12.0))
-                .flex()
-                .justify_center()
-                .child(
-                    kit::pill_button(theme, "jump-latest", "Latest \u{2193}", Tone::Quiet)
-                        .bg(theme.surface)
-                        .border_1()
-                        .border_color(theme.hairline)
-                        .shadow_md()
-                        .on_click(go),
-                )
-                .into_any_element(),
-        })
+        )
     }
 
     // --- the bar -------------------------------------------------------------------------------
@@ -724,7 +474,7 @@ impl RunScreen {
         ]
     }
 
-    /// The bar above the transcript (variant A): a full-width strip under the status bar.
+    /// The bar above the transcript: a full-width strip under the status bar.
     pub(super) fn find_strip(
         &mut self,
         theme: &Theme,
@@ -758,235 +508,7 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// The bar over the transcript (variant B): a floating 320 pt panel at the top right, with
-    /// the count inside it.
-    pub(super) fn find_panel(
-        &mut self,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let field = self.find_field_box(theme, window, cx);
-        let count = self.find_count_text(theme, 11.5, true);
-        let [prev, next, close] = self.find_buttons(theme, cx);
-        div()
-            .absolute()
-            .top(px(12.0))
-            .right(px(18.0))
-            .child(
-                menu::panel(theme, "find-bar", 320.0)
-                    .key_context(look::BAR_CONTEXT)
-                    .p(px(8.0))
-                    .gap(px(6.0))
-                    .text_size(px(12.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(field)
-                            .child(close),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .px(px(4.0))
-                            .child(count)
-                            .child(div().flex_1())
-                            .child(prev)
-                            .child(next),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// The Find tab of the side panel (variant C): the query field, the count and one row for
-    /// each hit, with the turn it is in and the line around it.
-    pub(super) fn find_results_body(
-        &mut self,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let field = self.find_field_box(theme, window, cx);
-        let count = self.find_count_text(theme, 12.0, false);
-        let [prev, next, close] = self.find_buttons(theme, cx);
-        let total = self.find.found.hits.len();
-        let hits: Vec<(usize, find::Hit)> = self
-            .find
-            .found
-            .hits
-            .iter()
-            .cloned()
-            .enumerate()
-            .take(RESULTS_SHOWN)
-            .collect();
-        let rows: Vec<AnyElement> = hits
-            .iter()
-            .map(|(at, hit)| self.find_result_row(theme, *at, hit, cx))
-            .collect();
-        let summary = if self.find.query.is_empty() {
-            "Type to search the whole conversation".to_owned()
-        } else if total == 0 {
-            "No results".to_owned()
-        } else {
-            find::results_label(total)
-        };
-        div()
-            .id("find-bar")
-            .debug_selector(|| "find-bar".to_owned())
-            .key_context(look::BAR_CONTEXT)
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(14.0))
-            .text_size(px(13.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(icon(Icon::Search, 14.0, theme.faint))
-                    .child(field)
-                    .child(close),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(2.0))
-                    .child(
-                        div()
-                            .id("find-results-count")
-                            .debug_selector(|| "find-results-count".to_owned())
-                            .text_color(theme.muted)
-                            .child(gpui::SharedString::from(summary)),
-                    )
-                    .child(div().flex_1())
-                    .child(count)
-                    .child(prev)
-                    .child(next),
-            )
-            .child(
-                div()
-                    .id("find-results")
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .when(total > RESULTS_SHOWN, |d| {
-                        d.child(
-                            div()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.faint)
-                                .child(gpui::SharedString::from(format!(
-                                    "{} more: narrow the search",
-                                    total - RESULTS_SHOWN
-                                ))),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// One result: "Turn 3 · cargo test", and the line around the match, the match in semibold.
-    fn find_result_row(
-        &self,
-        theme: &Theme,
-        at: usize,
-        hit: &find::Hit,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (place, text) = match self.hit_row(hit) {
-            Some(row) => (
-                place_of(hit, row),
-                find::text_of(row, hit.part).unwrap_or_default().to_owned(),
-            ),
-            None => (hit.source.word().to_owned(), String::new()),
-        };
-        let snippet = find::snippet(&text, &hit.range, 36);
-        let mono = matches!(hit.source, Source::Command | Source::Output);
-        let current = self.find.found.current == Some(at);
-        let selector = format!("find-result-{at}");
-        div()
-            .id(gpui::SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .w_full()
-            .px(px(10.0))
-            .py(px(7.0))
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .when(current, |d| {
-                d.bg(theme.row_selected())
-                    .border_l_2()
-                    .border_color(theme.accent)
-            })
-            .hover({
-                let fill = theme.row_selected();
-                move |s| s.bg(fill)
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.faint)
-                    .child(gpui::SharedString::from(format!("Turn {}", hit.turn)))
-                    .child("\u{b7}")
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(gpui::SharedString::from(place)),
-                    ),
-            )
-            .child(
-                // One line: the words before the match, the match in semibold, the words after.
-                div()
-                    .w_full()
-                    .flex()
-                    .items_baseline()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(13.0))
-                    .text_color(theme.muted)
-                    .when(mono, |d| d.font_family(MONO).text_size(px(12.0)))
-                    .child(
-                        div()
-                            .flex_none()
-                            .child(gpui::SharedString::from(snippet.before)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(gpui::SharedString::from(snippet.matched)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .child(gpui::SharedString::from(snippet.after)),
-                    ),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.find_go(at, cx)))
-            .into_any_element()
-    }
-
-    /// Match ticks on the prompt rail (variants A and B): one for each row that holds a match, the
+    /// Match ticks on the prompt rail (while the strip holds a query): one for each row that holds a match, the
     /// current one longer. Each is a place on the same scale as the prompt ticks.
     pub(super) fn find_rail_ticks(&self, theme: &Theme) -> Vec<AnyElement> {
         if !self.find.open {
@@ -1037,92 +559,13 @@ impl RunScreen {
             .collect()
     }
 
-    /// The bar of the variant showing, over or above the transcript; `None` when closed or when
-    /// the variant keeps it in the side panel.
+    /// The strip above the transcript; `None` when find is closed.
     pub(super) fn find_bar_above(
         &mut self,
         theme: &Theme,
-        variant: Variant,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        (self.find.open && variant == Variant::A).then(|| self.find_strip(theme, window, cx))
-    }
-
-    pub(super) fn find_bar_over(
-        &mut self,
-        theme: &Theme,
-        variant: Variant,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        (self.find.open && variant == Variant::B).then(|| self.find_panel(theme, window, cx))
-    }
-
-    /// Keeps the Find tab to variant C: it shows while the bar is open, and goes when the draft
-    /// moves to another variant.
-    pub(super) fn sync_find_tab(&mut self, variant: Variant) {
-        let has = self.panel.tabs().contains(&Surface::Find);
-        if self.find.open && variant == Variant::C && !has {
-            self.panel.open(Surface::Find);
-        } else if has && (!self.find.open || variant != Variant::C) {
-            self.panel.close(&Surface::Find);
-        }
-    }
-}
-
-/// "Reply", "Prompt", or the command a tool hit is in ("cargo test -p reno-harness").
-fn place_of(hit: &find::Hit, row: &Row) -> String {
-    match (hit.source, row, hit.part) {
-        (
-            Source::Command | Source::Output,
-            Row::Tools { calls, .. },
-            Part::Label(n) | Part::Output(n),
-        ) => calls.get(n).map_or_else(
-            || hit.source.word().to_owned(),
-            |c| {
-                c.label
-                    .split_whitespace()
-                    .take(4)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            },
-        ),
-        (source, ..) => {
-            let word = source.word();
-            let mut chars = word.chars();
-            chars
-                .next()
-                .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transcript::{Outcome, ToolEntry, ToolKind};
-
-    #[test]
-    fn a_tool_hit_names_its_command_and_the_others_their_kind() {
-        let call = ToolEntry {
-            id: "c".to_owned(),
-            kind: ToolKind::Command,
-            label: "cargo test -p reno-harness acp::shutdown".to_owned(),
-            outcome: Outcome::Ok(None),
-            output: None,
-        };
-        let row = Row::Tools {
-            key: Key(2),
-            calls: vec![call],
-        };
-        let hits = find::find_all(std::slice::from_ref(&row), "harness");
-        assert_eq!(place_of(&hits[0], &row), "cargo test -p reno-harness");
-        let reply = Row::Prose {
-            key: Key(4),
-            text: "x".to_owned(),
-        };
-        let hits = find::find_all(std::slice::from_ref(&reply), "x");
-        assert_eq!(place_of(&hits[0], &reply), "Reply");
+        self.find.open.then(|| self.find_strip(theme, window, cx))
     }
 }

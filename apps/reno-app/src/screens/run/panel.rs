@@ -194,8 +194,6 @@ impl RunScreen {
                 self.panel_touched = true;
                 return self.request_close(slot, window, cx);
             }
-            // Closing the results is closing the search.
-            Cmd::Close(Surface::Find) => return self.close_find(window, cx),
             Cmd::Close(surface) => {
                 self.panel_touched = true;
                 self.panel.close(&surface);
@@ -426,7 +424,6 @@ impl RunScreen {
                 .unwrap_or_else(|| view::planned_page(theme, HomeKind::SideChat)),
             Surface::File(path) => self.file_body(theme, &path, cx),
             Surface::Files => self.files_body(theme, width, window, cx),
-            Surface::Find => self.find_results_body(theme, window, cx),
             Surface::Commit(sha) => self.commit_body(theme, &sha, cx),
         };
         div()

@@ -1,6 +1,6 @@
 //! One image or diagram an agent posted (TRANSCRIPT-12.1, 12.4): its caption as a title, then the
 //! picture. An image goes through the same typed source as a markdown image; a diagram through
-//! the Mermaid path and the diagram frame of the ROAD-33 draft's chosen variant. A visual that
+//! the Mermaid path and the diagram frame. A visual that
 //! does not load or draw is its caption and "Visual not loaded".
 
 use gpui::{AnyElement, App, FontWeight, IntoElement, RenderOnce, Window, div, prelude::*, px};
@@ -12,7 +12,6 @@ use super::image::{self, ImageSource, Shown};
 use super::link::clean_path;
 use super::{Host, mermaid};
 use crate::ui::theme::Theme;
-use crate::vm::draft33::Variant;
 
 /// One posted visual, drawn for `host` (which says where a worktree image is read from).
 #[derive(IntoElement)]
@@ -54,14 +53,7 @@ fn failed(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn body(
-    visual: &Visual,
-    host: &Host,
-    theme: &Theme,
-    variant: Variant,
-    window: &Window,
-    cx: &mut App,
-) -> AnyElement {
+fn body(visual: &Visual, host: &Host, theme: &Theme, window: &Window, cx: &mut App) -> AnyElement {
     match &visual.kind {
         VisualKind::Image(posted) => {
             let (Some(source), Some(images)) = (source_of(posted), host.images.as_ref()) else {
@@ -84,7 +76,6 @@ fn body(
                         wrapped: false,
                         ordinal: 0,
                     },
-                    variant,
                     theme,
                     super::diagram_picture(&diagram, chrome::key_of(Some("mermaid"), source)),
                 ),
@@ -99,8 +90,7 @@ fn body(
 
 impl RenderOnce for VisualView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let variant = crate::ui::draft33::current(cx).unwrap_or(Variant::A);
-        let content = body(&self.visual, &self.host, &self.theme, variant, window, cx);
+        let content = body(&self.visual, &self.host, &self.theme, window, cx);
         div()
             .id(gpui::SharedString::from(format!(
                 "visual-{}",

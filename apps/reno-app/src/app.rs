@@ -45,9 +45,6 @@ use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
-use crate::vm::draft33::{
-    FindHook as Draft33Find, OpenHook as Draft33Hook, Variant as Draft33Variant,
-};
 use crate::vm::executors::{self, AgentUpdate};
 use crate::vm::settings_nav::Category;
 use crate::vm::shell::{self, Chip, History, Place};
@@ -123,14 +120,6 @@ pub(crate) struct Options {
     /// `RENO_SETUP=skip|welcome|look|agents|project|done` (with `--fake`): skip first-run setup,
     /// or open it at that step even when it was done (screenshots, reviews).
     pub(crate) setup: Option<crate::vm::first_run::Hook>,
-    /// `--fake --draft33` (`RENO_DRAFT33=a|b|c`, default `a`): the ROAD-33 transcript draft, with
-    /// its variant. It skips first-run setup. Without the flag the app is exactly as it was.
-    pub(crate) draft33: Option<Draft33Variant>,
-    /// `RENO_DRAFT33_OPEN=thread|folds|render|stream`: with `--draft33`, open that state once the
-    /// screen is up (screenshots, reviews). An unknown word is ignored, with a line on the console.
-    pub(crate) draft33_open: Option<Draft33Hook>,
-    /// The find words of `RENO_DRAFT33_OPEN` (`find|enter|enter3|escape`).
-    pub(crate) draft33_find: Option<Draft33Find>,
     /// `RENO_BENCH=1`: print the lines `cargo xtask bench --app` reads (`bench.rs`), and scroll
     /// the open run's transcript. Off, nothing changes.
     pub(crate) bench: bool,
@@ -153,29 +142,10 @@ impl Options {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let mut options = Self::default();
-        let mut draft33 = false;
         for arg in args {
             match arg.as_str() {
                 "--fake" => options.fake = true,
-                "--draft33" => draft33 = true,
                 other => return Err(format!("unknown argument: {other}")),
-            }
-        }
-        if draft33 {
-            if !options.fake {
-                return Err("--draft33 needs --fake".to_owned());
-            }
-            options.draft33 = Some(match env("RENO_DRAFT33").filter(|v| !v.is_empty()) {
-                None => Draft33Variant::A,
-                Some(key) => Draft33Variant::parse(&key)
-                    .ok_or_else(|| format!("RENO_DRAFT33: {key} is not a, b or c"))?,
-            });
-            if let Some(word) = env("RENO_DRAFT33_OPEN").filter(|v| !v.is_empty()) {
-                options.draft33_open = Draft33Hook::parse(&word);
-                options.draft33_find = Draft33Find::parse(&word);
-                if options.draft33_open.is_none() && options.draft33_find.is_none() {
-                    crate::vm::draft33::ignore_unknown_hook(&word);
-                }
             }
         }
         if options.fake
@@ -347,68 +317,6 @@ pub(crate) struct Start {
     pub(crate) sidebar_open: Option<String>,
     /// `RENO_SETUP`.
     pub(crate) setup: Option<crate::vm::first_run::Hook>,
-    /// `RENO_DRAFT33_OPEN`.
-    pub(crate) draft33_open: Option<Draft33Hook>,
-    /// The find words of `RENO_DRAFT33_OPEN`.
-    pub(crate) draft33_find: Option<Draft33Find>,
-}
-
-/// The run whose transcript shows the whole "fix the ACP v2 handshake" thread above it.
-fn draft33_thread_run() -> &'static str {
-    reno_client::fake::transcript::HANDSHAKE_RUNS[reno_client::fake::transcript::TURNS - 1]
-}
-
-/// Waits until the daemon has answered and, when `run` is given, knows that run: the draft's
-/// hooks start from what is there, not after a fixed time, so a slow start cannot make them
-/// act on an app that is still connecting. Gives up after a minute.
-async fn wait_for_store(
-    root: &gpui::WeakEntity<RootView>,
-    run: Option<&'static str>,
-    cx: &mut gpui::AsyncWindowContext,
-) {
-    for _ in 0..240 {
-        let ready = root
-            .update(cx, |root, cx| {
-                let store = root.store.read(cx);
-                store.client().is_some()
-                    && run.is_none_or(|r| {
-                        RunId::from_suffix(r).is_ok_and(|id| store.state().run(&id).is_some())
-                    })
-            })
-            .unwrap_or(true);
-        if ready {
-            return;
-        }
-        cx.background_executor()
-            .timer(Duration::from_millis(250))
-            .await;
-    }
-}
-
-/// Prints `ready <word>` once the run screen says the state the hook names is reached, for the
-/// script that captures it to wait for. Gives up after two minutes.
-#[allow(clippy::print_stdout)]
-async fn announce_ready(
-    root: &gpui::WeakEntity<RootView>,
-    word: &'static str,
-    cx: &mut gpui::AsyncWindowContext,
-) {
-    for _ in 0..480 {
-        let ready = root
-            .update(cx, |root, cx| {
-                root.run_screen()
-                    .cloned()
-                    .is_some_and(|screen| screen.update(cx, |s, cx| s.demo_ready(word, cx)))
-            })
-            .unwrap_or(true);
-        if ready {
-            println!("ready {word}");
-            return;
-        }
-        cx.background_executor()
-            .timer(Duration::from_millis(250))
-            .await;
-    }
 }
 
 pub(crate) fn run(options: Options) {
@@ -429,9 +337,6 @@ pub(crate) fn run(options: Options) {
         crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         crate::ui::restart::bind_keys(cx);
-        if let Some(variant) = options.draft33 {
-            crate::ui::draft33::install(variant, cx);
-        }
         if options.fake {
             // A demo against the fake daemon never opens a browser.
             crate::links::mute();
@@ -482,12 +387,7 @@ pub(crate) fn run(options: Options) {
             composer_type: options.composer_type.clone(),
             composer_open: options.composer_open.clone(),
             sidebar_open: options.sidebar_open.clone(),
-            // The draft shows on a fresh data dir, where setup would cover it.
-            setup: options
-                .setup
-                .or(options.draft33.map(|_| crate::vm::first_run::Hook::Skip)),
-            draft33_open: options.draft33_open,
-            draft33_find: options.draft33_find,
+            setup: options.setup,
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -542,8 +442,6 @@ pub(crate) fn open_window(
         composer_open,
         sidebar_open,
         setup,
-        draft33_open,
-        draft33_find,
     } = start;
     let named = open.is_some()
         || open_run.is_some()
@@ -597,172 +495,6 @@ pub(crate) fn open_window(
                     .detach();
                 }
                 root.init_first_run(setup, named, window, cx);
-                if let Some(hook) = draft33_find {
-                    cx.spawn_in(window, async move |root, cx| {
-                        // When the daemon has answered and knows the thread, not on a timer.
-                        wait_for_store(&root, Some(draft33_thread_run()), cx).await;
-                        cx.background_executor()
-                            .timer(Duration::from_millis(500))
-                            .await;
-                        if hook == Draft33Find::CardOrder {
-                            // The owner opens every fold first: once all the turns are in.
-                            root.update_in(cx, |root, window, cx| {
-                                root.draft33_hook(Draft33Hook::Thread, window, cx);
-                            })
-                            .ok();
-                            for _ in 0..240 {
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(250))
-                                    .await;
-                                let all = root
-                                    .update(cx, |root, cx| {
-                                        root.run_screen().cloned().is_some_and(|screen| {
-                                            screen.update(cx, |s, cx| {
-                                                let in_ = s.demo_ready("thread", cx);
-                                                if in_ {
-                                                    s.open_all_folds(cx);
-                                                }
-                                                in_
-                                            })
-                                        })
-                                    })
-                                    .unwrap_or(true);
-                                if all {
-                                    break;
-                                }
-                            }
-                        }
-                        root.update_in(cx, |root, window, cx| {
-                            root.draft33_find_hook(hook, window, cx);
-                        })
-                        .ok();
-                        announce_ready(&root, hook.word(), cx).await;
-                    })
-                    .detach();
-                }
-                if let Some(hook) = draft33_open {
-                    cx.spawn_in(window, async move |root, cx| {
-                        let run = match hook {
-                            Draft33Hook::Thread | Draft33Hook::Folds => Some(draft33_thread_run()),
-                            Draft33Hook::Render
-                            | Draft33Hook::Select
-                            | Draft33Hook::CopyCode
-                            | Draft33Hook::RenderTail => {
-                                Some(reno_client::fake::transcript::RENDER_RUN)
-                            }
-                            Draft33Hook::Stream | Draft33Hook::Latest => None,
-                        };
-                        wait_for_store(&root, run, cx).await;
-                        cx.background_executor()
-                            .timer(Duration::from_millis(500))
-                            .await;
-                        root.update_in(cx, |root, window, cx| {
-                            root.draft33_hook(hook, window, cx);
-                        })
-                        .ok();
-                        let screen = |root: &gpui::WeakEntity<RootView>,
-                                      cx: &mut gpui::AsyncWindowContext,
-                                      act: &dyn Fn(
-                            &mut RunScreen,
-                            &mut Context<RunScreen>,
-                        ) -> bool| {
-                            root.update(cx, |root, cx| {
-                                root.run_screen()
-                                    .cloned()
-                                    .is_some_and(|screen| screen.update(cx, |s, cx| act(s, cx)))
-                            })
-                            .unwrap_or(true)
-                        };
-                        match hook {
-                            Draft33Hook::Latest => {
-                                // The reply streams: take the view off its tail once it can scroll.
-                                for _ in 0..120 {
-                                    cx.background_executor()
-                                        .timer(Duration::from_millis(500))
-                                        .await;
-                                    if screen(&root, cx, &|s, cx| s.demo_scroll_up(cx)) {
-                                        break;
-                                    }
-                                }
-                            }
-                            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode => {
-                                // The walk starts at the top of the thread, not at its tail, and
-                                // the diagram and pictures landing move the tail: say it until
-                                // the view is at the top and nothing more has landed for a moment.
-                                for _ in 0..120 {
-                                    cx.background_executor()
-                                        .timer(Duration::from_millis(500))
-                                        .await;
-                                    let still = screen(&root, cx, &|s, cx| {
-                                        s.demo_scroll_top(cx);
-                                        s.render_is_still(cx, true)
-                                    });
-                                    if still {
-                                        break;
-                                    }
-                                }
-                                if hook != Draft33Hook::Render {
-                                    // Once the reply is in and the selection holds text.
-                                    for _ in 0..120 {
-                                        let went = root
-                                            .update_in(cx, |root, window, cx| {
-                                                root.run_screen().cloned().is_some_and(|s| {
-                                                    s.update(cx, |s, cx| {
-                                                        s.demo_copy(
-                                                            hook == Draft33Hook::Select,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    })
-                                                })
-                                            })
-                                            .unwrap_or(true);
-                                        if went {
-                                            break;
-                                        }
-                                        cx.background_executor()
-                                            .timer(Duration::from_millis(500))
-                                            .await;
-                                    }
-                                }
-                            }
-                            Draft33Hook::RenderTail => {
-                                // The end of the thread; what lands in it moves the end.
-                                for _ in 0..120 {
-                                    cx.background_executor()
-                                        .timer(Duration::from_millis(500))
-                                        .await;
-                                    let still = screen(&root, cx, &|s, cx| {
-                                        s.jump_to_latest(cx);
-                                        s.demo_ready("rendertail", cx)
-                                    });
-                                    if still {
-                                        break;
-                                    }
-                                }
-                            }
-                            Draft33Hook::Folds => {
-                                // A long thread's runs arrive one after another: open what is
-                                // there until all are.
-                                for _ in 0..120 {
-                                    cx.background_executor()
-                                        .timer(Duration::from_millis(500))
-                                        .await;
-                                    screen(&root, cx, &|s, cx| {
-                                        s.open_all_folds(cx);
-                                        false
-                                    });
-                                    if screen(&root, cx, &|s, cx| s.demo_ready("folds", cx)) {
-                                        break;
-                                    }
-                                }
-                            }
-                            Draft33Hook::Thread | Draft33Hook::Stream => {}
-                        }
-                        announce_ready(&root, hook.word(), cx).await;
-                    })
-                    .detach();
-                }
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
                 }
@@ -1580,70 +1312,6 @@ impl RootView {
         cx.notify();
     }
 
-    /// `RENO_DRAFT33_OPEN`: opens the run the hook names; `stream` starts the long reply, whose
-    /// run opens as any new run does.
-    pub(crate) fn draft33_hook(
-        &mut self,
-        hook: Draft33Hook,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let open = |suffix: &str| RunId::from_suffix(suffix).ok();
-        match hook {
-            Draft33Hook::Thread | Draft33Hook::Folds => {
-                // The thread's last run shows the whole thread above it.
-                if let Some(run) = open(
-                    reno_client::fake::transcript::HANDSHAKE_RUNS
-                        [reno_client::fake::transcript::TURNS - 1],
-                ) {
-                    self.open_run(run, window, cx);
-                }
-            }
-            Draft33Hook::Render
-            | Draft33Hook::Select
-            | Draft33Hook::CopyCode
-            | Draft33Hook::RenderTail => {
-                if let Some(run) = open(reno_client::fake::transcript::RENDER_RUN) {
-                    self.open_run(run, window, cx);
-                }
-            }
-            Draft33Hook::Stream | Draft33Hook::Latest => {
-                let params = reno_proto::TaskRunParams {
-                    prompt: "/longreply".to_owned(),
-                    executor: "claude-code".parse().ok(),
-                    cwd: Some(PathBuf::from("/demo/reno")),
-                    ..reno_proto::TaskRunParams::default()
-                };
-                self.store
-                    .update(cx, |store, cx| store.submit_task(params, 0, cx));
-            }
-        }
-    }
-
-    /// `RENO_DRAFT33_OPEN=find|enter|enter3|escape`: the handshake thread with its folds closed
-    /// and the find bar on `supervisor.rs`, and then, as the word says, a hit and Escape.
-    pub(crate) fn draft33_find_hook(
-        &mut self,
-        hook: Draft33Find,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.draft33_hook(Draft33Hook::Thread, window, cx);
-        let Some(screen) = self.run_screen().cloned() else {
-            return;
-        };
-        screen.update(cx, |screen, cx| {
-            let demo = hook
-                .goto()
-                .map(|(goto, then_close)| crate::screens::run::FindDemo {
-                    goto,
-                    min_hits: reno_client::fake::transcript::NEEDLE_HITS,
-                    then_close,
-                });
-            screen.demo_find(Draft33Find::QUERY, demo, window, cx);
-        });
-    }
-
     /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: act on the composer that is showing.
     fn composer_hooks(
         &mut self,
@@ -2356,7 +2024,6 @@ impl Render for RootView {
                     at: self.restart_at.clone(),
                 }
             },
-            draft_label: std::cell::RefCell::new(crate::ui::draft33::label(&theme, cx)),
         };
         let this = cx.entity();
         let status_bar = bar::status_bar(&this, &bar);
@@ -2686,44 +2353,6 @@ mod tests {
         assert!(tab("commit:").is_err());
         assert!(tab("filez").is_err());
         assert!(tab("file:").is_err());
-    }
-
-    #[test]
-    fn the_transcript_draft_needs_the_fake_daemon_and_is_checked() {
-        let draft = |args: &[&str], env: &[(&str, &str)]| parse(args, env);
-        // Without `--fake` it is refused, whatever else is given.
-        assert_eq!(
-            draft(&["--draft33"], &[]).unwrap_err(),
-            "--draft33 needs --fake"
-        );
-        // With it, variant A unless `RENO_DRAFT33` says otherwise.
-        let a = draft(&["--fake", "--draft33"], &[]).unwrap();
-        assert_eq!(a.draft33, Some(Draft33Variant::A));
-        assert_eq!(a.draft33_open, None);
-        for (key, want) in [("b", Draft33Variant::B), ("C", Draft33Variant::C)] {
-            let o = draft(&["--fake", "--draft33"], &[("RENO_DRAFT33", key)]).unwrap();
-            assert_eq!(o.draft33, Some(want));
-        }
-        assert!(draft(&["--fake", "--draft33"], &[("RENO_DRAFT33", "d")]).is_err());
-        // The start hook is a word; an unknown one is ignored, not refused.
-        for (word, want) in [
-            ("thread", Some(Draft33Hook::Thread)),
-            ("folds", Some(Draft33Hook::Folds)),
-            ("render", Some(Draft33Hook::Render)),
-            ("stream", Some(Draft33Hook::Stream)),
-            ("nonsense", None),
-        ] {
-            let o = draft(&["--fake", "--draft33"], &[("RENO_DRAFT33_OPEN", word)]).unwrap();
-            assert_eq!(o.draft33_open, want, "{word}");
-        }
-        // Without `--draft33` the app is as it was: the variables mean nothing.
-        let plain = draft(
-            &["--fake"],
-            &[("RENO_DRAFT33", "c"), ("RENO_DRAFT33_OPEN", "folds")],
-        )
-        .unwrap();
-        assert_eq!(plain.draft33, None);
-        assert_eq!(plain.draft33_open, None);
     }
 
     #[test]

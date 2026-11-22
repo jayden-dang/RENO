@@ -36,7 +36,6 @@ use super::kit::MONO;
 use super::theme::Theme;
 use crate::transcript::Key;
 use crate::vm::anchor::Atom;
-use crate::vm::draft33::Variant;
 use crate::vm::selection::Slot;
 
 pub(crate) mod chrome;
@@ -124,7 +123,6 @@ pub(crate) struct Host {
 pub(crate) struct Marks {
     pub(crate) needle: String,
     pub(crate) current: Option<usize>,
-    pub(crate) variant: Variant,
 }
 
 /// A reply drawn for the transcript's selection.
@@ -221,7 +219,6 @@ struct Env<'a> {
     window: &'a Window,
     base: gpui::TextStyle,
     scale: f32,
-    variant: Variant,
     /// Whether math is typeset, and its size in logical pixels per em.
     math: Option<f32>,
     /// How many framed blocks this draw has made so far (their element ids differ by it).
@@ -262,7 +259,6 @@ impl RenderOnce for Markdown {
             host: &self.host,
             window,
             scale: window.scale_factor(),
-            variant: super::draft33::current(cx).unwrap_or(Variant::A),
             math: typeset.then(|| f32::from(size) * f32::from(percent) / 100.0),
             cards: std::cell::Cell::new(0),
             atom_at: std::cell::Cell::new(0),
@@ -615,13 +611,12 @@ fn layers(
             out.push((range, select.style));
         }
     }
-    if let Some(marks) = &env.host.marks {
-        out.extend(finds.iter().map(|(range, current)| {
-            (
-                range.clone(),
-                super::find::hit_style(env.theme, marks.variant, *current),
-            )
-        }));
+    if env.host.marks.is_some() {
+        out.extend(
+            finds.iter().map(|(range, current)| {
+                (range.clone(), super::find::hit_style(env.theme, *current))
+            }),
+        );
     }
     out
 }
@@ -772,17 +767,13 @@ fn code_block(
     let wrapped = chrome::wraps(key, cx);
     chrome::card(
         &Card {
-            kind: chrome::Kind::Code {
-                language,
-                lines: code.split('\n').count(),
-            },
+            kind: chrome::Kind::Code,
             copy: code,
             key,
             wrappable: true,
             wrapped,
             ordinal,
         },
-        env.variant,
         env.theme,
         code_body(code, (language, atoms), wrapped, key ^ ordinal as u64, env),
     )
@@ -851,8 +842,8 @@ fn display_math(tex: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
 /// column whole, and only one that would need its labels smaller than this to fit scrolls.
 const DIAGRAM_MIN_SCALE: f32 = 0.75;
 
-/// A drawn diagram: fit to the column, but never smaller than half its size, so its labels stay
-/// legible; a wider diagram scrolls sideways.
+/// A drawn diagram: fit to the column, but never smaller than three quarters of its size, so its
+/// labels stay legible; a wider diagram scrolls sideways.
 pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElement {
     div()
         .debug_selector(|| "md-diagram".to_owned())
@@ -884,7 +875,6 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
                 wrapped: false,
                 ordinal,
             },
-            env.variant,
             env.theme,
             body,
         );
@@ -1258,7 +1248,6 @@ mod tests {
         let host = Host::preview().marked(Some(Rc::new(Marks {
             needle: "draw".to_owned(),
             current: Some(1),
-            variant: Variant::A,
         })));
         vcx.update(|window, _| {
             let env = Env {
@@ -1267,7 +1256,6 @@ mod tests {
                 window,
                 base: window.text_style(),
                 scale: 1.0,
-                variant: Variant::A,
                 math: None,
                 cards: std::cell::Cell::new(0),
                 atom_at: std::cell::Cell::new(0),
@@ -1286,7 +1274,7 @@ mod tests {
             let hits: Vec<_> = first.into_iter().chain(second).collect();
             let layers = layers(&env, &[], 23, &hits);
             assert_eq!(layers.len(), 3);
-            let hit = |cur| crate::ui::find::hit_style(&theme, Variant::A, cur);
+            let hit = |cur| crate::ui::find::hit_style(&theme, cur);
             assert_eq!(layers[0].1, hit(false));
             assert_eq!(layers[1].1, hit(true));
             assert_ne!(layers[0].1, layers[1].1);
@@ -1308,6 +1296,7 @@ mod tests {
         let column = 560.0;
         // Fit to width, never below the floor that keeps labels legible: the seeded diagram is
         // drawn whole, with no sideways scroll, at no less than three quarters of its size.
+        assert_eq!(DIAGRAM_MIN_SCALE, 0.75, "three quarters of its size");
         let shown = picture::shown_width(column, drawn.width, DIAGRAM_MIN_SCALE);
         assert!(
             shown >= drawn.width * DIAGRAM_MIN_SCALE && shown <= column,

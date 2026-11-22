@@ -13,20 +13,18 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::Action as _;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, GlobalElementId,
-    InspectorElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, StyledText, Task, Window, actions, div, prelude::*,
-    px,
+    HighlightStyle, InspectorElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, Task, Window, actions,
+    div, prelude::*, px,
 };
 
 use super::RunScreen;
-use crate::transcript::{Key, Row};
+use crate::transcript::Key;
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
 use crate::ui::theme::Theme;
-use crate::vm::draft33::Variant;
 use crate::vm::selection::{self, Entry, Pos, Selection, Shown, Slot};
 
 actions!(run_transcript, [CopyTranscript]);
@@ -67,11 +65,6 @@ pub(super) struct Select {
     /// How far the list moves each step while the pointer is held past its edge (negative: up).
     scroll: f32,
     task: Option<Task<()>>,
-    /// The walk's hooks: when the renderers last settled something, whether the selection was
-    /// copied and the clipboard read, and whether the view was taken off the tail.
-    pub(super) demo_gen: Option<(u64, std::time::Instant)>,
-    pub(super) demo_copied: bool,
-    pub(super) demo_scrolled_up: bool,
 }
 
 /// Where a text of a row is, for painting and tracking it.
@@ -118,6 +111,17 @@ impl RunScreen {
             .collect()
     }
 
+    /// The words and place of the head line of the row `key`, as last painted.
+    #[cfg(test)]
+    pub(crate) fn painted_head(&self, key: Key) -> Option<(String, Bounds<Pixels>)> {
+        self.select
+            .registry
+            .borrow()
+            .iter()
+            .find(|p| p.key == key && p.slot == Slot::HEAD)
+            .map(|p| (p.layout.text(), p.bounds))
+    }
+
     /// The selection, if any, as the row `key` is drawn: its entry's place in reading order.
     fn selection_for(&self, key: Key) -> Option<(Selection, usize)> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
@@ -130,16 +134,14 @@ impl RunScreen {
         sel.within(ordinal, Slot::WHOLE, Some(len))
     }
 
-    /// One text of a row, painted with the selection and the find hits over it, and tracked so
-    /// that a pointer on it is a position in the selection.
-    pub(super) fn text_piece(
+    /// The highlights over one text: the selection under the find hits, which win where they meet.
+    pub(super) fn piece_layers(
         &self,
         theme: &Theme,
-        variant: Variant,
         spot: Spot,
         text: &str,
         finds: &[(Range<usize>, bool)],
-    ) -> AnyElement {
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
         let mut layers = Vec::new();
         if let Some((sel, ordinal)) = self.selection_for(spot.key)
             && let Some(source) = sel.within(ordinal, spot.slot, spot.total)
@@ -148,7 +150,7 @@ impl RunScreen {
             if let Some(range) = map.layout_range(&source, text.len(), spot.total.is_none()) {
                 layers.push((
                     range,
-                    crate::ui::markdown_view::select::selection_style(theme, variant),
+                    crate::ui::markdown_view::select::selection_style(theme),
                 ));
             }
         }
@@ -157,8 +159,21 @@ impl RunScreen {
             finds
                 .iter()
                 .filter(|(r, _)| r.end <= len && r.start < r.end)
-                .map(|(r, current)| (r.clone(), look::hit_style(theme, variant, *current))),
+                .map(|(r, current)| (r.clone(), look::hit_style(theme, *current))),
         );
+        layers
+    }
+
+    /// One text of a row, painted with the selection and the find hits over it, and tracked so
+    /// that a pointer on it is a position in the selection.
+    pub(super) fn text_piece(
+        &self,
+        theme: &Theme,
+        spot: Spot,
+        text: &str,
+        finds: &[(Range<usize>, bool)],
+    ) -> AnyElement {
+        let layers = self.piece_layers(theme, spot, text, finds);
         let styled = StyledText::new(SharedString::from(text.to_owned()))
             .with_highlights(flatten_layers(&layers));
         let layout = styled.layout().clone();
@@ -444,117 +459,6 @@ impl RunScreen {
     /// The registry is emptied before each draw of the list: texts file themselves as they paint.
     pub(super) fn begin_paint(&self) {
         self.select.registry.borrow_mut().clear();
-    }
-
-    /// `RENO_DRAFT33_OPEN=render|select|copycode`: the view at the top of the thread.
-    pub(crate) fn demo_scroll_top(&mut self, cx: &mut Context<Self>) {
-        self.list.pause_following_tail();
-        self.scroll_to_row(0, cx);
-    }
-
-    /// `RENO_DRAFT33_OPEN=select|copycode`: the walk's step 8 or 9, then the clipboard's text on
-    /// stdout as `clipboard: ...` with line breaks written `\n`. Whether it went ahead: the
-    /// prompt and the reply must be in, and for `select` the selection must hold text before
-    /// ⌘C is sent; the clipboard is emptied first, so what is printed is what the copy put there.
-    #[allow(clippy::print_stdout)]
-    pub(crate) fn demo_copy(
-        &mut self,
-        select: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if select {
-            let boundary = |at: usize, text: &str| {
-                let mut at = at.min(text.len());
-                while !text.is_char_boundary(at) {
-                    at -= 1;
-                }
-                at
-            };
-            let entries = selection::reading(&self.rows, &|_| false);
-            let user = entries.iter().find(|e| matches!(e.row, Row::User { .. }));
-            let prose = entries.iter().find(|e| matches!(e.row, Row::Prose { .. }));
-            let (Some(user), Some(prose)) = (user, prose) else {
-                return false;
-            };
-            let (Row::User { text: asked, .. }, Row::Prose { text: reply, .. }) =
-                (user.row, prose.row)
-            else {
-                return false;
-            };
-            // The middle of the first paragraph of the reply.
-            let tree = reno_markdown::parse_full(reply);
-            let atoms = crate::vm::anchor::atoms(reply, &tree);
-            let middle = atoms.first().map_or(reply.len() / 2, |a| {
-                boundary((a.src.start + a.src.end) / 2, reply)
-            });
-            self.select.current = Some(Selection {
-                anchor: Pos {
-                    ordinal: user.ordinal,
-                    slot: Slot::WHOLE,
-                    off: boundary(asked.len() / 2, asked),
-                },
-                head: Pos {
-                    ordinal: prose.ordinal,
-                    slot: Slot::WHOLE,
-                    off: middle,
-                },
-            });
-            if self.selected_text().is_none() {
-                self.select.current = None;
-                return false;
-            }
-            // The same path as the key: the transcript holds focus and ⌘C is dispatched to it.
-            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            window.focus(&self.transcript_focus, cx);
-            cx.notify();
-            window.on_next_frame(|window, cx| {
-                window.dispatch_action(CopyTranscript.boxed_clone(), cx);
-            });
-        } else {
-            let code =
-                self.rows.iter().find_map(|row| match row {
-                    Row::Prose { text, .. } => reno_markdown::parse_full(text)
-                        .blocks
-                        .iter()
-                        .find_map(|top| match &top.block {
-                            reno_markdown::Block::CodeBlock { code, language }
-                                if language.as_deref() == Some("rust") =>
-                            {
-                                Some(code.trim_end_matches('\n').to_owned())
-                            }
-                            _ => None,
-                        }),
-                    _ => None,
-                });
-            let Some(code) = code else {
-                return false;
-            };
-            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            crate::ui::markdown_view::chrome::copy(&code, "code", cx);
-        }
-        cx.spawn_in(window, async move |this, cx| {
-            // Until the copy has put its text there; the clipboard was emptied first.
-            for _ in 0..40 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let text = cx
-                    .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                if !text.is_empty() {
-                    println!("clipboard: {}", text.replace('\n', "\\n"));
-                    this.update(cx, |this, _| this.select.demo_copied = true)
-                        .ok();
-                    return;
-                }
-            }
-            println!("clipboard: (nothing was copied)");
-        })
-        .detach();
-        true
     }
 }
 
