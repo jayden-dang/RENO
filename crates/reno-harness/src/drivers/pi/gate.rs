@@ -34,8 +34,9 @@ const MAX_HELLO: usize = 4096;
 /// The longest call line read: a tool's whole input rides on it, a file's content included.
 const MAX_CALL_LINE: usize = 8 << 20;
 
-/// How many calls the gate may leave unanswered. A working gate holds its own count below this
-/// (its `MAX_OUTSTANDING`), so only a broken one reaches it.
+/// How many calls the gate may leave unanswered. The gate extension holds its own count at this
+/// number (its `MAX_OUTSTANDING`) and queues the rest itself, so only a gate that broke its rule
+/// sends more.
 pub(super) const MAX_OPEN_GATE_CALLS: usize = 16;
 
 /// How many decisions wait for the writer: one for each call that may be open, and the denial of
@@ -64,8 +65,9 @@ pub(super) struct GateCall {
     pub(super) call_id: String,
     pub(super) parent: Option<String>,
     pub(super) input: Value,
-    /// The gate had too many calls open: this one was already denied, and the connection is
-    /// broken. It is not to be raised or decided.
+    /// The gate had too many calls open: the host denied this one itself and the connection is
+    /// broken. A decision for it is ignored, so raising it would only leave a request nobody
+    /// can answer.
     pub(super) over_bound: bool,
 }
 
@@ -93,6 +95,28 @@ struct LineReader {
 enum LineEnd {
     Closed,
     TooLong,
+}
+
+/// Why the connection was cut off or lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lost {
+    Closed,
+    TooLong,
+    NotACall,
+    RepeatedId,
+    QueueFull,
+}
+
+impl Lost {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Closed => "the gate's connection closed",
+            Self::TooLong => "the gate sent a line that is too long",
+            Self::NotACall => "the gate sent a line that is not a call",
+            Self::RepeatedId => "the gate repeated or reused a call id",
+            Self::QueueFull => "the gate stopped taking Reno's decisions",
+        }
+    }
 }
 
 impl LineReader {
@@ -155,6 +179,10 @@ pub(super) struct GateHost {
     open: HashSet<u64>,
     /// The connection broke the rules or was lost: nothing more is read.
     broken: bool,
+    /// Why it was cut off, when it was not closed by us.
+    lost: Option<Lost>,
+    /// The highest call id seen: the gate numbers its calls upwards.
+    highest: u64,
 }
 
 impl GateHost {
@@ -176,6 +204,8 @@ impl GateHost {
             writer: None,
             open: HashSet::new(),
             broken: false,
+            lost: None,
+            highest: 0,
         })
     }
 
@@ -216,14 +246,16 @@ impl GateHost {
         }
         let line = match self.reader.as_mut()?.line(MAX_CALL_LINE).await {
             Ok(line) => line,
-            Err(_) => return self.cut_off(),
+            Err(LineEnd::Closed) => return self.cut_off(Lost::Closed),
+            Err(LineEnd::TooLong) => return self.cut_off(Lost::TooLong),
         };
         let Some(call) = parse_call(&line) else {
-            return self.cut_off();
+            return self.cut_off(Lost::NotACall);
         };
-        if self.open.contains(&call.id) {
-            return self.cut_off();
+        if call.id <= self.highest {
+            return self.cut_off(Lost::RepeatedId);
         }
+        self.highest = call.id;
         if self.open.len() >= MAX_OPEN_GATE_CALLS {
             self.send(call.id, Decision::Deny, Some(TOO_MANY_OPEN));
             self.broken = true;
@@ -242,6 +274,11 @@ impl GateHost {
         if self.open.remove(&id) {
             self.send(id, decision, reason.as_deref());
         }
+    }
+
+    /// Why the connection ended, for the run's diagnostic.
+    pub(super) fn lost_because(&self) -> &'static str {
+        self.lost.unwrap_or(Lost::Closed).text()
     }
 
     /// Whether the connection is usable: armed, and neither lost nor broken.
@@ -281,13 +318,14 @@ impl GateHost {
             .as_ref()
             .is_none_or(|lines| lines.try_send(bytes).is_err())
         {
-            self.cut_off();
+            self.cut_off(Lost::QueueFull);
         }
     }
 
     /// Close the connection at once, without flushing. Always `None`, for `next`.
-    fn cut_off(&mut self) -> Option<GateCall> {
+    fn cut_off(&mut self, why: Lost) -> Option<GateCall> {
         self.broken = true;
+        self.lost.get_or_insert(why);
         self.reader = None;
         self.lines = None;
         if let Some(writer) = self.writer.take() {
@@ -708,14 +746,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repeated_id_or_a_stray_line_cuts_the_gate_off() {
-        let lines: [Vec<u8>; 4] = [
-            [call_line(1), call_line(1)].concat(),
-            b"not json\n".to_vec(),
-            hello_line(NONCE),
-            b"{\"t\":\"call\",\"id\":-1,\"toolName\":\"x\"}\n".to_vec(),
+    async fn a_repeated_id_or_a_stray_line_cuts_the_gate_off_and_says_which() {
+        let lines: [(Vec<u8>, &str); 4] = [
+            ([call_line(1), call_line(1)].concat(), "repeated"),
+            (b"not json\n".to_vec(), "not a call"),
+            (hello_line(NONCE), "not a call"),
+            (
+                b"{\"t\":\"call\",\"id\":-1,\"toolName\":\"x\"}\n".to_vec(),
+                "not a call",
+            ),
         ];
-        for (n, bytes) in lines.iter().enumerate() {
+        for (n, (bytes, cause)) in lines.iter().enumerate() {
             let socket = Socket::new();
             let (mut host, mut gate) = armed(&socket).await;
             gate.get_mut().write_all(bytes).await.unwrap();
@@ -725,7 +766,23 @@ mod tests {
             }
             assert!(ended, "case {n}");
             assert!(!host.is_live(), "case {n}");
+            assert!(host.lost_because().contains(cause), "case {n}");
             assert!(closed_unserved(gate.get_mut()).await, "case {n}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_id_that_was_decided_is_not_a_new_call_and_ids_only_rise() {
+        let cases: [(&[u64], &str); 2] = [(&[1, 1], "after it was decided"), (&[5, 3], "lower")];
+        for (ids, case) in cases {
+            let socket = Socket::new();
+            let (mut host, mut gate) = armed(&socket).await;
+            gate.get_mut().write_all(&call_line(ids[0])).await.unwrap();
+            let first = host.next().await.unwrap();
+            host.decide(first.id, Decision::Allow, None);
+            gate.get_mut().write_all(&call_line(ids[1])).await.unwrap();
+            assert!(host.next().await.is_none(), "{case}");
+            assert!(host.lost_because().contains("repeated"), "{case}");
         }
     }
 
@@ -739,6 +796,7 @@ mod tests {
         });
         assert!(host.next().await.is_none());
         assert!(!host.is_live());
+        assert!(host.lost_because().contains("too long"));
         flood.await.unwrap();
     }
 
@@ -749,6 +807,7 @@ mod tests {
         drop(gate);
         assert!(host.next().await.is_none());
         assert!(!host.is_live());
+        assert_eq!(host.lost_because(), "the gate's connection closed");
     }
 
     #[tokio::test]

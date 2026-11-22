@@ -1840,6 +1840,35 @@ async fn reno_calls_a_gate_that_sends_a_seventeenth_open_call_has_it_denied_and_
 }
 
 #[tokio::test]
+async fn reno_calls_a_call_sent_before_its_start_frame_is_raised_after_its_tool_event() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-call-first")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert_eq!(raised(&events).len(), 3);
+    assert_each_call_is_raised_between_its_tool_and_its_result(&events);
+}
+
+#[tokio::test]
+async fn reno_calls_a_child_with_a_blank_or_relative_home_is_not_started() {
+    for home in ["", "relative/home"] {
+        let bench = Bench::new();
+        let mut spec = call_spec(&bench, "gate-home");
+        spec.env.insert("HOME".to_owned(), home.to_owned());
+        let mut live = start(&reno_executor(&bench), spec).await;
+        let events = drive(&mut live).await;
+        let (stop, _, diagnostic) = done(&events);
+        assert_eq!(stop, StopReason::Error, "{home:?}");
+        assert!(
+            diagnostic.unwrap().contains("absolute HOME"),
+            "{home:?} names the cause"
+        );
+        assert!(bench.logged().is_empty(), "{home:?}: no Pi was spawned");
+    }
+}
+
+#[tokio::test]
 async fn reno_calls_a_gate_that_goes_away_mid_run_ends_the_run_as_lost() {
     let bench = Bench::new();
     let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-drop")).await;

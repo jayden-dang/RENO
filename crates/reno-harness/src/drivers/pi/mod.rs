@@ -117,6 +117,10 @@ mod gate {
             false
         }
 
+        pub(super) fn lost_because(&self) -> &'static str {
+            "the gate's connection closed"
+        }
+
         pub(super) async fn close(&mut self, _grace: Duration) {}
     }
 }
@@ -962,7 +966,8 @@ async fn launch_pi(
     let home = child_home(&cmd);
     if reno && home.is_none() {
         return Err(std::io::Error::other(
-            "the Reno harness needs a HOME for Pi, to read the paths its calls open",
+            "the Reno harness needs an absolute HOME in Pi's environment (none, or a blank or \
+             relative one was set), to judge the paths its calls open",
         ));
     }
     if !spec.cwd.as_os_str().is_empty() {
@@ -1014,14 +1019,15 @@ async fn launch_pi(
     Ok((pi, host))
 }
 
-/// The `HOME` `cmd` will run with, when it has a usable one.
+/// The `HOME` `cmd` will run with, when it is an absolute path: a blank or relative one cannot
+/// say where `~` is.
 fn child_home(cmd: &Command) -> Option<PathBuf> {
     cmd.as_std()
         .get_envs()
         .find(|(name, _)| *name == "HOME")
         .and_then(|(_, value)| value)
-        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
 }
 
 fn bind_gate(files: &GateFiles, tracker: &TaskTracker) -> std::io::Result<GateHost> {
@@ -1441,7 +1447,7 @@ impl<'a> Player<'a> {
                     Some(answer) => self.answer(answer),
                     None => self.answers_open = false,
                 },
-                call = gate_next(self.run.gate.as_mut()), if self.watching && self.parked.is_none() => {
+                call = gate_next(self.run.gate.as_mut()), if self.reading_gate() => {
                     match call {
                         None => return self.lost_watch().await,
                         Some(call) if call.over_bound => return self.flooded(),
@@ -1454,6 +1460,7 @@ impl<'a> Player<'a> {
                 }
                 () = expiry => self.expire().await,
                 () = barrier => {
+                    self.dismiss_all();
                     return (
                         StopReason::Error,
                         None,
@@ -1478,8 +1485,9 @@ impl<'a> Player<'a> {
     /// Whether the run is over, and how. Over means Pi answered the prompt, has nothing running
     /// for it, owes no other reply and has no steering message waiting to be handed over.
     fn ended(&mut self) -> Option<Ended> {
-        if let Some(why) = &self.refused {
-            return Some((StopReason::Error, None, Some(why.clone())));
+        if let Some(why) = self.refused.clone() {
+            self.dismiss_all();
+            return Some((StopReason::Error, None, Some(why)));
         }
         let waiting = self
             .pending
@@ -1597,6 +1605,12 @@ impl<'a> Player<'a> {
         }
     }
 
+    /// Whether the gate's socket is read: not while a call waits for its `Tool` event, so at most
+    /// one call is ever parked.
+    fn reading_gate(&self) -> bool {
+        self.watching && self.parked.is_none()
+    }
+
     fn decide_call(&mut self, id: u64, decision: crate::exec::Decision, reason: Option<String>) {
         if let Some(gate) = self.run.gate.as_mut() {
             gate.decide(id, decision, reason);
@@ -1664,10 +1678,15 @@ impl<'a> Player<'a> {
         if self.interrupted {
             return (StopReason::Interrupted, None, None);
         }
+        let because = self
+            .run
+            .gate
+            .as_ref()
+            .map_or("the gate's connection closed", GateHost::lost_because);
         (
             StopReason::Error,
             None,
-            Some("Reno lost its watch over the run: the gate's connection closed".into()),
+            Some(format!("Reno lost its watch over the run: {because}")),
         )
     }
 
@@ -1907,11 +1926,13 @@ mod tests {
     }
 
     #[test]
-    fn the_childs_home_is_the_last_one_set_and_none_when_blank_or_missing() {
+    fn the_childs_home_is_the_last_one_set_and_none_when_blank_relative_or_missing() {
         let mut cmd = Command::new("pi");
         cmd.env_clear();
         assert_eq!(child_home(&cmd), None);
         cmd.env("HOME", "");
+        assert_eq!(child_home(&cmd), None);
+        cmd.env("HOME", "relative/home");
         assert_eq!(child_home(&cmd), None);
         cmd.env("HOME", "/Users/daemon");
         assert_eq!(child_home(&cmd), Some(PathBuf::from("/Users/daemon")));
@@ -2433,6 +2454,190 @@ mod tests {
             );
             let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
             assert!(names.contains(&"OPENAI_API_KEY".to_owned()));
+        }
+
+        mod parked {
+            use serde_json::json;
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            use tokio::net::UnixStream;
+
+            use super::*;
+
+            const NONCE: &str = "parked-nonce";
+
+            /// A player over a real (idle) fake Pi, whose gate is a socket the test writes to.
+            struct Rig {
+                _bench: Bench,
+                run: Option<Run>,
+                events: mpsc::Receiver<ExecEvent>,
+                gate: BufReader<UnixStream>,
+            }
+
+            impl Rig {
+                async fn new() -> Self {
+                    let bench = Bench::new();
+                    let spec = bench.spec("01HZX9");
+                    let pi = bench.launch(&spec, &bench.flavor()).await;
+                    let socket = bench.dir.path().join("rig.sock");
+                    let mut host = GateHost::bind(&socket, NONCE, &TaskTracker::new()).unwrap();
+                    let mut client = UnixStream::connect(&socket).await.unwrap();
+                    let hello = format!("{{\"t\":\"hello\",\"nonce\":\"{NONCE}\"}}\n");
+                    client.write_all(hello.as_bytes()).await.unwrap();
+                    host.arm(Duration::from_secs(10)).await.unwrap();
+                    let (event_tx, events) = mpsc::channel(64);
+                    let run = Run {
+                        pi,
+                        gate: Some(host),
+                        gated: true,
+                        arming_budget: Duration::from_secs(10),
+                        spec,
+                        event_tx,
+                        steering: mpsc::channel(1).1,
+                        answers: mpsc::channel(1).1,
+                        cancel: CancellationToken::new(),
+                        interrupt_grace: Duration::from_millis(200),
+                        kill_grace: Duration::from_millis(200),
+                        unknown: UnknownFrames::new(),
+                    };
+                    Self {
+                        _bench: bench,
+                        run: Some(run),
+                        events,
+                        gate: BufReader::new(client),
+                    }
+                }
+
+                fn player(&mut self) -> Player<'_> {
+                    let state = State::parse(&json!({"sessionId": "s"})).unwrap();
+                    Player::new(self.run.as_mut().unwrap(), state)
+                }
+
+                async fn send_call(&mut self, id: u64, call_id: &str) {
+                    let line = format!(
+                        "{{\"t\":\"call\",\"id\":{id},\"toolName\":\"bash\",\
+                         \"toolCallId\":\"{call_id}\",\"parentToolCallId\":null,\
+                         \"input\":{{\"command\":\"touch x\"}}}}\n"
+                    );
+                    self.gate
+                        .get_mut()
+                        .write_all(line.as_bytes())
+                        .await
+                        .unwrap();
+                }
+
+                async fn decision(&mut self) -> Value {
+                    let mut line = String::new();
+                    tokio::time::timeout(Duration::from_secs(10), self.gate.read_line(&mut line))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    serde_json::from_str(&line).unwrap()
+                }
+
+                fn emitted(&mut self) -> Vec<ExecEvent> {
+                    std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+                }
+            }
+
+            fn tool_start(call_id: &str) -> Value {
+                json!({"type": "tool_execution_start", "toolCallId": call_id,
+                       "toolName": "bash", "args": {"command": "touch x"}})
+            }
+
+            async fn next_call(player: &mut Player<'_>) -> GateCall {
+                let gate = player.run.gate.as_mut();
+                tokio::time::timeout(Duration::from_secs(10), gate_next(gate))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+
+            #[tokio::test]
+            async fn a_call_that_comes_before_its_tool_event_is_raised_only_after_it() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                assert!(player.parked.is_some());
+                player.frame(tool_start("other")).await.unwrap();
+                assert!(
+                    player.parked.is_some(),
+                    "another call's start releases nothing"
+                );
+                player.frame(tool_start("c1")).await.unwrap();
+                assert!(player.parked.is_none());
+                let events = rig.emitted();
+                let kinds: Vec<(&str, &str)> = events
+                    .iter()
+                    .map(|event| match event {
+                        ExecEvent::Tool { id, .. } => ("tool", id.as_str()),
+                        ExecEvent::NeedsApproval { request_id, .. } => {
+                            ("approval", request_id.as_str())
+                        }
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    kinds,
+                    [("tool", "other"), ("tool", "c1"), ("approval", "gate-1")]
+                );
+            }
+
+            #[tokio::test]
+            async fn a_call_whose_tool_event_came_first_is_raised_at_once() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                player.frame(tool_start("c1")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                assert!(player.parked.is_none());
+                assert!(matches!(
+                    rig.emitted().last(),
+                    Some(ExecEvent::NeedsApproval { .. })
+                ));
+            }
+
+            #[tokio::test]
+            async fn a_cancel_while_a_call_is_parked_denies_it_and_raises_nothing() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                player.interrupt().await;
+                assert!(player.parked.is_none());
+                // Its start turning up afterwards raises nothing.
+                player.frame(tool_start("c1")).await.unwrap();
+                let decision = rig.decision().await;
+                assert_eq!(decision["id"], 1);
+                assert_eq!(decision["decision"], "deny");
+                assert_eq!(decision["reason"], RUN_STOPPED);
+                assert!(
+                    rig.emitted()
+                        .iter()
+                        .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
+                );
+            }
+
+            #[tokio::test]
+            async fn the_gate_is_not_read_while_a_call_is_parked_and_is_again_once_it_is_released()
+            {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                rig.send_call(2, "c2").await;
+                let mut player = rig.player();
+                assert!(player.reading_gate());
+                let first = next_call(&mut player).await;
+                assert_eq!(first.id, 1);
+                player.hold(first).await.unwrap();
+                assert!(!player.reading_gate(), "paused while c1 waits");
+                player.frame(tool_start("c1")).await.unwrap();
+                assert!(player.reading_gate(), "released");
+                let second = next_call(&mut player).await;
+                assert_eq!(second.id, 2);
+            }
         }
     }
 }

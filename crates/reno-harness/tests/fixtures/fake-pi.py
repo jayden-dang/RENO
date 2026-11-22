@@ -16,12 +16,16 @@ prompt arrives is logged.
 Armed, a run plays Pi's tool loop through the gate: for each scripted tool it emits
 `tool_execution_start`, sends the gate's call line and waits for the decision; on `allow` it runs
 the tool (only `bash` has an effect: it runs the command) and logs it, on a deny it ends the tool
-with an error carrying the reason. Scenarios: `gate-coverage` (one call of every kind, siblings one
-at a time and a codemode call with nested ones), `gate-200` (200 reads), `gate-hold` (three calls
-sent together, left open until the run is stopped; every decision is logged to the end of the
-connection), `gate-late` (a second call made while the run is being stopped) and `gate-drop` (the gate's connection closes mid-run) and `gate-flood` (a broken gate that sends 17
-calls without waiting). Every decision
-the gate receives is logged as `gate_decision`.
+with an error carrying the reason. Every decision the gate receives is logged as `gate_decision`.
+Scenarios:
+- `gate-coverage`: one call of every kind, siblings one at a time, a codemode call with nested ones.
+- `gate-200`: 200 reads.
+- `gate-home`: a read of a `~` path.
+- `gate-call-first`: three reads whose call line goes out before their start frame.
+- `gate-hold`: three calls sent together and left open until the run is stopped.
+- `gate-late`: a second call made while the run is being stopped.
+- `gate-drop`: the gate's connection closes mid-run.
+- `gate-flood`: a broken gate that sends 17 calls without waiting.
 """
 import json
 import os
@@ -392,6 +396,17 @@ def play_gate(prompt, cmd):
     elif prompt == "scenario:gate-home":
         gated_tool("g-home", "read", {"path": "~/.reno/secret"})
         assistant("gate-home-done")
+    elif prompt == "scenario:gate-call-first":
+        for n in (1, 2, 3):
+            call_id, args = "first-%d" % n, {"path": "first%d.txt" % n}
+            gate_send("read", args, call_id)
+            tool_start(call_id, "read", args)
+            decision = gate_decision()
+            if decision is None:
+                sys.exit(3)
+            tool_end(call_id, "read", "ran" if decision["decision"] == "allow" else "blocked",
+                     error=decision["decision"] != "allow")
+        assistant("call-first-done")
     elif prompt == "scenario:gate-hold":
         for n in (1, 2, 3):
             call_id = "h-%d" % n
