@@ -21,7 +21,9 @@ use gpui::{
 };
 
 use super::RunScreen;
-use crate::actions::{End, Home, LineDown, LineUp, NextPrompt, PageDown, PageUp, PrevPrompt};
+use crate::actions::{
+    End, FocusRunInput, Home, LineDown, LineUp, NextPrompt, OpenMenu, PageDown, PageUp, PrevPrompt,
+};
 use crate::transcript::Key;
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
@@ -53,6 +55,8 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, Some(CONTEXT)),
         KeyBinding::new("shift-pageup", PrevPrompt, Some(CONTEXT)),
         KeyBinding::new("shift-pagedown", NextPrompt, Some(CONTEXT)),
+        KeyBinding::new("shift-f10", OpenMenu, Some(CONTEXT)),
+        KeyBinding::new("tab", FocusRunInput, Some(CONTEXT)),
     ]);
 }
 
@@ -100,8 +104,7 @@ impl RunScreen {
             .collect();
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_selection(&self) -> bool {
+    pub(super) fn has_selection(&self) -> bool {
         self.select.current.is_some_and(|s| !s.is_empty())
     }
 
@@ -547,7 +550,6 @@ impl RunScreen {
     }
 
     /// "Copy as Markdown": the selection's source bytes on the clipboard.
-    #[cfg_attr(not(test), expect(dead_code))] // The transcript's context menu calls it (Task 17).
     pub(super) fn copy_markdown(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = self.selected_source() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -563,6 +565,10 @@ impl RunScreen {
             .size_0()
             .key_context(CONTEXT)
             .track_focus(&self.transcript_focus)
+            .on_action(cx.listener(|this, _: &FocusRunInput, w, cx| this.focus_run_input(w, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenMenu, w, cx| this.open_transcript_menu_by_key(w, cx)),
+            )
             .on_action(cx.listener(|this, _: &CopyTranscript, _, cx| this.copy_selection(cx)))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.key_page(-1, cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.key_page(1, cx)))

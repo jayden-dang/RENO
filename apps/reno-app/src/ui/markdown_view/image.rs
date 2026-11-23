@@ -17,11 +17,15 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use gpui::{AnyElement, App, ImageFormat, SharedString, Task, div, img, prelude::*, px};
+use gpui::{
+    AnyElement, App, Div, ImageFormat, MouseButton, SharedString, Stateful, Task, div, img,
+    prelude::*, px,
+};
 use reno_client::Client;
 use reno_proto::RunId;
 
-use super::link::{self, Action, LinkPolicy};
+use super::Host;
+use super::link::{self, Action};
 use super::lru::Lru;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::theme::Theme;
@@ -260,11 +264,13 @@ pub(crate) fn view(
     src: &str,
     wrapper: Option<&str>,
     host: &ImageHost,
-    policy: &LinkPolicy,
+    markdown: &Host,
     theme: &Theme,
     cx: &mut App,
 ) -> AnyElement {
-    let action = wrapper.map(|url| policy.action(url));
+    let wrapped = wrapper
+        .map(|url| (markdown.links.action(url), url))
+        .filter(|(action, _)| *action != Action::Plain);
     let body = match classify(src) {
         Classified::Source(source) => match resolve(&source, host, cx) {
             Shown::Ready(image) => picture(image).into_any_element(),
@@ -272,45 +278,49 @@ pub(crate) fn view(
             Shown::Failed => failed_note(theme, not_loaded_text(alt, src)),
         },
         Classified::Remote { url, host: site } => {
-            return link_card(alt, &url, &site, action, policy, theme);
+            let (action, target) = wrapped.unwrap_or_else(|| (markdown.links.action(&url), &url));
+            return clickable(link_card(alt, &url, &site, theme), action, target, markdown);
         }
         Classified::Refused => failed_note(theme, not_loaded_text(alt, src)),
     };
-    match action.filter(|a| *a != Action::Plain) {
-        Some(action) => clickable(body, action, policy, alt),
+    match wrapped {
+        Some((action, target)) => clickable(
+            div()
+                .id(SharedString::from(format!("md-image-link-{alt}")))
+                .child(body),
+            action,
+            target,
+            markdown,
+        ),
         None => body,
     }
 }
 
-fn clickable(body: AnyElement, action: Action, policy: &LinkPolicy, label: &str) -> AnyElement {
-    let policy = policy.clone();
-    div()
-        .id(SharedString::from(format!("md-image-link-{label}")))
-        .cursor_pointer()
-        .child(body)
+fn clickable(body: Stateful<Div>, action: Action, target: &str, markdown: &Host) -> AnyElement {
+    if action == Action::Plain {
+        return body.into_any_element();
+    }
+    let policy = markdown.links.clone();
+    let target = target.to_owned();
+    body.cursor_pointer()
         .on_click(move |_, window, cx| policy.run(&action, window, cx))
+        .when_some(markdown.link_menu.clone(), |card, menu| {
+            card.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                menu.open(Some(&target), event, window, cx);
+            })
+        })
         .into_any_element()
 }
 
 /// A web image as a card: its alt text and host. It opens the page the image names, or the
 /// link around it, only through the host's policy; nothing is fetched.
-fn link_card(
-    alt: &str,
-    url: &str,
-    site: &str,
-    wrapper: Option<Action>,
-    policy: &LinkPolicy,
-    theme: &Theme,
-) -> AnyElement {
-    let action = wrapper
-        .filter(|a| *a != Action::Plain)
-        .unwrap_or_else(|| policy.action(url));
+fn link_card(alt: &str, url: &str, site: &str, theme: &Theme) -> Stateful<Div> {
     let title = if alt.trim().is_empty() {
         "Image"
     } else {
         alt.trim()
     };
-    let card = div()
+    div()
         .id(SharedString::from(format!("md-image-card-{url}")))
         .debug_selector(|| "md-image-card".to_owned())
         .flex()
@@ -340,14 +350,7 @@ fn link_card(
                         .text_color(theme.faint)
                         .child(site.to_owned()),
                 ),
-        );
-    if action == Action::Plain {
-        return card.into_any_element();
-    }
-    let policy = policy.clone();
-    card.cursor_pointer()
-        .on_click(move |_, window, cx| policy.run(&action, window, cx))
-        .into_any_element()
+        )
 }
 
 #[cfg(test)]

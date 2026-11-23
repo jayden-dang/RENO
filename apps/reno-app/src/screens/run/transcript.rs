@@ -201,6 +201,8 @@ impl RunScreen {
                 let client = self.store.read(cx).client();
                 let screen = cx.weak_entity();
                 let note_screen = screen.clone();
+                let link_screen = screen.clone();
+                let reply = *key;
                 let host =
                     Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
                         .when_grown(Some(Grew(Rc::new(move |cx| {
@@ -217,6 +219,13 @@ impl RunScreen {
                                 .update(cx, |this, cx| this.reveal_footnote(note, cx))
                                 .ok();
                         })
+                        .on_link_menu(move |target, at, window, cx| {
+                            link_screen
+                                .update(cx, |this, cx| {
+                                    this.open_transcript_menu(at, target, Some(reply), window, cx);
+                                })
+                                .ok();
+                        })
                         .while_streaming(streaming)
                         .marked(self.find_marks(*key))
                         .selectable(Some(Rc::new(SelectHost {
@@ -231,6 +240,22 @@ impl RunScreen {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener({
+                            let key = *key;
+                            move |this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.open_transcript_menu(
+                                    event.position,
+                                    None,
+                                    Some(key),
+                                    window,
+                                    cx,
+                                );
+                            }
+                        }),
+                    )
                     .child(
                         div()
                             .text_size(px(15.0))

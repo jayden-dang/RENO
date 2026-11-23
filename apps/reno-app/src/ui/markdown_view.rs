@@ -17,8 +17,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText,
-    IntoElement, Pixels, RenderOnce, SharedString, StrikethroughStyle, StyledText, TextRun,
-    UnderlineStyle, Window, div, prelude::*, px,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, RenderOnce, SharedString,
+    StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*, px,
 };
 use reno_client::Client;
 use reno_markdown::mend::PENDING_LINK_URL;
@@ -120,6 +120,7 @@ pub(crate) struct Host {
     /// stop following.
     pub(crate) grew: Option<Grew>,
     footnotes: Option<FootnoteNavigation>,
+    link_menu: Option<LinkMenu>,
 }
 
 /// What a host does when something the owner opened grows what it shows.
@@ -140,6 +141,30 @@ struct FootnoteNavigation(Rc<RevealFootnote>);
 impl std::fmt::Debug for FootnoteNavigation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("FootnoteNavigation")
+    }
+}
+
+type OpenLinkMenu = dyn Fn(Option<&str>, Point<Pixels>, &mut Window, &mut App);
+
+#[derive(Clone)]
+struct LinkMenu(Rc<OpenLinkMenu>);
+
+impl std::fmt::Debug for LinkMenu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkMenu")
+    }
+}
+
+impl LinkMenu {
+    fn open(
+        &self,
+        target: Option<&str>,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        cx.stop_propagation();
+        (self.0)(target, event.position, window, cx);
     }
 }
 
@@ -191,6 +216,7 @@ impl Host {
             select: None,
             grew: None,
             footnotes: None,
+            link_menu: None,
         }
     }
 
@@ -210,6 +236,7 @@ impl Host {
             select: None,
             grew: None,
             footnotes: None,
+            link_menu: None,
         }
     }
 
@@ -236,6 +263,14 @@ impl Host {
         reveal: impl Fn(Bounds<Pixels>, &mut App) + 'static,
     ) -> Self {
         self.footnotes = Some(FootnoteNavigation(Rc::new(reveal)));
+        self
+    }
+
+    pub(crate) fn on_link_menu(
+        mut self,
+        open: impl Fn(Option<&str>, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.link_menu = Some(LinkMenu(Rc::new(open)));
         self
     }
 
@@ -609,7 +644,7 @@ fn paragraph(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
             &shown.source,
             shown.link.as_deref(),
             images,
-            &env.host.links,
+            env.host,
             env.theme,
             cx,
         ));
@@ -1261,7 +1296,7 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
 }
 
 enum InlineAction {
-    Link(Action),
+    Link(Action, String),
     Footnote(usize),
 }
 
@@ -1350,10 +1385,12 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
             || (style.link.is_some()
                 && (matches!(policy, LinkPolicy::Preview)
                     || style.link.as_deref() == Some(PENDING_LINK_URL)));
-        if let Some(action) = footnote
-            .map(InlineAction::Footnote)
-            .or_else(|| action.map(InlineAction::Link))
-        {
+        if let Some(action) = footnote.map(InlineAction::Footnote).or_else(|| {
+            action.map(|action| {
+                let target = style.link.as_deref().unwrap_or(&run.text).to_owned();
+                InlineAction::Link(action, target)
+            })
+        }) {
             links.push((from..from + shown.len(), action));
         }
         spans.push(TextRun {
@@ -1381,28 +1418,61 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
     let spans = highlight_runs(spans, &layers(env, &segs, text.len(), &finds));
     let styled = StyledText::new(SharedString::from(text.clone())).with_runs(spans);
     let layout = styled.layout().clone();
-    let element = if links.is_empty() {
-        styled.into_any_element()
-    } else {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let (ranges, actions): (Vec<_>, Vec<_>) = links.into_iter().unzip();
-        let policy = policy.clone();
-        let navigation = env.host.footnotes.clone();
-        let bounds = env.footnote_bounds.clone();
-        InteractiveText::new(("md-text", hasher.finish() as usize), styled)
-            .on_click(ranges, move |ix, window, cx| match actions.get(ix) {
-                Some(InlineAction::Link(action)) => policy.run(action, window, cx),
-                Some(InlineAction::Footnote(target)) => {
-                    let destination = bounds.borrow().get(*target).copied();
-                    if let (Some(navigation), Some(destination)) = (&navigation, destination) {
-                        (navigation.0)(destination, cx);
+    let element =
+        if links.is_empty() {
+            styled.into_any_element()
+        } else {
+            let targets = env.host.link_menu.clone().map(|menu| {
+                let targets = links
+                    .iter()
+                    .filter_map(|(range, action)| match action {
+                        InlineAction::Link(_, target) => Some((range.clone(), target.clone())),
+                        InlineAction::Footnote(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                (menu, targets)
+            });
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            let (ranges, actions): (Vec<_>, Vec<_>) = links.into_iter().unzip();
+            let policy = policy.clone();
+            let navigation = env.host.footnotes.clone();
+            let bounds = env.footnote_bounds.clone();
+            let text = InteractiveText::new(("md-text", hasher.finish() as usize), styled)
+                .on_click(ranges, move |ix, window, cx| match actions.get(ix) {
+                    Some(InlineAction::Link(action, _)) => policy.run(action, window, cx),
+                    Some(InlineAction::Footnote(target)) => {
+                        let destination = bounds.borrow().get(*target).copied();
+                        if let (Some(navigation), Some(destination)) = (&navigation, destination) {
+                            (navigation.0)(destination, cx);
+                        }
                     }
-                }
-                None => {}
-            })
-            .into_any_element()
-    };
+                    None => {}
+                });
+            if let Some((menu, targets)) = targets {
+                let layout = layout.clone();
+                div()
+                    .child(text)
+                    .capture_any_mouse_down(move |event, window, cx| {
+                        if event.button == MouseButton::Right {
+                            let target =
+                                layout
+                                    .index_for_position(event.position)
+                                    .ok()
+                                    .and_then(|ix| {
+                                        targets.iter().find_map(|(r, target)| {
+                                            r.contains(&ix).then_some(target.as_str())
+                                        })
+                                    });
+                            // InteractiveText accepts mouse presses from every button.
+                            menu.open(target, event, window, cx);
+                        }
+                    })
+                    .into_any_element()
+            } else {
+                text.into_any_element()
+            }
+        };
     let element = tracked(env, element, layout.clone(), segs);
     if overlays.is_empty() {
         element

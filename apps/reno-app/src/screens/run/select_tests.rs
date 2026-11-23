@@ -581,3 +581,333 @@ fn triple_click_in_a_reply_copies_the_closing_marker_of_the_paragraph_as_markdow
         "the closing backtick comes with the row: {source:?}"
     );
 }
+
+fn right_click(vcx: &mut VisualTestContext, at: Point<gpui::Pixels>) {
+    vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    draw(vcx);
+}
+
+fn choose_menu_row(vcx: &mut VisualTestContext, row: &str) {
+    crate::tests::click(vcx, row);
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+}
+
+#[gpui::test]
+fn right_click_offers_copy_message_on_a_reply_and_copy_on_a_selection(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let (prompt, reply) = centres(vcx, &screen);
+
+    right_click(vcx, prompt);
+    assert!(painted(vcx, "transcript-menu"));
+    for row in [
+        "transcript-menu-open",
+        "transcript-menu-copy-link",
+        "transcript-menu-copy",
+        "transcript-menu-copy-as-markdown",
+        "transcript-menu-copy-message",
+    ] {
+        assert!(!painted(vcx, row), "{row}");
+    }
+    assert!(painted(vcx, "transcript-menu-scroll-to-bottom"));
+
+    right_click(vcx, reply);
+    assert!(painted(vcx, "transcript-menu-copy-message"));
+    choose_menu_row(vcx, "transcript-menu-copy-message");
+    assert_eq!(clipboard(vcx).as_deref(), Some(RENDER_REPLY));
+
+    let at = on_text(vcx, &screen, FIRST_PARAGRAPH);
+    press(vcx, at, 3, Modifiers::none());
+    right_click(vcx, reply);
+    choose_menu_row(vcx, "transcript-menu-copy");
+    assert_eq!(clipboard(vcx).as_deref(), Some(FIRST_PARAGRAPH));
+
+    right_click(vcx, reply);
+    choose_menu_row(vcx, "transcript-menu-copy-as-markdown");
+    assert_eq!(clipboard(vcx).as_deref(), Some(FIRST_PARAGRAPH));
+
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()));
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-as-markdown"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert_eq!(clipboard(vcx).as_deref(), Some(FIRST_PARAGRAPH));
+}
+
+fn append_reply(
+    vcx: &mut VisualTestContext,
+    store: &Entity<Store>,
+    screen: &Entity<RunScreen>,
+    reply: &str,
+) {
+    use reno_proto::{ExecEvent, Seq, SessionRef, StopReason};
+
+    let run = run_id(RENDER_RUN);
+    wait_for(vcx, "the seeded reply is complete", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.rows().iter().any(|row| matches!(row, Row::Done { .. }))
+        })
+    });
+    for event in [
+        ExecEvent::Resumed {
+            from_attempt: 0,
+            session: SessionRef("menu".into()),
+        },
+        ExecEvent::Text { text: reply.into() },
+        ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        },
+    ] {
+        store.update(vcx, |s, cx| {
+            let seq = s
+                .state()
+                .transcript(&run)
+                .and_then(|t| t.highest)
+                .and_then(Seq::next)
+                .unwrap_or(Seq(1));
+            s.apply(
+                reno_client::Update::RunEvent {
+                    run: run.clone(),
+                    seq,
+                    event,
+                },
+                cx,
+            );
+        });
+    }
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+}
+
+#[gpui::test]
+fn the_transcript_menu_copies_link_destinations_and_opens_them_through_their_handlers(
+    cx: &mut TestAppContext,
+) {
+    const WEB: &str = "https://example.com/docs?q=1";
+    const FILE: &str = "./src/supervisor.rs#L42";
+    const INLINE: &str = "src/supervisor.rs:42";
+    const IMAGE: &str = "https://example.com/badge.png";
+    const REPLY: &str = "See [the guide](https://example.com/docs?q=1), [source file](./src/supervisor.rs#L42), and `src/supervisor.rs:42`.
+
+Write to [the mailbox](mailto:team@example.com).
+
+![remote badge](https://example.com/badge.png)";
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, REPLY);
+    wait_for(vcx, "the worktree file resolved", |vcx| {
+        screen.read_with(vcx, |s, cx| s.file_resolves("src/supervisor.rs", cx))
+    });
+
+    let web = on_text(vcx, &screen, "the guide");
+    let file = on_text(vcx, &screen, "source file");
+    let inline = on_text(vcx, &screen, INLINE);
+    let image = vcx.debug_bounds("md-image-card").unwrap().center();
+    for (at, url) in [(web, WEB), (file, FILE), (inline, INLINE), (image, IMAGE)] {
+        right_click(vcx, at);
+        assert!(painted(vcx, "transcript-menu-open"), "{url}");
+        assert!(painted(vcx, "transcript-menu-copy-message"), "{url}");
+        choose_menu_row(vcx, "transcript-menu-copy-link");
+        assert_eq!(clipboard(vcx).as_deref(), Some(url));
+    }
+    for text in ["the mailbox", "Write to"] {
+        let at = on_text(vcx, &screen, text);
+        right_click(vcx, at);
+        assert!(painted(vcx, "transcript-menu-copy-message"));
+        assert!(!painted(vcx, "transcript-menu-open"));
+        assert!(!painted(vcx, "transcript-menu-copy-link"));
+        choose_menu_row(vcx, "transcript-menu-copy-message");
+    }
+
+    assert!(
+        recording.opened.borrow().is_empty(),
+        "right-clicking and copying do not activate a link"
+    );
+    right_click(vcx, web);
+    choose_menu_row(vcx, "transcript-menu-open");
+    assert_eq!(recording.opened.borrow().as_slice(), [WEB]);
+
+    right_click(vcx, file);
+    choose_menu_row(vcx, "transcript-menu-open");
+    let (active, opened) = screen.read_with(vcx, |s, _| {
+        (
+            s.panel_state().active().clone(),
+            s.files_model()
+                .and_then(|model| model.doc().map(|doc| (doc.path.clone(), doc.line))),
+        )
+    });
+    assert_eq!(active, crate::panel::surface::Surface::Files);
+    assert_eq!(opened, Some(("src/supervisor.rs".to_owned(), Some(42))));
+}
+
+#[gpui::test]
+fn the_transcript_menu_copies_a_selection_across_a_hoisted_footnote_in_reading_order(
+    cx: &mut TestAppContext,
+) {
+    const REPLY: &str = "Read this[^note].
+
+[^note]: Café from the real note.
+
+Skip this line.
+
+**Only the painted tail.**";
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, REPLY);
+    let (tail, note) = screen.read_with(vcx, |s, _| {
+        (
+            s.painted_point("the painted tail.", 0).unwrap(),
+            s.painted_point("Café from", "Café".len()).unwrap(),
+        )
+    });
+    vcx.simulate_mouse_down(tail, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(note, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(note, MouseButton::Left, Modifiers::none());
+    draw(vcx);
+
+    for (row, expected) in [
+        (
+            "transcript-menu-copy",
+            "the painted tail.
+
+Café",
+        ),
+        (
+            "transcript-menu-copy-as-markdown",
+            "the painted tail.**
+
+[^note]: Café",
+        ),
+        ("transcript-menu-copy-message", REPLY),
+    ] {
+        right_click(vcx, note);
+        choose_menu_row(vcx, row);
+        assert_eq!(clipboard(vcx).as_deref(), Some(expected));
+    }
+}
+
+#[gpui::test]
+fn shift_f10_opens_the_transcript_menu_and_arrows_and_enter_pick(cx: &mut TestAppContext) {
+    use crate::panel::persist::{PanelStore, path_in};
+    use crate::panel::saved::Saved;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = path_in(tmp.path());
+    cx.update(|cx| Saved::install(path.clone(), cx));
+    let (_store, _root, vcx, screen) = open(cx);
+    let key = screen.read_with(vcx, |s, _| s.panel_key().clone());
+    let persisted = |vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| Saved::flush(cx));
+        PanelStore::load(&path)
+            .0
+            .get(&key)
+            .and_then(|panel| panel.place)
+    };
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "transcript-menu"),
+        "the composer owns the keyboard"
+    );
+    for _ in 0..12 {
+        vcx.simulate_keystrokes("shift-tab");
+        draw(vcx);
+        vcx.simulate_keystrokes("shift-f10");
+        draw(vcx);
+        if painted(vcx, "transcript-menu") {
+            break;
+        }
+    }
+    assert!(
+        painted(vcx, "transcript-menu"),
+        "reachable without a pointer or selection"
+    );
+
+    let before = screen.read_with(vcx, |s, _| s.scroll_offset());
+    vcx.simulate_keystrokes("down up escape");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert_eq!(screen.read_with(vcx, |s, _| s.scroll_offset()), before);
+
+    // Escape restores transcript focus, so Down scrolls again after the menu closes.
+    vcx.simulate_keystrokes("down");
+    draw(vcx);
+    assert_ne!(screen.read_with(vcx, |s, _| s.scroll_offset()), before);
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-scroll-to-top"));
+    assert!(painted(vcx, "transcript-menu-scroll-to-bottom"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    assert_eq!(persisted(vcx), None);
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-scroll-to-top"));
+    assert!(!painted(vcx, "transcript-menu-scroll-to-bottom"));
+    vcx.simulate_keystrokes("up enter");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert_eq!(screen.read_with(vcx, |s, _| s.scroll_offset()), before);
+    let place = screen.read_with(vcx, |s, _| s.saved_place());
+    assert!(place.is_some());
+    assert_eq!(persisted(vcx), place);
+}
+
+#[gpui::test]
+fn tab_navigation_between_the_composer_and_transcript_stays_within_the_run(
+    cx: &mut TestAppContext,
+) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let transcript_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| screen.read(cx).transcript_focus.is_focused(window))
+    };
+    let composer_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window))
+    };
+    assert!(composer_focused(vcx));
+    for _ in 0..2 {
+        vcx.simulate_keystrokes("shift-tab");
+        draw(vcx);
+        assert!(transcript_focused(vcx));
+        for _ in 0..12 {
+            vcx.simulate_keystrokes("shift-tab");
+            draw(vcx);
+        }
+        assert!(transcript_focused(vcx));
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+        assert!(composer_focused(vcx));
+        for _ in 0..12 {
+            vcx.simulate_keystrokes("tab");
+            draw(vcx);
+        }
+        assert!(composer_focused(vcx));
+    }
+
+    let composer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+    vcx.simulate_keystrokes("cmd-a");
+    vcx.simulate_input("@src/superv");
+    wait_for(vcx, "the composer suggests the worktree file", |vcx| {
+        composer.read_with(vcx, |c, _| {
+            c.completion_labels()
+                .is_some_and(|labels| labels == ["src/supervisor.rs"])
+        })
+    });
+    vcx.simulate_keystrokes("tab");
+    draw(vcx);
+    assert!(composer_focused(vcx));
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.text().to_owned()),
+        "@src/supervisor.rs "
+    );
+}
