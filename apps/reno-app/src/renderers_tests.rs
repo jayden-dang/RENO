@@ -468,6 +468,111 @@ fn a_worktree_image_is_read_through_the_daemon_for_the_run_and_shown(cx: &mut Te
     }
 }
 
+fn data_svg(svg: &str) -> String {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.encode(svg);
+    format!("data:image/svg+xml;base64,{bytes}")
+}
+
+const DOT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
+
+#[gpui::test]
+fn a_worktree_svg_draws(cx: &mut TestAppContext) {
+    let store = fake_with_transcript(cx);
+    let run = run_id(reno_client::fake::transcript::RENDER2_RUN);
+    let client = store.read_with(cx, |s, _| s.client());
+    let host = Host::transcript(Some(run), client, None);
+    let (_view, vcx) = probe(cx, "![flow](docs/flow.svg)", host.clone(), Appearance::Dark);
+    settle(vcx, |vcx| {
+        painted(vcx, "md-image") || painted(vcx, "md-image-not-loaded")
+    });
+    assert!(
+        painted(vcx, "md-image"),
+        "Markdown should draw the worktree SVG"
+    );
+
+    for source in [
+        VisualImage::Worktree("docs/flow.svg".to_owned()),
+        VisualImage::Data {
+            mime: "image/svg+xml".into(),
+            bytes: DOT_SVG.as_bytes().to_vec(),
+        },
+    ] {
+        let host = host.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| ProbeVisual {
+            visual: Visual {
+                id: "refused-svg".into(),
+                caption: "An SVG".into(),
+                after: reno_proto::Seq(1),
+                kind: VisualKind::Image(source),
+            },
+            host,
+            theme: Theme::for_appearance(Appearance::Dark),
+        });
+        settle(vcx, |vcx| {
+            painted(vcx, "md-image") || painted(vcx, "md-visual-failed")
+        });
+        assert!(
+            painted(vcx, "md-visual-failed"),
+            "posted SVG remains refused"
+        );
+        assert!(!painted(vcx, "md-image"));
+    }
+}
+
+#[gpui::test]
+fn a_data_svg_draws_the_same_way(cx: &mut TestAppContext) {
+    let source = format!("![dot]({})", data_svg(DOT_SVG));
+    let (_view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-image"));
+}
+
+#[gpui::test]
+fn an_svg_whose_image_href_names_a_file_outside_the_worktree_paints_nothing(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("outside.svg");
+    std::fs::write(&path, DOT_SVG).unwrap();
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+          <image href="{}" width="10" height="10"/>
+        </svg>"#,
+        path.display()
+    );
+    let source = format!("![outside]({})", data_svg(&svg));
+    let (_view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-image-not-loaded"));
+    assert!(!painted(vcx, "md-image"));
+}
+
+#[gpui::test]
+fn an_image_wrapped_in_a_link_follows_the_link(cx: &mut TestAppContext) {
+    let hits = Rc::new(links::fake::Recording::default());
+    cx.update(|cx| links::install(cx, hits.clone()));
+    let target = "https://example.org/reference";
+    let source = format!("[![dot]({})]({target})", data_svg(DOT_SVG));
+    let (_view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-image"));
+    click(vcx, "md-image");
+    assert_eq!(*hits.opened.borrow(), [target.to_owned()]);
+}
+
 #[gpui::test]
 fn the_fake_posts_visuals_only_while_the_capability_is_on(cx: &mut TestAppContext) {
     let store = fake_with_transcript(cx);
