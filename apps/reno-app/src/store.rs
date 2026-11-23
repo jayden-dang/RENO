@@ -40,6 +40,7 @@ use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::places::{AddProjectError, Place, PlaceDesk, Project, ProjectFacts};
 use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
 use reno_client::thread_desk::{ThreadDesk, ThreadEditError, ThreadMarks};
+use reno_client::visuals::{Visual, VisualDesk};
 use reno_client::{
     Changed, Client, ClientError, ConnectionStatus, Connector, Feed, FeedState, Mirror,
     MirrorConfig, Offline, OfflineKind, State, Transcript, Update, Updates,
@@ -527,6 +528,25 @@ impl Store {
         self.fake.as_deref().map(|fake| fake as &dyn ActivityDesk)
     }
 
+    /// The mocked agent-posted visuals (ROAD-33): only where [`Capabilities::agent_visuals`] is
+    /// on. The real daemon has no such contract, so this is `None` there and the transcript
+    /// shows no visuals and no placeholder.
+    #[allow(dead_code)] // The transcript reads visuals through `run_visuals` (ROAD-33 wiring).
+    fn visual_desk(&self) -> Option<&dyn VisualDesk> {
+        if !self.capabilities.agent_visuals {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn VisualDesk)
+    }
+
+    /// The visuals `run` posted, in order; empty when this connection offers none.
+    #[allow(dead_code)] // The transcript inserts them after their entry (ROAD-33 wiring).
+    pub(crate) fn run_visuals(&self, run: &RunId) -> Vec<Visual> {
+        self.visual_desk()
+            .map(|desk| desk.visuals(run))
+            .unwrap_or_default()
+    }
+
     /// The run's plan, background tasks and agents; `None` when this connection has no such
     /// contract or the run has none of them.
     pub(crate) fn run_activity(&self, run: &RunId) -> Option<RunActivity> {
@@ -968,7 +988,9 @@ impl Store {
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
     /// The `--fake` demo world: a first run (five agents, three of them ready; `renod` 0.4.1
     /// running with 0.4.2 installed), with the sidebar's demo threads (pinned, archived, a
-    /// project with fourteen).
+    /// project with fourteen), and the transcript demo world (ROAD-33: a thread of 2,000 events, a
+    /// render check, the files they link to). Tests use [`Store::start_fake_with`], which has
+    /// none of it unless a test asks.
     pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
@@ -977,6 +999,7 @@ impl Store {
                 question_demo_runs: true,
                 activity_runs: true,
                 sidebar_threads: true,
+                transcript_threads: true,
                 ..FakeConfig::default()
             },
             cx,

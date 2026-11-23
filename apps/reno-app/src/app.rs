@@ -258,10 +258,14 @@ impl Options {
     }
 }
 
+/// The Geist regular face. Registered with GPUI below and also read by the diagram renderer, which
+/// measures and rasterises labels in the font the app draws everything else in.
+pub(crate) const GEIST_REGULAR: &[u8] = include_bytes!("../assets/fonts/Geist.ttf");
+
 /// Registers Geist and Geist Mono (SIL OFL, see `assets/fonts/Geist-OFL.txt`).
 pub(crate) fn register_fonts(cx: &mut App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
-        Cow::Borrowed(include_bytes!("../assets/fonts/Geist.ttf").as_slice()),
+        Cow::Borrowed(GEIST_REGULAR),
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Medium.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-SemiBold.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono.ttf").as_slice()),
@@ -1618,6 +1622,18 @@ impl RootView {
         }
     }
 
+    /// Closes the run screen's find bar if it is open. Whether it was.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Screen::Run(run) = &self.screen else {
+            return false;
+        };
+        run.update(cx, |run, cx| {
+            let was = run.find_is_open();
+            run.close_find(window, cx);
+            was
+        })
+    }
+
     /// ⌘W: the run panel's tab when the panel is open, else the window.
     fn close_tab_or_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panel_open = match &self.screen {
@@ -2022,14 +2038,18 @@ impl Render for RootView {
 
         div()
             .id("root")
-            .key_context(if self.sidebar.any_open() {
-                gpui::KeyContext::parse(&format!("Root {}", actions::SIDEBAR_OPEN))
-                    .unwrap_or_default()
-            } else if self.restart_open {
-                gpui::KeyContext::parse(&format!("Root {}", crate::ui::restart::OPEN_CONTEXT))
-                    .unwrap_or_default()
-            } else {
-                gpui::KeyContext::parse("Root").unwrap_or_default()
+            .key_context({
+                let mut context = String::from("Root");
+                if self.sidebar.any_open() {
+                    context = format!("Root {}", actions::SIDEBAR_OPEN);
+                } else if self.restart_open {
+                    context = format!("Root {}", crate::ui::restart::OPEN_CONTEXT);
+                }
+                // While find is open in the run screen, Escape and ⌘G are its.
+                if matches!(&self.screen, Screen::Run(run) if run.read(cx).find_is_open()) {
+                    context = format!("{context} {}", crate::ui::find::OPEN_CONTEXT);
+                }
+                gpui::KeyContext::parse(&context).unwrap_or_default()
             })
             .track_focus(&self.focus_handle)
             .on_action(
@@ -2042,12 +2062,47 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &actions::DismissSidebar, w, cx| {
                 this.sidebar_act(sidebar::Act::Dismiss, w, cx);
             }))
-            // The composer lets Escape go when it has nothing to cancel: the draft takes it.
+            // The composer lets Escape go when it has nothing to cancel: the draft takes it. And
+            // when the find bar is open, Escape is the bar's (the composer lets it go).
             .on_action(cx.listener(|this, _: &composer::Cancel, w, cx| {
                 if this.sidebar.any_open() {
                     this.sidebar_act(sidebar::Act::Dismiss, w, cx);
-                } else {
+                } else if !this.close_find(w, cx) {
+                    // Nothing of the screen's was open: the draft takes it.
                     cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::CloseFind, w, cx| {
+                this.close_find(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindInTranscript, w, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.open_find(w, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindNext, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.find_step(true, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindPrevious, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.find_step(false, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleMatchCase, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.toggle_match_case(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleWholeWord, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.toggle_whole_word(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleRegex, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.toggle_regex(cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &actions::PinThread, w, cx| {

@@ -8,13 +8,17 @@ use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, pr
 use reno_proto::ToolOutput;
 
 use super::RunScreen;
+use super::select::Spot;
 use crate::transcript::{Key, Outcome, ToolEntry};
+use crate::ui::find as find_look;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::MONO;
 use crate::ui::theme::Theme;
 use crate::ui::toast;
 use crate::vm::changes as facts;
 use crate::vm::convo;
+use crate::vm::find;
+use crate::vm::selection::{Kind, Slot};
 
 /// Puts `text` on the clipboard and says so.
 pub(super) fn copy(cx: &mut gpui::App, text: String, what: &'static str) {
@@ -24,17 +28,20 @@ pub(super) fn copy(cx: &mut gpui::App, text: String, what: &'static str) {
 
 impl RunScreen {
     /// Opens or closes the output of one call, or shows all of it, and measures the row again.
+    /// Opening one while the view follows the tail stops following, so what grew stays in view.
     fn toggle_output(&mut self, key: Key, id: &str, full: bool, cx: &mut Context<Self>) {
         let set = if full {
             &mut self.outputs_full
         } else {
             &mut self.outputs_open
         };
-        if !set.remove(id) {
-            set.insert(id.to_owned());
+        let opening = !set.contains(&id.to_owned());
+        let following = self.list.is_following_tail();
+        set.toggle(id.to_owned());
+        self.reflow(key, cx);
+        if opening && following {
+            self.keep_in_view(key, cx);
         }
-        self.remeasure(key);
-        cx.notify();
     }
 
     /// One step of a tool group: a muted line with its icon, and under it, when the call printed
@@ -42,15 +49,55 @@ impl RunScreen {
     pub(super) fn step_row(
         &self,
         theme: &Theme,
-        key: Key,
+        (key, ln): (Key, usize),
         line: &convo::StepLine,
         calls: &[ToolEntry],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let call = line
+        let (at, call) = line
             .call
             .as_ref()
-            .and_then(|id| calls.iter().find(|c| &c.id == id));
+            .and_then(|id| calls.iter().enumerate().find(|(_, c)| &c.id == id))
+            .map_or((None, None), |(n, c)| (Some(n), Some(c)));
+        // The matches in the command or path the line shows. A match in a part of the label the
+        // line does not show (a run of edits says only "Edited 2 files") tints the whole line.
+        let hits = at.map_or_else(Vec::new, |n| {
+            self.find_highlights(key, find::Part::Label(n))
+        });
+        let (painted, unpainted) = match call.and_then(|c| convo::label_in_line(c, &line.text)) {
+            Some((label_at, line_at)) => {
+                let label_len = call.map_or(0, |c| c.label.trim_end().len());
+                let (inside, outside): (Vec<_>, Vec<_>) = hits
+                    .into_iter()
+                    .partition(|(r, _)| r.start >= label_at && r.end <= label_len);
+                let moved = inside
+                    .into_iter()
+                    .map(|(r, cur)| {
+                        (
+                            r.start - label_at + line_at..r.end - label_at + line_at,
+                            cur,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (moved, outside)
+            }
+            None => (Vec::new(), hits),
+        };
+        // A run of edits says only "Edited 2 files": where a match is in a file's path, the line
+        // names that file, with the match painted.
+        let edits = (line.icon == convo::StepIcon::Edit)
+            .then(|| convo::line_calls(calls).get(ln).cloned())
+            .flatten()
+            .and_then(|run| {
+                let verb = line.text.split(' ').next().unwrap_or("Edited");
+                convo::edit_line_with_hits(calls, run, verb, &|n| {
+                    self.find_highlights(key, find::Part::Label(n))
+                })
+            });
+        let (line_text, painted, unpainted) = match edits {
+            Some((text, shown)) => (text, shown, Vec::new()),
+            None => (line.text.clone(), painted, unpainted),
+        };
         let output = call.filter(|c| c.output.is_some());
         let shown = output.is_some_and(|c| self.outputs_open.contains(&c.id));
         let glyph = match line.icon {
@@ -88,13 +135,40 @@ impl RunScreen {
                     theme.faint
                 },
             ))
+            .when(!unpainted.is_empty(), |d| {
+                let current = unpainted.iter().any(|(_, cur)| *cur);
+                let tint = find_look::hit_style(theme, false)
+                    .background_color
+                    .unwrap_or(theme.raised);
+                d.bg(tint)
+                    .rounded(px(5.0))
+                    .px(px(6.0))
+                    .mx(px(-6.0))
+                    .border_l_2()
+                    .border_color(if current {
+                        theme.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+            })
             .child(
                 div()
                     .min_w_0()
                     .truncate()
                     .opacity(opacity)
                     .when(line.live, |d| d.debug_selector(|| "step-live".to_owned()))
-                    .child(SharedString::from(line.text.clone())),
+                    .child(self.text_piece(
+                        theme,
+                        Spot {
+                            key,
+                            slot: Slot::new(ln, Kind::Step),
+                            base: 0,
+                            len: 0,
+                            total: None,
+                        },
+                        &line_text,
+                        &painted,
+                    )),
             )
             .when(output.is_some(), |d| {
                 d.child(icon(
@@ -106,7 +180,7 @@ impl RunScreen {
         let block = output.filter(|_| shown).and_then(|c| {
             c.output
                 .as_ref()
-                .map(|out| self.output_block(theme, key, c, out, cx))
+                .map(|out| self.output_block(theme, (key, ln), (at.unwrap_or(0), c), out, cx))
         });
         div()
             .flex()
@@ -120,12 +194,13 @@ impl RunScreen {
     fn output_block(
         &self,
         theme: &Theme,
-        key: Key,
-        call: &ToolEntry,
+        (key, ln): (Key, usize),
+        (at, call): (usize, &ToolEntry),
         out: &ToolOutput,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = call.id.clone();
+        let hits = self.find_highlights(key, find::Part::Output(at));
         let failed = matches!(call.outcome, Outcome::Failed(_));
         let full = self.outputs_full.contains(&id);
         let folded = facts::fold(&out.text, facts::OUTPUT_LINES);
@@ -198,11 +273,28 @@ impl RunScreen {
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(ink)
-                    .children(body.split('\n').map(|line| {
-                        div()
-                            .min_h(px(18.0))
-                            .child(SharedString::from(line.to_owned()))
-                    })),
+                    .children({
+                        let mut start = 0;
+                        lines_with(body, &hits)
+                            .into_iter()
+                            .map(|(line, here)| {
+                                let base = start;
+                                start += line.len() + 1;
+                                div().min_h(px(18.0)).child(self.text_piece(
+                                    theme,
+                                    Spot {
+                                        key,
+                                        slot: Slot::new(ln, Kind::Output),
+                                        base,
+                                        len: line.len(),
+                                        total: Some(body.len()),
+                                    },
+                                    line,
+                                    &here,
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                    }),
             )
             .child(
                 div()
@@ -221,7 +313,18 @@ impl RunScreen {
                                 })
                                 .text_size(px(12.5))
                                 .text_color(theme.faint)
-                                .child(note),
+                                .child(self.text_piece(
+                                    theme,
+                                    Spot {
+                                        key,
+                                        slot: Slot::new(ln, Kind::Cut),
+                                        base: 0,
+                                        len: 0,
+                                        total: None,
+                                    },
+                                    &note,
+                                    &[],
+                                )),
                         )
                     })
                     .child(div().flex_1())
@@ -246,5 +349,39 @@ impl RunScreen {
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// Matches in a text, as byte ranges with whether each is the current one.
+type Marks = Vec<(std::ops::Range<usize>, bool)>;
+
+/// The lines of `body`, each with the matches that fall in it, as byte ranges of the line.
+fn lines_with<'a>(body: &'a str, hits: &[(std::ops::Range<usize>, bool)]) -> Vec<(&'a str, Marks)> {
+    let mut start = 0;
+    body.split('\n')
+        .map(|line| {
+            let end = start + line.len();
+            let here = hits
+                .iter()
+                .filter(|(r, _)| r.start >= start && r.end <= end)
+                .map(|(r, cur)| (r.start - start..r.end - start, *cur))
+                .collect();
+            start = end + 1;
+            (line, here)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lines_with;
+
+    #[test]
+    fn matches_are_put_on_the_line_they_are_in_with_line_relative_offsets() {
+        let lines = lines_with("ab\ncd needle\nef", &[(6..12, true)]);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].1.is_empty() && lines[2].1.is_empty());
+        assert_eq!(lines[1].0, "cd needle");
+        assert_eq!(lines[1].1, vec![(3..9, true)]);
     }
 }

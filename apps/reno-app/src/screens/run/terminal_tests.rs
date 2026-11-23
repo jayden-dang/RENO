@@ -847,6 +847,7 @@ fn saved_terminals_get_slots_and_slots_become_ids_again() {
         ],
         active: Some(desc(Kind::Terminal, "term_b2")),
         closed: vec![desc(Kind::Terminal, "term_c3"), desc(Kind::File, "z.rs")],
+        place: None,
     };
     let (terms, panel) = Terms::restore(saved);
     // One slot per id, in the order met; a bad id and a repeat add nothing.

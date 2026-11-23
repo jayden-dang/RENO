@@ -10,7 +10,7 @@ Claims below are a reading at that time. Claiming an item or taking a slot re-re
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
-| ROAD-33 | transcript | Ready | — | — |
+| ROAD-33 | transcript | In build | — | — |
 
 Done: ROAD-29, ROAD-30
 
@@ -26,7 +26,7 @@ Done: ROAD-29, ROAD-30
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
-| ROAD-33 | transcript | Ready | — | — |
+| ROAD-33 | transcript | In build | — | — |
 | ROAD-60 | comments-on-the-transcript | Not started | — | ROAD-33, ROAD-71 |
 | ROAD-71 | thread-chat-workflow | Not started | — | ROAD-33 |
 | ROAD-72 | thread-context-and-invocations | Not started | — | ROAD-71 |
@@ -46,7 +46,7 @@ Done: ROAD-29, ROAD-32
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
-| ROAD-33 | transcript | Ready | — | — |
+| ROAD-33 | transcript | In build | — | — |
 | ROAD-37 | settings-and-design-system | In build | — | — |
 | ROAD-53 | workflow-review-and-contract-drafts | Not started | — | ROAD-33, ROAD-37 |
 

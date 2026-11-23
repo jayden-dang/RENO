@@ -174,6 +174,9 @@ async fn work(script: &Script, prompt: &str) -> bool {
                 })
                 .await;
     }
+    if scenario == Scenario::LongReply {
+        return long_reply(script).await;
+    }
     let opened = script.status(RunStatus::Leased).await
         && script
             .step(|w, run| {
@@ -233,7 +236,7 @@ async fn work(script: &Script, prompt: &str) -> bool {
                     })
                     .await
         }
-        Scenario::Refused => false,
+        Scenario::Refused | Scenario::LongReply => false,
         Scenario::Long => {
             let steered = script
                 .shared
@@ -279,6 +282,41 @@ async fn work(script: &Script, prompt: &str) -> bool {
                 && script.hold(data::network_subject(url)).await
         }
     }
+}
+
+/// `/longreply`: the reply is one message streamed in many small steps, then the run ends with
+/// that message as its last, so it is the final answer and not something folded away.
+async fn long_reply(script: &Script) -> bool {
+    let started = script.status(RunStatus::Leased).await
+        && script
+            .step(|w, run| {
+                w.set_status(run, RunStatus::Running) && {
+                    w.push(run, data::started());
+                    true
+                }
+            })
+            .await;
+    if !started {
+        return false;
+    }
+    for chunk in super::transcript::long_reply() {
+        if !script
+            .step(|w, run| {
+                w.push(run, data::text(&chunk));
+                true
+            })
+            .await
+        {
+            return false;
+        }
+    }
+    script.status(RunStatus::Evaluating).await
+        && script
+            .step(|w, run| {
+                let done = data::done(StopReason::Completed, None, None);
+                w.finish(run, RunStatus::Succeeded, done)
+            })
+            .await
 }
 
 /// Continues a run held on an approval, after the human decided.

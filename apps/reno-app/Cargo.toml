@@ -22,7 +22,19 @@ futures.workspace = true
 mimalloc = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+unicase.workspace = true
 unicode-segmentation.workspace = true
+regex.workspace = true
+base64.workspace = true
+ratex-parser.workspace = true
+ratex-layout.workspace = true
+ratex-types.workspace = true
+ratex-svg.workspace = true
+merman.workspace = true
+usvg.workspace = true
+resvg.workspace = true
+tiny-skia.workspace = true
+ttf-parser.workspace = true
 gpui.workspace = true
 # `runtime_shaders`: this Mac has Xcode but no Metal Toolchain component, so the build-time
 # `metal` compile fails. Shaders are compiled at launch instead. See decision 0001.

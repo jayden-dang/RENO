@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use super::RunScreen;
+use crate::panel::Descriptors;
 use crate::panel::layout::{GUTTER, Layout, OVERLAY_BELOW, fit};
 use crate::panel::saved::Saved;
 use crate::panel::surface::{Counts, Surface};
@@ -133,6 +134,19 @@ impl RunScreen {
         );
     }
 
+    /// The reading place changed. Tabs the person has not chosen or used yet are not saved with
+    /// it: a thread reopens with the first tabs still to be chosen, not with Session alone.
+    pub(super) fn persist_place(&self, cx: &mut Context<Self>) {
+        if self.panel_seeded || self.panel_touched {
+            return self.persist_panel(cx);
+        }
+        let only_the_place = Descriptors {
+            place: self.panel.place(),
+            ..Descriptors::default()
+        };
+        Saved::put(self.panel_key.clone(), only_the_place, cx);
+    }
+
     // --- opening tabs ------------------------------------------------------------------------
 
     /// Shows the panel on `surface`, adding its tab when it has none.
@@ -244,7 +258,9 @@ impl RunScreen {
             },
         };
         self.panel_seeded = true;
+        let place = self.panel.place();
         self.panel = crate::panel::PanelState::reset_for(facts);
+        self.panel.set_place(place);
         self.ensure_patches(cx);
     }
 

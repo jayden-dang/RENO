@@ -196,7 +196,7 @@ impl RunScreen {
 
     // --- talking to the daemon ----------------------------------------------------------------
 
-    fn files_call<T, Fut>(
+    pub(super) fn files_call<T, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         call: impl FnOnce(Client, RunId) -> Fut,
@@ -1135,7 +1135,11 @@ impl RunScreen {
                                     .max_w(px(720.0))
                                     .text_size(px(14.0))
                                     .line_height(px(21.0))
-                                    .child(markdown_view::blocks(tab.md.tree(), theme, window)),
+                                    .child(markdown_view::blocks_with(
+                                        tab.md.tree(),
+                                        theme,
+                                        markdown_view::Host::preview(),
+                                    )),
                             )
                             .into_any_element()
                     } else {

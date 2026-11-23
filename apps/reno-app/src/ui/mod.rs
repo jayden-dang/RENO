@@ -3,6 +3,7 @@
 pub(crate) mod bar;
 pub(crate) mod composer;
 pub(crate) mod field;
+pub(crate) mod find;
 pub(crate) mod gate;
 pub(crate) mod icon;
 pub(crate) mod kit;
@@ -16,6 +17,7 @@ pub(crate) mod palette;
 pub(crate) mod restart;
 pub(crate) mod ring;
 pub(crate) mod running_pill;
+pub(crate) mod scrollbar;
 pub(crate) mod setup;
 pub(crate) mod sidebar;
 pub(crate) mod terminal_view;

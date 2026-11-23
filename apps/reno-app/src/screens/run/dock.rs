@@ -39,6 +39,7 @@ pub(crate) fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("enter", AllowHeld, Some(CONTEXT)),
     ]);
     super::question::bind_keys(cx);
+    super::select::bind_keys(cx);
 }
 
 impl RunScreen {
@@ -357,6 +358,11 @@ impl RunScreen {
                 }),
             )
             .on_action(cx.listener(|this, _: &DenyHeld, window, cx| {
+                // While the find bar is open, Escape is the bar's: it does not deny.
+                if this.find_is_open() {
+                    this.close_find(window, cx);
+                    return;
+                }
                 if this.key_target(window) == Target::Panel
                     && let Some(id) = this.panel_for.clone()
                 {

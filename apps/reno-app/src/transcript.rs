@@ -60,6 +60,21 @@ impl Key {
         Self(first.0 | (1 << 39))
     }
 
+    /// Where the entry sits in a thread: its run, then its first event (a fold sits where its
+    /// first row does). `None` for a key no event gave: the routing card, a divider, a visual.
+    pub(crate) fn order(self) -> Option<(u64, u64)> {
+        const SEQ: u64 = (1 << 39) - 1;
+        let divider = self.0 & 0xff_ffff_ffff == 0xff_ffff_ffff;
+        let routing = self.0 >= u64::MAX - 0xffff;
+        let visual = self.0 >> 56 == 0xfd;
+        (!(divider || routing || visual)).then_some((self.0 >> 40, self.0 & SEQ))
+    }
+
+    /// The key of the `n`th agent-posted visual of a thread: not a row's, and no row can have it.
+    pub(crate) const fn visual(n: usize) -> Self {
+        Self(0xfd00_0000_0000_0000 | n as u64)
+    }
+
     /// The key of a divider before the `segment`th run.
     pub(crate) fn divider(segment: usize) -> Self {
         Self((u64::try_from(segment).unwrap_or(0) << 40) | 0xff_ffff_ffff)
@@ -644,6 +659,539 @@ pub(crate) fn build_rows(
         }
     }
     built
+}
+
+/// What a [`TurnBuilder`] event did to the rows. Each names the first top-level row that is not
+/// what it was: that row and every row after it may differ, the rows before it do not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// The event touched no row (usage, the model, anything after the run ended).
+    Unchanged,
+    /// The row with this key grew or was patched; there are as many rows as before.
+    Grew(Key),
+    /// The row with this key and those after it are new, or the first of them is.
+    Added(Key),
+    /// A `Done` folded its turn: the rows from `turn.start` on were made again, and `fold` is
+    /// the first fold head among them (`turn.start` is its row when the turn begins with one).
+    Folded {
+        turn: std::ops::Range<usize>,
+        fold: Key,
+    },
+}
+
+/// A tool call as the call index holds it.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
+pub(crate) struct CallInfo<'a> {
+    pub(crate) input: &'a reno_proto::ToolCall,
+    /// The seq of the event that gave the call its result; none while it has none.
+    pub(crate) result_seq: Option<Seq>,
+}
+
+/// One run's rows, made as its events arrive: the same rows [`build_rows`] and [`fold_turns`]
+/// make from the whole list, held as they stand after each event. A delta grows the last row, a
+/// finished turn replaces its loose rows with its fold, and no event makes the rows of an
+/// earlier turn again. The run's prompt, its divider and its routing card are not events: the
+/// screen puts them before these rows. Approval cards, which depend on what is pending beyond the
+/// events, are not made here: an approval request is the "asked to approve" line.
+#[derive(Debug)]
+pub(crate) struct TurnBuilder {
+    segment: usize,
+    rows: Vec<Row>,
+    facts: Facts,
+    /// A tool group of only the harness's questions has no step to show, so it is no row of the
+    /// list; until another row follows it, though, it is still where the next call goes.
+    hidden: Option<(Key, Vec<ToolEntry>)>,
+    /// Calls of such groups that were left behind, waiting for their result.
+    hidden_calls: std::collections::HashSet<String>,
+    input_calls: std::collections::HashSet<String>,
+    calls: std::collections::HashMap<String, (reno_proto::ToolCall, Option<Seq>)>,
+    /// The `Done` ended the run's attempt; only a resume goes on.
+    ended: bool,
+    /// Where the turn that is not finished begins.
+    turn_start: usize,
+    /// No steer, resume, approval or question has been seen: the run's span is one turn's work.
+    one_stretch: bool,
+    elapsed_ms: Option<u64>,
+}
+
+/// Where a row is: its top-level place and, inside a fold, its place in it.
+type Place = (usize, Option<usize>);
+
+fn visit_order(len: usize, from_end: bool) -> Box<dyn Iterator<Item = usize>> {
+    if from_end {
+        Box::new((0..len).rev())
+    } else {
+        Box::new(0..len)
+    }
+}
+
+/// The first row `matches` accepts, in the order the rows read (a fold's rows where the fold is),
+/// from the end or from the start.
+fn find_row(rows: &[Row], from_end: bool, matches: impl Fn(&Row) -> bool) -> Option<Place> {
+    for top in visit_order(rows.len(), from_end) {
+        match &rows[top] {
+            Row::Worked { rows: inner, .. } => {
+                if let Some(at) = visit_order(inner.len(), from_end).find(|&at| matches(&inner[at]))
+                {
+                    return Some((top, Some(at)));
+                }
+            }
+            row if matches(row) => return Some((top, None)),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn row_at(rows: &mut [Row], (top, inner): Place) -> &mut Row {
+    match (&mut rows[top], inner) {
+        (Row::Worked { rows, .. }, Some(at)) => &mut rows[at],
+        (row, _) => row,
+    }
+}
+
+fn touch(first: &mut Option<usize>, top: usize) {
+    *first = Some(first.map_or(top, |was| was.min(top)));
+}
+
+impl TurnBuilder {
+    /// A builder for the `segment`th run of a thread's transcript (0 for a thread of one run).
+    pub(crate) fn new(segment: usize) -> Self {
+        Self {
+            segment,
+            rows: Vec::new(),
+            facts: Facts::default(),
+            hidden: None,
+            hidden_calls: std::collections::HashSet::new(),
+            input_calls: std::collections::HashSet::new(),
+            calls: std::collections::HashMap::new(),
+            ended: false,
+            turn_start: 0,
+            one_stretch: true,
+            elapsed_ms: None,
+        }
+    }
+
+    /// The rows as [`fold_turns`] leaves them, keyed into the segment.
+    pub(crate) fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    pub(crate) fn facts(&self) -> &Facts {
+        &self.facts
+    }
+
+    /// The tool call `id` as the events gave it, and where its result came.
+    #[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
+    pub(crate) fn call(&self, id: &str) -> Option<CallInfo<'_>> {
+        let (input, result_seq) = self.calls.get(id)?;
+        Some(CallInfo {
+            input,
+            result_seq: *result_seq,
+        })
+    }
+
+    /// Says how long the run took, from the run's own times: the time goes on the one fold of a
+    /// run that was one turn's work (see [`crate::vm::convo::run_elapsed_ms`]) and on no other.
+    pub(crate) fn set_run_time(&mut self, ended: bool, created_ms: u64, updated_ms: u64) -> Change {
+        self.elapsed_ms = self
+            .one_stretch
+            .then(|| crate::vm::convo::run_elapsed_ms(ended, created_ms, updated_ms, &[]))
+            .flatten();
+        self.apply_elapsed()
+    }
+
+    fn apply_elapsed(&mut self) -> Change {
+        let folds = self
+            .rows
+            .iter()
+            .filter(|row| matches!(row, Row::Worked { .. }))
+            .count();
+        let want = self.elapsed_ms.filter(|_| folds == 1).map(|ms| ms / 1000);
+        let mut first = None;
+        for (top, row) in self.rows.iter_mut().enumerate() {
+            if let Row::Worked { secs, .. } = row
+                && *secs != want
+            {
+                *secs = want;
+                touch(&mut first, top);
+            }
+        }
+        self.change(first, self.rows.len())
+    }
+
+    fn key_at(&self, seq: Seq) -> Key {
+        Key::at(seq).in_segment(self.segment)
+    }
+
+    fn change(&self, first: Option<usize>, before: usize) -> Change {
+        match first.and_then(|top| self.rows.get(top)) {
+            None => Change::Unchanged,
+            Some(row) if self.rows.len() > before => Change::Added(row.key()),
+            Some(row) => Change::Grew(row.key()),
+        }
+    }
+
+    /// The group a call is added to, or a new one; the group is no row while it only holds the
+    /// harness's questions.
+    fn add_call(&mut self, entry: ToolEntry, key: Key, first: &mut Option<usize>) {
+        if let Some((key, mut calls)) = self.hidden.take() {
+            calls.push(entry);
+            if crate::vm::convo::has_steps(&calls) {
+                self.rows.push(Row::Tools { key, calls });
+                touch(first, self.rows.len() - 1);
+            } else {
+                self.hidden = Some((key, calls));
+            }
+            return;
+        }
+        if let Some(Row::Tools { calls, .. }) = self.rows.last_mut() {
+            calls.push(entry);
+            touch(first, self.rows.len() - 1);
+        } else if crate::vm::convo::has_steps(std::slice::from_ref(&entry)) {
+            self.rows.push(Row::Tools {
+                key,
+                calls: vec![entry],
+            });
+            touch(first, self.rows.len() - 1);
+        } else {
+            self.hidden = Some((key, vec![entry]));
+        }
+    }
+
+    /// Another row follows: a group of only questions is left behind.
+    fn leave_hidden(&mut self) {
+        if let Some((_, calls)) = self.hidden.take() {
+            self.hidden_calls.extend(
+                calls
+                    .into_iter()
+                    .filter(|c| c.outcome == Outcome::Pending)
+                    .map(|c| c.id),
+            );
+        }
+    }
+
+    fn push_row(&mut self, row: Row, first: &mut Option<usize>) {
+        self.leave_hidden();
+        self.rows.push(row);
+        touch(first, self.rows.len() - 1);
+    }
+
+    /// The input tool finished: the latest open question is answered, or closed without an answer.
+    fn resolve_open_question(
+        &mut self,
+        ok: bool,
+        summary: Option<&str>,
+        first: &mut Option<usize>,
+    ) {
+        let found = find_row(
+            &self.rows,
+            true,
+            |row| matches!(row, Row::Question { resolution, .. } if *resolution == Resolution::Pending),
+        );
+        if let Some(place) = found {
+            touch(first, place.0);
+            if let Row::Question {
+                questions,
+                resolution,
+                ..
+            } = row_at(&mut self.rows, place)
+            {
+                *resolution = match (ok, summary) {
+                    (true, Some(text)) => Resolution::Answered(read_answers(questions, text)),
+                    _ => Resolution::Unanswered,
+                };
+            }
+        }
+    }
+
+    /// Takes in the next event of the run, in order, and says what it did to the rows.
+    pub(crate) fn push(&mut self, seq: Seq, event: &ExecEvent) -> Change {
+        if matches!(
+            event,
+            ExecEvent::UserMessage { .. }
+                | ExecEvent::Resumed { .. }
+                | ExecEvent::NeedsApproval { .. }
+                | ExecEvent::NeedsInput { .. }
+        ) {
+            self.one_stretch = false;
+        }
+        if self.ended {
+            if !matches!(event, ExecEvent::Resumed { .. }) {
+                return Change::Unchanged;
+            }
+            self.ended = false;
+        }
+        let key = self.key_at(seq);
+        let before = self.rows.len();
+        let mut first: Option<usize> = None;
+        match event {
+            ExecEvent::Started { model, .. } => self.facts.model = Some(model.clone()),
+            ExecEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => {
+                self.facts.usage = Some(Usage {
+                    input: input_tokens
+                        .saturating_add(*cache_read_tokens)
+                        .saturating_add(*cache_write_tokens),
+                    output: *output_tokens,
+                });
+            }
+            ExecEvent::ContextUsage { .. } | ExecEvent::ConfigChanged { .. } => {}
+            ExecEvent::Text { text } => match self.rows.last_mut() {
+                Some(Row::Prose { text: open, .. }) if self.hidden.is_none() => {
+                    open.push_str(text);
+                    touch(&mut first, self.rows.len() - 1);
+                }
+                _ => self.push_row(
+                    Row::Prose {
+                        key,
+                        text: text.clone(),
+                    },
+                    &mut first,
+                ),
+            },
+            ExecEvent::Reasoning { text } => match self.rows.last_mut() {
+                Some(Row::Reasoning { text: open, .. }) if self.hidden.is_none() => {
+                    open.push_str(text);
+                    touch(&mut first, self.rows.len() - 1);
+                }
+                _ => self.push_row(
+                    Row::Reasoning {
+                        key,
+                        text: text.clone(),
+                    },
+                    &mut first,
+                ),
+            },
+            ExecEvent::Tool { id, call } => {
+                if is_input_tool(&call.name) {
+                    self.input_calls.insert(id.clone());
+                }
+                self.calls.insert(id.clone(), (call.clone(), None));
+                let entry = ToolEntry {
+                    id: id.clone(),
+                    kind: tool_kind(&call.name),
+                    label: tool_label(&call.name, &call.input),
+                    outcome: Outcome::Pending,
+                    output: None,
+                };
+                self.add_call(entry, key, &mut first);
+            }
+            ExecEvent::ToolResult {
+                id,
+                ok,
+                summary,
+                output,
+            } => {
+                if let Some((_, result_seq)) = self.calls.get_mut(id)
+                    && result_seq.is_none()
+                {
+                    *result_seq = Some(seq);
+                }
+                if self.input_calls.contains(id) {
+                    self.resolve_open_question(*ok, summary.as_deref(), &mut first);
+                }
+                let outcome = if *ok {
+                    Outcome::Ok(summary.clone())
+                } else {
+                    Outcome::Failed(summary.clone())
+                };
+                let output = output.clone().filter(|o| !o.text.is_empty());
+                let pending_call = |calls: &[ToolEntry]| {
+                    calls
+                        .iter()
+                        .rposition(|c| &c.id == id && c.outcome == Outcome::Pending)
+                };
+                let held = self
+                    .hidden
+                    .as_mut()
+                    .and_then(|(_, calls)| pending_call(calls).map(|at| &mut calls[at]));
+                if let Some(call) = held {
+                    call.outcome = outcome;
+                    call.output = output;
+                } else if let Some(place) = find_row(
+                    &self.rows,
+                    true,
+                    |row| matches!(row, Row::Tools { calls, .. } if pending_call(calls).is_some()),
+                ) {
+                    touch(&mut first, place.0);
+                    if let Row::Tools { calls, .. } = row_at(&mut self.rows, place)
+                        && let Some(at) = pending_call(calls)
+                    {
+                        calls[at].outcome = outcome;
+                        calls[at].output = output;
+                    }
+                } else if !self.hidden_calls.remove(id) {
+                    let orphan = ToolEntry {
+                        id: id.clone(),
+                        kind: ToolKind::Other,
+                        label: "tool result".to_owned(),
+                        outcome,
+                        output,
+                    };
+                    self.add_call(orphan, key, &mut first);
+                }
+            }
+            ExecEvent::UserMessage { text } => self.push_row(
+                Row::User {
+                    key,
+                    text: text.clone(),
+                    steer: true,
+                    at_ms: None,
+                },
+                &mut first,
+            ),
+            ExecEvent::AgentReport {
+                status, summary, ..
+            } => self.push_row(
+                Row::Asked {
+                    key,
+                    line: format!("Reported {}: {summary}", report_word(*status)),
+                },
+                &mut first,
+            ),
+            ExecEvent::NeedsInput {
+                request_id,
+                questions,
+            } => self.push_row(
+                Row::Question {
+                    key,
+                    request_id: request_id.clone(),
+                    questions: questions.clone(),
+                    resolution: Resolution::Pending,
+                },
+                &mut first,
+            ),
+            ExecEvent::ModelChanged { model } => self.push_row(
+                Row::ModelChanged {
+                    key,
+                    model: model.clone(),
+                },
+                &mut first,
+            ),
+            ExecEvent::InputExpired { request_id } => {
+                let card = find_row(&self.rows, false, |row| {
+                    matches!(row, Row::Question { request_id: id, resolution, .. }
+                        if id == request_id && *resolution == Resolution::Pending)
+                });
+                if let Some(place) = card {
+                    touch(&mut first, place.0);
+                    if let Row::Question { resolution, .. } = row_at(&mut self.rows, place) {
+                        *resolution = Resolution::Declined;
+                    }
+                } else {
+                    self.push_row(
+                        Row::Asked {
+                            key,
+                            line: "Nobody answered in time; the question was declined.".to_owned(),
+                        },
+                        &mut first,
+                    );
+                }
+            }
+            ExecEvent::NeedsApproval { subject, .. } => self.push_row(
+                Row::Asked {
+                    key,
+                    line: asked_line(subject),
+                },
+                &mut first,
+            ),
+            ExecEvent::ApprovalResolved {
+                decision,
+                by,
+                message,
+                ..
+            } => self.push_row(
+                Row::Asked {
+                    key,
+                    line: resolved_line(*decision, by, message.as_deref()),
+                },
+                &mut first,
+            ),
+            ExecEvent::Done {
+                stop,
+                result,
+                diagnostic,
+                reason,
+            } => {
+                self.facts.reason.clone_from(reason);
+                self.facts.diagnostic.clone_from(diagnostic);
+                for (top, row) in self.rows.iter_mut().enumerate() {
+                    if let Row::Question { resolution, .. } = row
+                        && *resolution == Resolution::Pending
+                    {
+                        *resolution = Resolution::Unanswered;
+                        touch(&mut first, top);
+                    }
+                }
+                let repeats = |result: &String| {
+                    find_row(&self.rows, true, |row| matches!(row, Row::Prose { .. })).is_some_and(
+                        |(top, inner)| match (&self.rows[top], inner) {
+                            (Row::Worked { rows, .. }, Some(at)) => {
+                                matches!(&rows[at], Row::Prose { text, .. } if text.trim() == result.trim())
+                            }
+                            (Row::Prose { text, .. }, _) => text.trim() == result.trim(),
+                            _ => false,
+                        },
+                    )
+                };
+                let result = result.clone().filter(|result| !repeats(result));
+                self.push_row(
+                    Row::Done {
+                        key,
+                        stop: *stop,
+                        result,
+                        diagnostic: diagnostic.clone(),
+                        reason: reason.clone(),
+                    },
+                    &mut first,
+                );
+                self.ended = true;
+                return self.fold_turn(first);
+            }
+            ExecEvent::Resumed { from_attempt, .. } => {
+                self.facts.reason = None;
+                self.facts.diagnostic = None;
+                self.push_row(
+                    Row::Asked {
+                        key,
+                        line: format!(
+                            "Resumed: attempt {} continues the session",
+                            from_attempt.saturating_add(1)
+                        ),
+                    },
+                    &mut first,
+                );
+            }
+        }
+        self.change(first, before)
+    }
+
+    /// The turn that just ended folds, as [`fold_turns`] folds it.
+    fn fold_turn(&mut self, changed: Option<usize>) -> Change {
+        let start = self.turn_start.min(self.rows.len());
+        let turn = self.rows.split_off(start);
+        self.rows.extend(fold_turns(turn, None));
+        self.turn_start = self.rows.len();
+        let start = changed.map_or(start, |at| at.min(start));
+        let fold = self.rows[start..]
+            .iter()
+            .find(|row| matches!(row, Row::Worked { .. }))
+            .map(Row::key);
+        self.apply_elapsed();
+        match fold {
+            Some(fold) => Change::Folded {
+                turn: start..self.rows.len(),
+                fold,
+            },
+            None => Change::Added(self.rows[start].key()),
+        }
+    }
 }
 
 /// The status line of a resolved approval: the outcome, then who decided.
@@ -1700,5 +2248,327 @@ mod tests {
         let rows = with_routing(built.rows.clone(), Some(routing_view()));
         assert!(matches!(rows[0], Row::Routing { .. }));
         assert_eq!(with_routing(built.rows.clone(), None), built.rows);
+    }
+
+    mod turn_builder {
+        use super::*;
+
+        /// What the one-shot builders make of `events`: the rows a `TurnBuilder` must hold.
+        fn whole(events: &[(Seq, ExecEvent)], segment: usize, elapsed: Option<u64>) -> Built {
+            let built = build_rows(None, events, &[]);
+            let rows = fold_turns(built.rows, elapsed)
+                .into_iter()
+                .map(|row| row.in_segment(segment))
+                .collect();
+            Built {
+                rows,
+                facts: built.facts,
+            }
+        }
+
+        /// The first top-level row a change says is not what it was.
+        fn first_changed(rows: &[Row], change: &Change) -> Option<usize> {
+            let key = match change {
+                Change::Grew(key) | Change::Added(key) => *key,
+                Change::Folded { turn, .. } => return Some(turn.start),
+                Change::Unchanged => return None,
+            };
+            rows.iter().position(|row| row.key() == key)
+        }
+
+        /// Feeds `events` one at a time and, after each, holds the builder to the one-shot result
+        /// and to its own change: the rows before the reported one are as they were.
+        fn matches_event_by_event(events: &[(Seq, ExecEvent)], segment: usize) {
+            let mut builder = TurnBuilder::new(segment);
+            let mut before: Vec<Row> = Vec::new();
+            for (i, (seq, event)) in events.iter().enumerate() {
+                let change = builder.push(*seq, event);
+                let expected = whole(&events[..=i], segment, None);
+                assert_eq!(
+                    builder.rows(),
+                    expected.rows,
+                    "rows after event {i}: {event:?}"
+                );
+                assert_eq!(builder.facts(), &expected.facts, "facts after event {i}");
+                let reported = first_changed(builder.rows(), &change);
+                let stable = match &change {
+                    Change::Unchanged => before.len().min(builder.rows().len()),
+                    _ => reported.unwrap_or(0),
+                };
+                assert!(
+                    reported.is_some() || change == Change::Unchanged,
+                    "a change names a row of the list: {change:?} after event {i}"
+                );
+                assert_eq!(
+                    before[..stable.min(before.len())],
+                    builder.rows()[..stable.min(before.len())],
+                    "rows before the reported one moved after event {i}: {change:?}"
+                );
+                if change == Change::Unchanged {
+                    assert_eq!(before, builder.rows(), "unchanged but moved at event {i}");
+                }
+                before = builder.rows().to_vec();
+            }
+        }
+
+        fn started() -> ExecEvent {
+            ExecEvent::Started {
+                session: SessionRef("s".into()),
+                model: "m".into(),
+            }
+        }
+
+        fn usage() -> ExecEvent {
+            ExecEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+                cache_write_tokens: 4,
+            }
+        }
+
+        #[test]
+        fn a_turn_builder_matches_build_rows_event_by_event() {
+            let events = reno_client::fake::transcript::seeded_run_events("acp3");
+            assert!(events.len() > 10, "the seeded run has events");
+            matches_event_by_event(&events, 0);
+            matches_event_by_event(&events, 2);
+            // The turn after the first Done, which `Resumed` opens.
+            let events = reno_client::fake::transcript::seeded_run_events("render2");
+            assert!(events.len() > 10, "the second render run has events");
+            matches_event_by_event(&events, 1);
+        }
+
+        #[test]
+        fn a_turn_builder_matches_on_hand_built_runs_of_every_event_kind() {
+            let resumed = |from: u32| ExecEvent::Resumed {
+                from_attempt: from,
+                session: SessionRef("s".into()),
+            };
+            let runs: Vec<Vec<ExecEvent>> = vec![
+                // A question-only tool group ends a prose run, and the next call joins it.
+                vec![
+                    text("a"),
+                    ask_tool("a1"),
+                    text("b"),
+                    ask_tool("a2"),
+                    bash("t1", "ls"),
+                    result("a2", true, "User answered: \"Red\""),
+                    result("t1", true, "ok"),
+                    text("c"),
+                    finish(),
+                ],
+                // The call comes first, the question after it, and the result last: the group
+                // that held the call is already left behind.
+                vec![
+                    ask_tool("a1"),
+                    asks("q1", vec![pick()]),
+                    result("a1", true, "User answered: \"Red\""),
+                    result("a1", true, "said twice"),
+                    text("ok"),
+                    finish(),
+                ],
+                // A question, its result, then a turn that goes on past it.
+                vec![
+                    bash("t0", "ls"),
+                    asks("q1", vec![pick()]),
+                    ask_tool("a1"),
+                    result("a1", true, "User answered: \"Red\""),
+                    asks("q2", vec![pick()]),
+                    ExecEvent::InputExpired {
+                        request_id: "q2".into(),
+                    },
+                    ExecEvent::InputExpired {
+                        request_id: "nobody".into(),
+                    },
+                    bash("t1", "pwd"),
+                    result("t1", false, "no"),
+                    text("end"),
+                    finish(),
+                ],
+                // A result for a call from a turn that has folded, after a resume; the last
+                // prose a result repeats is in a fold.
+                vec![
+                    bash("t1", "sleep 9"),
+                    text("waiting"),
+                    ExecEvent::Done {
+                        stop: StopReason::Interrupted,
+                        result: None,
+                        diagnostic: None,
+                        reason: None,
+                    },
+                    text("ignored after the end"),
+                    resumed(1),
+                    result("t1", true, "late"),
+                    result("orphan", true, "nothing called it"),
+                    ExecEvent::Done {
+                        stop: StopReason::Completed,
+                        result: Some("waiting".into()),
+                        diagnostic: None,
+                        reason: None,
+                    },
+                ],
+                // A question left open when the run ends, a steer, an approval, a report.
+                vec![
+                    started(),
+                    ExecEvent::Reasoning { text: "hm".into() },
+                    ExecEvent::Reasoning { text: "mm".into() },
+                    usage(),
+                    ExecEvent::UserMessage {
+                        text: "also".into(),
+                    },
+                    asks("q1", vec![pick()]),
+                    ExecEvent::NeedsApproval {
+                        request_id: "r".into(),
+                        subject: subject("ls"),
+                    },
+                    ExecEvent::ApprovalResolved {
+                        request_id: "r".into(),
+                        decision: ApprovalOutcome::Approved,
+                        by: ResolvedBy::Human,
+                        message: None,
+                    },
+                    ExecEvent::AgentReport {
+                        status: ReportStatus::Progress,
+                        summary: "halfway".into(),
+                        details: None,
+                    },
+                    ExecEvent::ModelChanged { model: "n".into() },
+                    finish(),
+                ],
+                vec![],
+            ];
+            for events in runs {
+                matches_event_by_event(&at(events.clone()), 0);
+                matches_event_by_event(&at(events), 3);
+            }
+        }
+
+        #[test]
+        fn a_done_folds_the_turn_as_one_change() {
+            let events = at(vec![
+                text("Let me look."),
+                bash("t1", "ls"),
+                result("t1", true, "ok"),
+                text("All done."),
+            ]);
+            let mut builder = TurnBuilder::new(0);
+            for (seq, event) in &events {
+                builder.push(*seq, event);
+            }
+            assert_eq!(builder.rows().len(), 3, "the turn is still loose");
+            let change = builder.push(Seq(9), &finish());
+            let Change::Folded { turn, fold } = change else {
+                panic!("the Done folds the turn: {change:?}");
+            };
+            assert_eq!(turn, 0..3, "the fold, the final message and the Done");
+            assert_eq!(builder.rows()[0].key(), fold);
+            assert!(matches!(&builder.rows()[0], Row::Worked { rows, .. } if rows.len() == 2));
+            assert!(matches!(builder.rows()[1], Row::Prose { .. }));
+            assert!(matches!(builder.rows()[2], Row::Done { .. }));
+        }
+
+        #[test]
+        fn a_delta_grows_the_last_row_and_a_new_kind_of_event_adds_one() {
+            let mut builder = TurnBuilder::new(0);
+            let first = builder.push(Seq(1), &text("Hel"));
+            assert_eq!(first, Change::Added(Key(2)));
+            assert_eq!(builder.push(Seq(2), &text("lo")), Change::Grew(Key(2)));
+            assert_eq!(builder.push(Seq(3), &started()), Change::Unchanged);
+            assert_eq!(builder.push(Seq(4), &usage()), Change::Unchanged);
+            assert_eq!(
+                builder.push(Seq(5), &bash("t1", "ls")),
+                Change::Added(Key(6))
+            );
+            // Its result patches the group in place.
+            assert_eq!(
+                builder.push(Seq(6), &result("t1", true, "ok")),
+                Change::Grew(Key(6))
+            );
+            assert_eq!(builder.facts().model.as_deref(), Some("m"));
+        }
+
+        #[test]
+        fn the_runs_time_goes_on_a_lone_fold_and_only_while_the_run_is_one_stretch() {
+            let turn = [text("a"), bash("t1", "ls"), text("b"), finish()];
+            let events = at(turn.to_vec());
+            let mut builder = TurnBuilder::new(0);
+            for (seq, event) in &events {
+                builder.push(*seq, event);
+            }
+            assert_eq!(
+                fold_kinds(builder.rows()),
+                ["worked[prose,tools]None", "prose", "done"]
+            );
+            let change = builder.set_run_time(true, 1_000, 8_000);
+            assert!(matches!(change, Change::Grew(_)), "{change:?}");
+            let expected = fold_turns(
+                build_rows(None, &events, &[]).rows,
+                crate::vm::convo::run_elapsed_ms(true, 1_000, 8_000, &events),
+            );
+            assert_eq!(builder.rows(), expected);
+            assert_eq!(fold_kinds(builder.rows())[0], "worked[prose,tools]Some(7)");
+            assert_eq!(builder.set_run_time(true, 1_000, 8_000), Change::Unchanged);
+            // A run that is still going has no time; neither has one a person was asked in.
+            assert!(matches!(
+                builder.set_run_time(false, 1_000, 8_000),
+                Change::Grew(_)
+            ));
+            assert_eq!(fold_kinds(builder.rows())[0], "worked[prose,tools]None");
+            let mut asked = TurnBuilder::new(0);
+            for (seq, event) in &at(vec![
+                bash("t1", "ls"),
+                ExecEvent::UserMessage { text: "and".into() },
+                text("b"),
+                finish(),
+            ]) {
+                asked.push(*seq, event);
+            }
+            assert_eq!(asked.set_run_time(true, 0, 9_000), Change::Unchanged);
+        }
+
+        #[test]
+        fn a_fold_made_after_the_time_is_known_carries_it() {
+            let mut builder = TurnBuilder::new(0);
+            builder.push(Seq(1), &bash("t1", "ls"));
+            builder.push(Seq(2), &text("done"));
+            builder.set_run_time(true, 0, 3_000);
+            builder.push(Seq(3), &finish());
+            assert_eq!(fold_kinds(builder.rows())[0], "worked[tools]Some(3)");
+        }
+
+        #[test]
+        fn the_call_index_finds_each_tools_input() {
+            let events = reno_client::fake::transcript::seeded_run_events("render2");
+            let mut builder = TurnBuilder::new(0);
+            for (seq, event) in &events {
+                builder.push(*seq, event);
+            }
+            let mut calls = 0;
+            for (seq, event) in &events {
+                if let ExecEvent::Tool { id, call } = event {
+                    calls += 1;
+                    let found = builder.call(id).expect("every call is indexed");
+                    assert_eq!(found.input, call, "the call {id}");
+                    let result = events.iter().find_map(|(s, e)| match e {
+                        ExecEvent::ToolResult { id: rid, .. } if rid == id && s > seq => Some(*s),
+                        _ => None,
+                    });
+                    assert_eq!(found.result_seq, result, "the result of {id}");
+                }
+            }
+            assert!(calls >= 5, "the run calls several tools");
+            assert!(builder.call("no such call").is_none());
+        }
+
+        #[test]
+        fn a_call_that_ended_before_it_answered_has_no_result_seq() {
+            let mut builder = TurnBuilder::new(0);
+            builder.push(Seq(1), &bash("t1", "sleep 9"));
+            let found = builder.call("t1").unwrap();
+            assert_eq!(found.result_seq, None);
+            builder.push(Seq(2), &result("t1", true, "ok"));
+            assert_eq!(builder.call("t1").unwrap().result_seq, Some(Seq(2)));
+        }
     }
 }

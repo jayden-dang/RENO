@@ -132,6 +132,7 @@ impl Terms {
                 tabs,
                 active,
                 closed,
+                place: saved.place,
             },
         )
     }
@@ -158,6 +159,7 @@ impl Terms {
                 .into_iter()
                 .filter(|d| d.kind != Kind::Terminal)
                 .collect(),
+            place: panel.place,
         }
     }
 }

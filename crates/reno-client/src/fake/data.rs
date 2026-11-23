@@ -16,8 +16,8 @@ use serde_json::json;
 
 /// The demo's "now": 2026-11-15 12:00 UTC, in milliseconds since the Unix epoch.
 pub(super) const NOW_MS: u64 = 1_794_744_000_000;
-const MINUTE: u64 = 60_000;
-const HOUR: u64 = 60 * MINUTE;
+pub(super) const MINUTE: u64 = 60_000;
+pub(super) const HOUR: u64 = 60 * MINUTE;
 
 /// The bots of the demo team.
 pub const BOTS: [&str; 5] = ["keeper", "scout", "builder", "reviewer", "architect"];
@@ -62,9 +62,9 @@ pub(super) struct Seed {
     pub(super) extras: super::extras::Extras,
 }
 
-type Ids<T> = Result<T, IdError>;
+pub(super) type Ids<T> = Result<T, IdError>;
 
-fn summary(
+pub(super) fn summary(
     name: &str,
     exec: &str,
     status: RunStatus,
@@ -554,11 +554,18 @@ pub(super) enum Scenario {
     /// Work, then fail after the harness reported a session: the run `run.resume` can take back.
     /// Prompt: `/fails`.
     Fails,
+    /// Stream one very long reply (headings, code blocks, math) in many small steps at the
+    /// fake's pace, then finish with that reply as the final message. Prompt: `/longreply`.
+    LongReply,
 }
 
 impl Scenario {
     pub(super) fn of(prompt: &str) -> Self {
         let lower = prompt.to_lowercase();
+        // Before `/long`, which it starts with.
+        if lower.starts_with("/longreply") {
+            return Self::LongReply;
+        }
         if lower.starts_with("/refused") {
             return Self::Refused;
         }
@@ -721,4 +728,20 @@ pub(super) fn sidebar_runs() -> Ids<Vec<SeedRun>> {
         )?);
     }
     Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scenario;
+
+    #[test]
+    fn the_scripts_keep_their_prompts_and_longreply_is_not_long() {
+        assert_eq!(Scenario::of("/long"), Scenario::Long);
+        assert_eq!(Scenario::of("/longreply"), Scenario::LongReply);
+        assert_eq!(Scenario::of("/LongReply now"), Scenario::LongReply);
+        assert_eq!(Scenario::of("/burst 5"), Scenario::Burst(5));
+        assert_eq!(Scenario::of("/refused"), Scenario::Refused);
+        assert_eq!(Scenario::of("/fails"), Scenario::Fails);
+        assert_eq!(Scenario::of("do it"), Scenario::Plain);
+    }
 }

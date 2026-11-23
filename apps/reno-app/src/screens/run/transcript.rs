@@ -5,31 +5,133 @@
 //! raised bubble, tool activity as one muted line each, and a finished turn folded behind
 //! "Worked for Ns".
 
+use std::rc::Rc;
+
+use reno_markdown::BlockTree;
+
+use super::select::Spot;
 use super::*;
+use crate::prefs::PREVIEW_LINES;
+use crate::ui::markdown_view::lru::Lru;
+use crate::ui::markdown_view::{
+    Grew, Host, SelectHost, Streaming, select as pick, visual::visual_view,
+};
 use crate::ui::motion;
+use crate::vm::find;
+use crate::vm::selection::{self, Slot};
+
+/// The line height of reasoning text.
+const REASONING_LINE: f32 = 21.0;
 
 impl RunScreen {
-    pub(super) fn render_row(
-        &self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// One list item: its row, with the space below it, the subagent chips that hang on it and,
+    /// under the last item of a live run, "Thinking".
+    pub(super) fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme::current(cx);
-        let Some(row) = self.rows.get(ix) else {
+        let Some(item) = self.items.items.get(ix).copied() else {
             return div().into_any_element();
         };
-        let last = ix + 1 == self.rows.len();
-        let body = self.row_body(row, Some(ix), &theme, window, cx);
+        if let Some(v) = item.visual {
+            return self.visual_item(ix, v, item.decor.last, &theme, cx);
+        }
+        // A reply's markdown is parsed when its item is first drawn, not when the row arrives.
+        if let Some(Row::Prose { key, text }) = items::row_of(&self.rows, 0, &item) {
+            let (key, len) = (*key, text.len());
+            let live = item.decor.last && self.is_live(cx);
+            let tree = Self::parse_reply(&mut self.markdown, &mut self.live_reply, key, text, live);
+            self.probe_files(key, len, &tree, cx);
+        }
+        let Some(row) = items::row_of(&self.rows, 0, &item) else {
+            return div().into_any_element();
+        };
+        let top = item.inner.is_none().then_some(ix);
+        let body = self.row_body(row, top, &theme, cx);
         // "Thinking" under the last row while the agent works between steps.
-        let thinking = last && self.is_thinking(cx);
+        let thinking = item.decor.last && self.is_thinking(cx);
+        // A row inside an open fold sits a step closer to its neighbours than a top-level row.
+        let open_head = matches!(row, Row::Worked { key, .. } if self.open.contains(key));
+        let gap = if item.inner.is_some() || open_head {
+            12.0
+        } else if item.decor.last {
+            26.0
+        } else {
+            16.0
+        };
         div()
             .w_full()
             .when(ix == 0, |d| d.pt(px(22.0)))
-            .pb(px(if last { 26.0 } else { 16.0 }))
+            .pb(px(if item.decor.last { 26.0 } else { gap }))
             .child(body)
-            .children(self.activity_chips(&theme, ix, cx))
+            .children(self.activity_chips(&theme, item.decor.prose_at, cx))
             .when(thinking, |d| d.child(self.thinking_line(&theme, cx)))
+            .into_any_element()
+    }
+
+    /// Whether the run is live: its last reply may still be arriving.
+    pub(super) fn is_live(&self, cx: &Context<Self>) -> bool {
+        self.summary(cx)
+            .is_some_and(|r| r.status == RunStatus::Running)
+    }
+
+    /// The reply's tree for `text`, parsed from the last one when it only grew. `live` is the
+    /// reply still arriving: it stays parsed however many others are drawn after it. Takes the
+    /// two fields, not `self`: `text` is borrowed from the rows.
+    pub(super) fn parse_reply(
+        markdown: &mut Lru<Key, Streaming>,
+        live_reply: &mut Option<Key>,
+        key: Key,
+        text: &str,
+        live: bool,
+    ) -> BlockTree {
+        let mut stream = markdown.remove(&key).unwrap_or_default();
+        stream.set_text(text);
+        let tree = stream.tree().clone();
+        markdown.insert(key, stream, text.len());
+        if live {
+            if let Some(before) = live_reply.replace(key).filter(|before| *before != key) {
+                markdown.unpin(&before);
+            }
+            markdown.pin(key);
+        } else if *live_reply == Some(key) {
+            *live_reply = None;
+            markdown.unpin(&key);
+        }
+        tree
+    }
+
+    /// The run a row belongs to: the thread's `n`th, in the high bits of its key.
+    fn run_of(&self, key: Key) -> RunId {
+        usize::try_from(key.0 >> 40)
+            .ok()
+            .and_then(|n| self.runs.get(n))
+            .unwrap_or(&self.run)
+            .clone()
+    }
+
+    /// An agent-posted visual, titled with its caption (TRANSCRIPT-12.1).
+    fn visual_item(
+        &self,
+        ix: usize,
+        v: usize,
+        last: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(visual) = self.visuals.get(v) else {
+            return div().into_any_element();
+        };
+        let run = self
+            .items
+            .items
+            .get(ix)
+            .and_then(|i| self.rows.get(i.top))
+            .map_or_else(|| self.run.clone(), |row| self.run_of(row.key()));
+        let client = self.store.read(cx).client();
+        let host = Host::transcript(Some(run), client, Some(self.file_links(cx)));
+        div()
+            .w_full()
+            .pb(px(if last { 26.0 } else { 16.0 }))
+            .child(visual_view(visual, host, theme))
             .into_any_element()
     }
 
@@ -60,13 +162,22 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// One row. `top` is its index in the list; a row inside a fold has none.
+    fn reveal_footnote(&mut self, note: gpui::Bounds<gpui::Pixels>, cx: &mut Context<Self>) {
+        let viewport = self.list.viewport_bounds();
+        if note.top() >= viewport.top() && note.bottom() <= viewport.bottom() {
+            return;
+        }
+        let start = self.scrolled_px() + f32::from(note.top() - viewport.top() - px(12.0));
+        self.scroll_to_px(start);
+        self.view_moved(cx);
+    }
+
+    /// One row. `top` is its item's index in the list; a row inside a fold has none.
     fn row_body(
         &self,
         row: &Row,
         top: Option<usize>,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
@@ -77,13 +188,46 @@ impl RunScreen {
                 at_ms,
             } => self.user_message(theme, *key, text, *steer, *at_ms, cx),
             Row::Prose { key, text } => {
-                let Some(stream) = self.markdown.get(key) else {
+                let Some(stream) = self.markdown.peek(key) else {
                     return div().into_any_element();
                 };
-                let actions = top
-                    .filter(|ix| convo::final_messages(&self.rows).contains(ix))
-                    .map(|_| self.message_actions(theme, *key, text));
+                let item = top.and_then(|ix| self.items.items.get(ix));
+                let actions = item
+                    .filter(|item| item.decor.final_message)
+                    .map(|item| self.message_actions(theme, *key, text, item.top, cx));
+                let streaming = item.is_some_and(|i| i.decor.last) && self.is_live(cx);
+                // The reply is drawn for this run's worktree, with its find hits painted over the
+                // words and its texts tracked for selection.
+                let client = self.store.read(cx).client();
+                let screen = cx.weak_entity();
+                let note_screen = screen.clone();
+                let host =
+                    Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
+                        .when_grown(Some(Grew(Rc::new(move |cx| {
+                            screen
+                                .update(cx, |this, cx| {
+                                    if this.list.is_following_tail() {
+                                        this.pause_following(cx);
+                                    }
+                                })
+                                .ok();
+                        }))))
+                        .on_footnote(move |note, cx| {
+                            note_screen
+                                .update(cx, |this, cx| this.reveal_footnote(note, cx))
+                                .ok();
+                        })
+                        .while_streaming(streaming)
+                        .marked(self.find_marks(*key))
+                        .selectable(Some(Rc::new(SelectHost {
+                            registry: self.select.registry.clone(),
+                            key: *key,
+                            anchors: stream.anchors(),
+                            selected: self.selection_for(*key),
+                            style: pick::selection_style(theme),
+                        })));
                 div()
+                    .group(turn_end_group(*key))
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -91,7 +235,7 @@ impl RunScreen {
                         div()
                             .text_size(px(15.0))
                             .line_height(px(24.0))
-                            .child(markdown_view::blocks(stream.tree(), theme, window)),
+                            .child(markdown_view::blocks_with(stream.tree(), theme, host)),
                     )
                     .children(actions)
                     .into_any_element()
@@ -138,7 +282,7 @@ impl RunScreen {
                 )
             }
             Row::Routing { key, view } => self.routing_card(theme, *key, view, cx),
-            Row::Worked { key, secs, rows } => self.worked(theme, *key, *secs, rows, window, cx),
+            Row::Worked { key, secs, .. } => self.worked(theme, *key, *secs, cx),
             Row::Done {
                 stop,
                 result,
@@ -155,14 +299,8 @@ impl RunScreen {
                 ))
                 // Only the thread's latest run says what the branch holds.
                 .children(
-                    (top.is_some()
-                        && self
-                            .rows
-                            .iter()
-                            .rposition(|r| matches!(r, Row::Done { .. }))
-                            == top)
-                        .then(|| self.result_line(theme, cx))
-                        .flatten(),
+                    top.filter(|&ix| self.items.is_last_done(ix))
+                        .and_then(|_| self.result_line(theme, cx)),
                 )
                 .into_any_element(),
             Row::Divider {
@@ -175,18 +313,19 @@ impl RunScreen {
     }
 
     /// "Worked for 3m 12s ›": a disclosure that opens the turn's interim text and steps in place.
+    /// This is the fold's head only; while it is open its rows are list items of their own, right
+    /// after it.
     fn worked(
         &self,
         theme: &Theme,
         key: Key,
         secs: Option<u64>,
-        rows: &[Row],
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.open.contains(&key);
         let text = theme.text;
-        let head = div()
+        let label = convo::worked_label(secs);
+        div()
             .id(SharedString::from(format!("worked-{}", key.0)))
             .debug_selector({
                 let id = format!("worked-{}", key.0);
@@ -199,28 +338,24 @@ impl RunScreen {
             .text_color(theme.muted)
             .cursor_pointer()
             .hover(move |s| s.text_color(text))
-            .child(SharedString::from(convo::worked_label(secs)))
+            .child(self.text_piece(
+                theme,
+                Spot {
+                    key,
+                    slot: Slot::HEAD,
+                    base: 0,
+                    len: 0,
+                    total: None,
+                },
+                &label,
+                &[],
+            ))
             .child(icon(
                 if open { Icon::ChevDown } else { Icon::Fwd },
                 13.0,
                 theme.muted,
             ))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)));
-        let inner: Vec<AnyElement> = if open {
-            rows.iter()
-                .map(|row| self.row_body(row, None, theme, window, cx))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(head)
-            .when(open, |d| {
-                d.child(div().flex().flex_col().gap(px(12.0)).children(inner))
-            })
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
             .into_any_element()
     }
 
@@ -236,6 +371,7 @@ impl RunScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shown = convo::user_text(text, self.open.contains(&key));
+        let kept = selection::kept_len(&shown);
         let group = SharedString::from(format!("user-{}", key.0));
         let copy_text = text.to_owned();
         let toggle = shown.toggle.map(|label| {
@@ -267,6 +403,8 @@ impl RunScreen {
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
         });
         let time = at_ms.map(|at| convo::clock_label(at, &chrono::Local));
+        // The matches in the words shown (the cut part of a long message has none painted).
+        let hits = self.find_highlights(key, find::Part::Whole);
         div()
             .group(group.clone())
             .w_full()
@@ -291,7 +429,18 @@ impl RunScreen {
                     .bg(theme.raised)
                     .text_size(px(15.0))
                     .line_height(px(23.0))
-                    .child(SharedString::from(shown.shown))
+                    .child(self.text_piece(
+                        theme,
+                        Spot {
+                            key,
+                            slot: Slot::WHOLE,
+                            base: 0,
+                            len: kept,
+                            total: Some(kept),
+                        },
+                        &shown.shown,
+                        &hits,
+                    ))
                     .children(toggle),
             )
             .child(
@@ -319,9 +468,26 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// The quiet icons under the final agent message of a finished turn.
-    fn message_actions(&self, theme: &Theme, key: Key, text: &str) -> AnyElement {
+    /// The quiet icons under the final agent message of a finished turn: Copy always, and while
+    /// the turn's end is hovered, a jump to the turn's prompt and, on the last turn, to the top.
+    /// `top` is the final message's top-level row.
+    fn message_actions(
+        &self,
+        theme: &Theme,
+        key: Key,
+        text: &str,
+        top: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let text = text.to_owned();
+        let prompt = self.rows[..top]
+            .iter()
+            .rposition(|row| matches!(row, Row::User { steer: false, .. }));
+        let last_turn = self.items.is_last_done(self.items.item_of_top(top + 1));
+        let reveal = |d: gpui::Stateful<gpui::Div>| {
+            d.opacity(0.0)
+                .group_hover(turn_end_group(key), |s| s.opacity(1.0))
+        };
         div()
             .flex()
             .items_center()
@@ -332,6 +498,29 @@ impl RunScreen {
                         output::copy(cx, text.clone(), "Message copied");
                     }),
             )
+            .children(prompt.map(|row| {
+                reveal(
+                    kit::icon_button(
+                        theme,
+                        format!("turn-to-prompt-{}", key.0),
+                        Icon::ChevUp,
+                        24.0,
+                    )
+                    .aria_label("Scroll to user message")
+                    .tooltip(kit::tip("Scroll to user message"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.scroll_to_message(row, window, cx);
+                    })),
+                )
+            }))
+            .children(last_turn.then(|| {
+                reveal(
+                    kit::icon_button(theme, "turn-to-top", Icon::Up, 24.0)
+                        .aria_label("Scroll to top")
+                        .tooltip(kit::tip("Scroll to top"))
+                        .on_click(cx.listener(|this, _, _, cx| this.key_home(cx))),
+                )
+            }))
             .into_any_element()
     }
 
@@ -351,7 +540,8 @@ impl RunScreen {
             .children(
                 lines
                     .iter()
-                    .map(|line| self.step_row(theme, key, line, calls, cx)),
+                    .enumerate()
+                    .map(|(ln, line)| self.step_row(theme, (key, ln), line, calls, cx)),
             )
             .into_any_element()
     }
@@ -534,7 +724,8 @@ impl RunScreen {
         text: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.open.contains(&key);
+        let open = self.reasoning_open(key, cx);
+        let hits = self.find_highlights(key, find::Part::Whole);
         div()
             .flex()
             .flex_col()
@@ -544,19 +735,58 @@ impl RunScreen {
                     theme,
                     SharedString::from(format!("reasoning-{}", key.0)),
                     open,
-                    "Reasoning".to_owned(),
+                    self.text_piece(
+                        theme,
+                        Spot {
+                            key,
+                            slot: Slot::HEAD,
+                            base: 0,
+                            len: 0,
+                            total: None,
+                        },
+                        "Reasoning",
+                        &[],
+                    ),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_reasoning(key, cx))),
             )
             .when(open, |d| {
-                d.child(
-                    div()
-                        .pl(px(24.0))
-                        .text_size(px(13.5))
-                        .line_height(px(21.0))
-                        .text_color(theme.muted)
-                        .child(SharedString::from(text.to_owned())),
-                )
+                let body = div()
+                    .pl(px(24.0))
+                    .text_size(px(13.5))
+                    .line_height(px(REASONING_LINE))
+                    .text_color(theme.muted)
+                    .child(self.text_piece(
+                        theme,
+                        Spot {
+                            key,
+                            slot: Slot::WHOLE,
+                            base: 0,
+                            len: text.len(),
+                            total: Some(text.len()),
+                        },
+                        text,
+                        &hits,
+                    ));
+                let shell = div().debug_selector(move || format!("reasoning-body-{}", key.0));
+                if self.streaming_open == Some(key) && Prefs::thinking(cx) == ThinkingMode::Preview
+                {
+                    // Taken to its end only when text arrived, so the owner can scroll up.
+                    if self.reasoning_scrolled.get() != Some((key, text.len())) {
+                        self.reasoning_scrolled.set(Some((key, text.len())));
+                        self.reasoning_scroll.scroll_to_bottom();
+                    }
+                    d.child(
+                        shell
+                            .id("reasoning-window")
+                            .track_scroll(&self.reasoning_scroll)
+                            .max_h(px(f32::from(PREVIEW_LINES) * REASONING_LINE))
+                            .overflow_y_scroll()
+                            .child(body),
+                    )
+                } else {
+                    d.child(shell.child(body))
+                }
             })
             .into_any_element()
     }
@@ -612,6 +842,11 @@ impl RunScreen {
 }
 
 /// An answered question: the question muted above the answer, in the user's bubble.
+/// The hover group of a finished turn's end: its final message and the icons under it.
+fn turn_end_group(key: Key) -> SharedString {
+    SharedString::from(format!("turn-end-{}", key.0))
+}
+
 fn answered_bubble(theme: &Theme, pairs: &[(String, Option<String>)]) -> AnyElement {
     div()
         .id("question-answered")
@@ -670,7 +905,7 @@ pub(super) fn disclosure(
     theme: &Theme,
     id: SharedString,
     open: bool,
-    label: String,
+    label: impl IntoElement,
 ) -> gpui::Stateful<gpui::Div> {
     let selector = id.to_string();
     div()

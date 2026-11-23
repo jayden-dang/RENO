@@ -23,6 +23,25 @@ actions!(
         PrevPanelTab,
         // Hands the keyboard to the approval panel waiting in the run.
         JumpToPanel,
+        // Find in the run's conversation: open the bar, next and previous hit, and close it.
+        FindInTranscript,
+        FindNext,
+        FindPrevious,
+        CloseFind,
+        // The find bar's options: match case, whole word and regular expression.
+        ToggleMatchCase,
+        ToggleWholeWord,
+        ToggleRegex,
+        // The transcript, while it has the keyboard: page, three lines, either end, and the
+        // previous or next prompt.
+        PageUp,
+        PageDown,
+        LineUp,
+        LineDown,
+        Home,
+        End,
+        PrevPrompt,
+        NextPrompt,
         // The sidebar's thread menu: Escape closes what is open; the others act on the thread.
         DismissSidebar,
         PinThread,
@@ -46,6 +65,36 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-w", ClosePanelTab, None),
         KeyBinding::new("cmd-j", JumpToPanel, None),
         KeyBinding::new("cmd-shift-t", ReopenPanelTab, None),
+        KeyBinding::new("cmd-f", FindInTranscript, None),
+        KeyBinding::new("cmd-g", FindNext, Some(crate::ui::find::OPEN_CONTEXT)),
+        KeyBinding::new(
+            "cmd-shift-g",
+            FindPrevious,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
+        // While the bar is open Escape closes it, wherever the keyboard is in the run screen; the
+        // composer and the approval panel pass theirs on to it.
+        KeyBinding::new("escape", CloseFind, Some(crate::ui::find::OPEN_CONTEXT)),
+        KeyBinding::new(
+            "cmd-alt-c",
+            ToggleMatchCase,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-w",
+            ToggleWholeWord,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-x",
+            ToggleRegex,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
+        KeyBinding::new(
+            "shift-enter",
+            FindPrevious,
+            Some(crate::ui::find::BAR_CONTEXT),
+        ),
         KeyBinding::new("ctrl-tab", NextPanelTab, None),
         KeyBinding::new("ctrl-shift-tab", PrevPanelTab, None),
         // Only while a menu, confirm or rename of the sidebar is open (the root view says so).

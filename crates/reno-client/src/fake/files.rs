@@ -47,7 +47,7 @@ enum Node {
 }
 
 /// The demo tree, by path.
-fn tree() -> BTreeMap<String, Node> {
+fn tree(transcript: bool) -> BTreeMap<String, Node> {
     let mut nodes = BTreeMap::new();
     let mut file = |path: &str, text: &str| {
         nodes.insert(path.to_owned(), Node::File(text.as_bytes().to_vec()));
@@ -65,6 +65,12 @@ fn tree() -> BTreeMap<String, Node> {
         Node::File([&b"\x89PNG\r\n\x1a\n"[..], &[0u8; 120][..]].concat()),
     );
     nodes.insert("assets/blob.bin".to_owned(), Node::File(vec![0, 1, 2, 3]));
+    if transcript {
+        // The files the transcript demo's replies point at (see `super::transcript`).
+        for (path, bytes) in super::transcript::files() {
+            nodes.insert(path.to_owned(), Node::File(bytes));
+        }
+    }
     for n in 0..MANY {
         nodes.insert(format!("many/f{n:03}.txt"), Node::File(vec![b'x'; n % 7]));
     }
@@ -126,6 +132,8 @@ pub(super) struct Place {
     pub(super) in_place: bool,
     repo: bool,
     branch: String,
+    /// Whether the demo tree has the transcript demo's extra files.
+    transcript: bool,
 }
 
 pub(super) fn place(s: &Shared, run: &RunId) -> Result<Place, ErrorObject> {
@@ -137,11 +145,13 @@ pub(super) fn place(s: &Shared, run: &RunId) -> Result<Place, ErrorObject> {
             in_place: false,
             repo: true,
             branch: format!("reno/{}", run.as_str().trim_start_matches("run_")),
+            transcript: s.config.transcript_threads,
         }),
         Fixture::Missing => Ok(Place {
             in_place: true,
             repo: false,
             branch: String::new(),
+            transcript: s.config.transcript_threads,
         }),
         Fixture::Removed => Err(ErrorObject::new(
             ErrorCode::WorkspaceUnavailable,
@@ -188,7 +198,7 @@ fn not_found(path: &str) -> ErrorObject {
 }
 
 fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
-    let nodes = tree();
+    let nodes = tree(place.transcript);
     let dir = parts(&p.dir)?.join("/");
     if !dir.is_empty() {
         match nodes.get(&dir) {
@@ -259,9 +269,9 @@ fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
     })
 }
 
-fn file_of(path: &str) -> Result<(String, Vec<u8>), ErrorObject> {
+fn file_of(path: &str, place: &Place) -> Result<(String, Vec<u8>), ErrorObject> {
     let rel = parts(path)?.join("/");
-    match tree().remove(&rel) {
+    match tree(place.transcript).remove(&rel) {
         Some(Node::File(bytes)) => Ok((rel, bytes)),
         Some(Node::Dir) => Err(invalid("not a file")),
         None => Err(not_found(path)),
@@ -269,7 +279,7 @@ fn file_of(path: &str) -> Result<(String, Vec<u8>), ErrorObject> {
 }
 
 fn read(p: &FsReadParams, place: &Place) -> Result<FsReadResult, ErrorObject> {
-    let (path, bytes) = file_of(&p.path)?;
+    let (path, bytes) = file_of(&p.path, place)?;
     let size = bytes.len() as u64;
     if bytes.contains(&0) {
         return Ok(FsReadResult {
@@ -308,7 +318,7 @@ fn read(p: &FsReadParams, place: &Place) -> Result<FsReadResult, ErrorObject> {
 }
 
 fn read_image(p: &FsReadImageParams, place: &Place) -> Result<FsImageChunk, ErrorObject> {
-    let (path, bytes) = file_of(&p.path)?;
+    let (path, bytes) = file_of(&p.path, place)?;
     let mime = match path
         .rsplit('.')
         .next()
@@ -344,7 +354,7 @@ fn read_image(p: &FsReadImageParams, place: &Place) -> Result<FsImageChunk, Erro
 /// A subsequence match, shorter paths first: enough to show the shape of a result.
 fn search_files(p: &FsSearchFilesParams, place: &Place) -> FsSearchFilesResult {
     let wanted: Vec<char> = p.query.to_lowercase().chars().collect();
-    let mut found: Vec<FsFileMatch> = tree()
+    let mut found: Vec<FsFileMatch> = tree(place.transcript)
         .into_iter()
         .filter(|(_, node)| matches!(node, Node::File(_)))
         .filter_map(|(path, _)| {
@@ -390,7 +400,7 @@ fn search_content(
         .clamp(1, FS_SEARCH_MAX_LIMIT) as usize;
     let mut matches = Vec::new();
     let mut truncated = false;
-    'files: for (path, node) in tree() {
+    'files: for (path, node) in tree(place.transcript) {
         let Node::File(bytes) = node else { continue };
         if bytes.contains(&0) {
             continue;

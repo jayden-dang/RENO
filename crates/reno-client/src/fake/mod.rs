@@ -24,6 +24,8 @@
 //! - containing `fetch` or `network`: the same with a network fetch;
 //! - `/burst N`: N text events with no pause between them, then the default ending. This is how
 //!   tests overflow a subscription.
+//! - `/longreply`: one very long reply (headings, code blocks, math) streamed in many small
+//!   steps at the fake's pace; it is the run's final message.
 //!
 //! `approval.decide` removes the approval and resumes the run: approve ends `succeeded`, deny ends
 //! `failed` with `Done(error, "approval denied")`. Held demo runs resume the same way.
@@ -54,6 +56,8 @@ mod script;
 mod signin;
 pub mod terminals;
 mod thread_desk;
+pub mod transcript;
+mod visuals;
 mod world;
 
 use std::collections::HashMap;
@@ -127,6 +131,13 @@ pub struct FakeConfig {
     /// With `first_run`'s true first run: no project is known yet (the places desk lists none,
     /// until one is added). Default false.
     pub no_projects: bool,
+    /// ROAD-33: add the transcript demo world (see [`transcript`]): the thread "fix the ACP v2
+    /// handshake" (eight runs, 2,000 events), the "Render check" run, and the demo tree's
+    /// `docs/graph.png` and `src/supervisor.rs`. The app's `--fake` turns it on. It is off by
+    /// default because tests count runs, threads and the files of the demo tree (a listing of
+    /// `src/` or `docs/`), and the guard on the existing runs and scripts is that none of those
+    /// numbers moves. Default false.
+    pub transcript_threads: bool,
 }
 
 impl Default for FakeConfig {
@@ -146,6 +157,7 @@ impl Default for FakeConfig {
             sidebar_threads: false,
             first_run: false,
             no_projects: false,
+            transcript_threads: false,
         }
     }
 }
@@ -252,6 +264,8 @@ pub struct FakeDaemon {
     thread_desk: thread_desk::Sim,
     /// The mocked daemon desk (see [`crate::daemon_desk`]).
     daemon_desk: daemon_desk::Sim,
+    /// The mocked agent-posted visuals (see [`crate::visuals`]).
+    visuals: visuals::Sim,
 }
 
 impl std::fmt::Debug for Shared {
@@ -305,8 +319,15 @@ impl FakeDaemon {
                     .get_or_insert_with(|| reno_proto::SessionRef(format!("sess-{id}")));
             }
         }
+        if config.transcript_threads && !config.empty {
+            let proto = |e: reno_proto::IdError| ClientError::Protocol(e.to_string());
+            seed.runs.extend(transcript::runs().map_err(proto)?);
+        }
         let config_activity = config.activity_runs && !config.empty;
         let mut world = World::from_seed(seed, &cancel);
+        if config.transcript_threads && !config.empty {
+            transcript::link_thread(&mut world);
+        }
         if config.first_run && !config.empty {
             world.executors = extras::first_run_executors(&world.executors);
         }
@@ -349,6 +370,7 @@ impl FakeDaemon {
             places: places::Sim::new(config.no_projects),
             thread_desk: thread_desk::seed(config.sidebar_threads),
             daemon_desk: daemon_desk::seed(config.first_run),
+            visuals: visuals::seed(config.transcript_threads && !config.empty),
         })
     }
 

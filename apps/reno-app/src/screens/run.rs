@@ -1,10 +1,14 @@
 //! The Run screen: one run's transcript, its details and a steer input.
 //!
 //! The transcript is a virtualised GPUI `list()`, bottom-aligned, that follows the tail while the
-//! run streams. Its rows come from the pure `transcript::build_rows`; this file only draws them
-//! and keeps a few per-row caches: the streaming markdown parse of each prose row and which tool
-//! groups are open. A store notification rebuilds the rows, finds the first one that differs and
-//! tells the list to re-measure from there, so a streamed delta costs one row, not the list.
+//! run streams. Its rows come from the pure `transcript::build_rows`, nested (a finished turn's
+//! interim rows sit in its "Worked for" row); the list draws a flat projection of them
+//! (`vm::items`): one item per top-level row and, while a fold is open, one per row inside it.
+//! A store notification rebuilds the rows, compares the items by key and tells the list only what
+//! changed: the items whose row grew are measured again in place, and the stretch that was
+//! replaced (a finished turn folding) is replaced in one range, so a streamed delta costs one
+//! item, not the list, and never moves the item under the scroll anchor. A reply's markdown is
+//! parsed when its item is first drawn.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -14,35 +18,44 @@ use gpui::{
     ListOffset, ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*,
     px,
 };
+use reno_client::visuals::Visual;
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
-    RunSummary, StopReason, ThreadId,
+    RunSummary, Seq, StopReason, ThreadId,
 };
 
 use super::ScreenEvent;
 use crate::panel::saved::Saved;
-use crate::panel::{PanelKey, PanelState};
+use crate::panel::{Descriptors, PanelKey, PanelState, Place};
+use crate::prefs::{Prefs, ThinkingMode};
 use crate::store::{RunRouting, Store};
 use crate::summary;
-use crate::transcript::{self as model, Built, Facts, Key, Row, ToolEntry};
+use crate::transcript::{self as model, Change, Facts, Key, Row, ToolEntry, TurnBuilder};
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
+use crate::ui::markdown_view::lru::Lru;
 use crate::ui::markdown_view::{self, Streaming};
+use crate::ui::scrollbar::{self, scrollbar};
 use crate::ui::theme::{self, Theme};
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
 use crate::vm::convo;
 use crate::vm::executors as executor_facts;
+use crate::vm::find::Opens;
+use crate::vm::items::{self, Projection, Side};
 use crate::vm::routing::{self, RoutingView};
 
 mod activity;
 mod changes;
 mod dock;
 mod files;
+mod find;
 mod history;
+mod links;
 mod output;
 mod panel;
 mod question;
+mod select;
 mod session;
 mod syntax;
 mod terminal;
@@ -58,10 +71,26 @@ const CHANGES_EVERY: Duration = Duration::from_secs(1);
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
-/// Width of the tick rail at the column's left edge.
+/// Width of the gutter at the column's left edge: the tick rail, and the scrollbar on its right.
 const RAIL: f32 = 16.0;
+/// A page of the keyboard is this much of the viewport.
+const PAGE_OF_VIEWPORT: f32 = 0.9;
+/// Three lines of the transcript's body text (24 px each), the step of the arrow keys.
+const LINE_STEP: f32 = 3.0 * 24.0;
+/// A message's text starts this far or less below the view's top: it is the one at the top (a
+/// bubble's padding sits above its text).
+const PROMPT_AT_TOP: f32 = 48.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
+/// How far above the end of the transcript the view is held when it stops following there: the
+/// list takes a view within a pixel of the end for the tail.
+const HOLD_ABOVE_END: f32 = 2.0;
+/// How many items from the top of the view are measured again when the renderers settle.
+const SETTLED_ITEMS: usize = 40;
+/// Replies whose parsed tree is kept, and replies whose files were looked up, before the least
+/// recently drawn go. A long thread has more replies than that; drawing one again parses it again.
+const PARSED_REPLIES: usize = 512;
+const PROBED_REPLIES: usize = 256;
 
 /// What one older run of the thread contributed to the transcript, and what it was built from:
 /// a finished run is not built again until its events (or its summary) change.
@@ -71,13 +100,79 @@ struct Segment {
     rows: Vec<Row>,
 }
 
+/// The line before the `at`th run of a thread (none before the first): which agent and model it
+/// went to, and when. A run that does not say its model has the one its first event reported.
+fn divider_row(
+    state: &reno_client::State,
+    id: &RunId,
+    at: usize,
+    reported_model: Option<String>,
+) -> Option<Row> {
+    state.run(id).filter(|_| at > 0).map(|r| Row::Divider {
+        key: Key::divider(at),
+        executor: r.executor.clone(),
+        model: r.model.clone().or(reported_model),
+        at_ms: r.created_at_ms,
+    })
+}
+
+/// What comes before a run's events in the transcript: its divider, its prompt (stamped with the
+/// run's start) and the routing card.
+fn lead_rows(
+    state: &reno_client::State,
+    id: &RunId,
+    segment: usize,
+    reported_model: Option<String>,
+    routing: Option<RoutingView>,
+) -> Vec<Row> {
+    // The whole prompt when the daemon sends it; otherwise (an older daemon) the title, which is
+    // its first line, and which in the "bot . repo: what" shape shows its "what".
+    let prompt = state.run(id).map(|r| {
+        r.prompt
+            .as_deref()
+            .unwrap_or_else(|| summary::parse_title(&r.title).what)
+    });
+    let mut rows = model::build_rows(prompt, &[], &[]).rows;
+    if let Some(run) = state.run(id) {
+        model::stamp_prompt(&mut rows, run.created_at_ms);
+    }
+    let mut lead: Vec<Row> = divider_row(state, id, segment, reported_model)
+        .into_iter()
+        .collect();
+    lead.extend(
+        model::with_routing(rows, routing)
+            .into_iter()
+            .map(|row| row.in_segment(segment)),
+    );
+    lead
+}
+
+/// The thread's latest run, built as its events arrive: what `refresh` feeds, and what it checked
+/// the screen's rows against last time.
+struct Latest {
+    builder: TurnBuilder,
+    /// How many of the run's events the builder has taken, and the seq of the last.
+    fed: usize,
+    last_seq: Option<Seq>,
+    /// The rows that come before the builder's in the transcript: the run's divider, its prompt
+    /// and its routing card. They are not events.
+    lead: Vec<Row>,
+}
+
 pub(crate) struct RunScreen {
     store: Entity<Store>,
     /// The thread's latest run when the screen opened: the run the composer, the header and the
     /// Review read. The transcript shows every run of its thread up to this one.
     run: RunId,
     list: ListState,
+    /// The nested rows: what the transcript says, and what its tests read.
     rows: Vec<Row>,
+    /// The flat items the list draws, over `rows` and the open folds.
+    items: Projection,
+    /// The prompt tick rail, and where each top-level row starts (0.0 to 1.0): made when the rows
+    /// change, not on every frame.
+    ticks: Vec<convo::TickMark>,
+    row_starts: Vec<f32>,
     /// How many leading rows are the older runs' (with their dividers), and what they were built
     /// from. While that holds, only the latest run's rows are built again.
     prefix_len: usize,
@@ -87,18 +182,43 @@ pub(crate) struct RunScreen {
     /// How many times an older run's rows were built (tests assert it stays put).
     #[cfg(test)]
     older_builds: usize,
+    /// The latest run's rows as its events arrive; none while an approval waits on this run (its
+    /// card is drawn from the state, not from the events), until it is built again.
+    latest: Option<Latest>,
+    /// How many times the rows were built whole (tests assert a streamed delta costs none), and
+    /// how many list items were told to measure again.
+    #[cfg(test)]
+    rebuilds: usize,
+    #[cfg(test)]
+    remeasured: std::cell::Cell<usize>,
     /// What Review compares: the whole thread (default) or the latest run.
     scope: ReviewScope,
     /// The Session tab's "Close thread" is asking for a confirmation.
     close_confirm: bool,
     facts: Facts,
-    /// One streaming parse per prose row, keyed by the row's first event.
-    markdown: HashMap<Key, Streaming>,
-    /// Tool groups and reasoning rows the user opened.
-    open: HashSet<Key>,
-    /// Tool calls whose output shows (in a group of more than one), and those showing all of it.
-    outputs_open: HashSet<String>,
-    outputs_full: HashSet<String>,
+    /// One streaming parse per prose row, keyed by the row's first event, made when the row is
+    /// first drawn. The oldest go when the thread is long; the reply still arriving never does.
+    markdown: Lru<Key, Streaming>,
+    live_reply: Option<Key>,
+    /// Folds, tool groups, reasoning rows and long messages that are open: the owner's, and those
+    /// find opened (which it closes again).
+    open: Opens<Key>,
+    /// The reasoning row streaming now (the last row of a live run): a third open source, held
+    /// in neither set of `open`, that ends with the stream.
+    streaming_open: Option<Key>,
+    /// Reasoning rows the owner closed that the stream or the Thinking setting would show open.
+    reasoning_shut: HashSet<Key>,
+    /// The Thinking setting the item heights were last made for.
+    thinking_seen: ThinkingMode,
+    /// Where a Preview window is scrolled, and the row and length it was last taken to the end
+    /// for (so the owner can scroll up while no new text arrives).
+    reasoning_scroll: gpui::ScrollHandle,
+    reasoning_scrolled: std::cell::Cell<Option<(Key, usize)>>,
+    /// Tool calls whose output shows, and those showing all of it.
+    outputs_open: Opens<String>,
+    outputs_full: Opens<String>,
+    /// Find in the conversation.
+    find: find::Find,
     /// The side panel's tabs, keyed by what the panel belongs to (the run, until threads land).
     panel_key: PanelKey,
     panel: PanelState,
@@ -106,6 +226,13 @@ pub(crate) struct RunScreen {
     /// person has opened or closed a tab since (which stops that choice).
     panel_seeded: bool,
     panel_touched: bool,
+    /// The place the thread was left at, until the transcript has come far enough to show it,
+    /// and whether the owner has moved the view since this screen opened.
+    place_pending: Option<Place>,
+    place_moved: bool,
+    /// Frames left before the view and its place are looked at again, after the view moved with
+    /// no wheel event (the list has not laid out yet where it now rests).
+    rechecks: u8,
     /// Focus for the panel, so its letters and its keys do not reach the steer input.
     panel_focus: FocusHandle,
     /// The panel was drawn on the last frame (it is not hidden or closed).
@@ -165,6 +292,18 @@ pub(crate) struct RunScreen {
     activity_output: Option<String>,
     /// How many agents the transcript's chips were measured for (a chip changes a row's height).
     activity_chips: usize,
+    /// Selecting text across the transcript, and the node that holds the keyboard for ⌘C.
+    select: select::Select,
+    transcript_focus: FocusHandle,
+    /// The runs of the thread shown, oldest first; a row's run is in the high bits of its key.
+    runs: Vec<RunId>,
+    /// The agent-posted visuals of those runs (none with the real daemon).
+    visuals: Vec<Visual>,
+    /// The worktree's files a reply names, and the replies already looked through.
+    file_index: links::Index,
+    probed: Lru<Key, usize>,
+    /// The last renderer-settled generation seen: when it moves, drawn rows are measured again.
+    settled_seen: u64,
     _store: Subscription,
 }
 
@@ -175,7 +314,18 @@ impl RunScreen {
         store.update(cx, |store, cx| store.open_run(run.clone(), cx));
         let steer = cx.new(|cx| Composer::steer(store.clone(), run.clone(), cx));
         let key = panel_key_for(store.read(cx), &run);
-        let saved = Saved::get(&key, cx).or_else(|| migrated(store.read(cx), &key, cx));
+        let own = Saved::get(&key, cx);
+        let own_place = own.as_ref().and_then(|d| d.place);
+        let own = own.filter(Descriptors::has_panel);
+        // A record under the run id holds tabs only when the owner used them; one that is only a
+        // place is read for the place and leaves the first tabs unchosen.
+        let old = match own {
+            Some(_) => None,
+            None => migrated(store.read(cx), &key, cx),
+        };
+        let old_place = old.as_ref().and_then(|d| d.place);
+        let saved = own.or(old.filter(Descriptors::has_panel));
+        let place = own_place.or(old_place);
         // What was saved names terminals by id; the panel names them by slot.
         let (terms, saved) = match saved {
             Some(saved) => {
@@ -184,13 +334,26 @@ impl RunScreen {
             }
             None => (terminal::Terms::default(), None),
         };
-        let (panel, panel_seeded) = match saved {
+        let (mut panel, panel_seeded) = match saved {
             // What the person left: the first-tabs choice must not undo it.
             Some(saved) => (PanelState::restore(&saved), true),
             None => (PanelState::default(), false),
         };
+        panel.set_place(place);
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
+        // A scroll may have brought the view back to the tail (or taken it off): the "jump to
+        // latest" control reads that on the next frame, once the list has settled.
+        let this = cx.entity_id();
+        let screen = cx.weak_entity();
+        list.set_scroll_handler(move |_, window, _| {
+            let screen = screen.clone();
+            // The list has settled by then: the place is read from where it rests.
+            window.on_next_frame(move |_, cx| {
+                cx.notify(this);
+                screen.update(cx, |this, cx| this.note_place(cx)).ok();
+            });
+        });
         let mut screen = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 this.refresh(cx);
@@ -200,22 +363,40 @@ impl RunScreen {
             run: run.clone(),
             list,
             rows: Vec::new(),
+            items: Projection::default(),
+            ticks: Vec::new(),
+            row_starts: Vec::new(),
             prefix_len: 0,
             prefix_runs: Vec::new(),
             segments: HashMap::new(),
             #[cfg(test)]
             older_builds: 0,
+            latest: None,
+            #[cfg(test)]
+            rebuilds: 0,
+            #[cfg(test)]
+            remeasured: std::cell::Cell::new(0),
             scope: ReviewScope::default(),
             close_confirm: false,
             facts: Facts::default(),
-            markdown: HashMap::new(),
-            open: HashSet::new(),
-            outputs_open: HashSet::new(),
-            outputs_full: HashSet::new(),
+            markdown: Lru::new(PARSED_REPLIES, usize::MAX),
+            live_reply: None,
+            open: Opens::default(),
+            streaming_open: None,
+            reasoning_shut: HashSet::new(),
+            thinking_seen: Prefs::thinking(cx),
+            reasoning_scroll: gpui::ScrollHandle::new(),
+            reasoning_scrolled: std::cell::Cell::new(None),
+            outputs_open: Opens::default(),
+            outputs_full: Opens::default(),
+            find: find::Find::default(),
             panel_key: key,
             panel,
             panel_seeded,
             panel_touched: false,
+            place_pending: place,
+            place_moved: false,
+            rechecks: 0,
             panel_focus: cx.focus_handle(),
             panel_shown: false,
             files: None,
@@ -248,6 +429,13 @@ impl RunScreen {
             activity_tasks_open: false,
             activity_output: None,
             activity_chips: 0,
+            select: select::Select::default(),
+            transcript_focus: cx.focus_handle(),
+            runs: Vec::new(),
+            visuals: Vec::new(),
+            file_index: links::Index::default(),
+            probed: Lru::new(PROBED_REPLIES, usize::MAX),
+            settled_seen: markdown_view::settled_generation(cx),
         };
         screen.refresh(cx);
         screen
@@ -301,6 +489,18 @@ impl RunScreen {
         self.older_builds
     }
 
+    /// How many times the rows were built whole.
+    #[cfg(test)]
+    pub(crate) fn rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+
+    /// How many list items were told to measure again.
+    #[cfg(test)]
+    pub(crate) fn remeasured(&self) -> usize {
+        self.remeasured.get()
+    }
+
     #[cfg(test)]
     pub(crate) fn panel_key(&self) -> &PanelKey {
         &self.panel_key
@@ -321,10 +521,22 @@ impl RunScreen {
         &self.facts
     }
 
-    /// The first row the list shows.
+    /// The first top-level row the list shows (an item inside a fold is its fold's row).
     #[cfg(test)]
     pub(crate) fn top_row(&self) -> usize {
-        self.list.logical_scroll_top().item_ix
+        self.items
+            .top_of(self.list.logical_scroll_top().item_ix, self.rows.len())
+    }
+
+    /// The flat items the list draws, for tests.
+    #[cfg(test)]
+    pub(crate) fn items(&self) -> &Projection {
+        &self.items
+    }
+
+    #[cfg(test)]
+    pub(crate) fn item_count(&self) -> usize {
+        self.list.item_count()
     }
 
     #[cfg(test)]
@@ -332,23 +544,244 @@ impl RunScreen {
         self.list.is_following_tail()
     }
 
+    /// The owner opens or closes a fold, a reasoning row, a tool group or a long message.
+    /// Opening one while the view follows the tail stops following and puts what opened at the
+    /// top of the view, so what grew stays in view.
     fn toggle(&mut self, key: Key, cx: &mut Context<Self>) {
-        if !self.open.remove(&key) {
-            self.open.insert(key);
+        let opening = !self.open.contains(&key);
+        let following = self.list.is_following_tail();
+        self.open.toggle(key);
+        self.reflow(key, cx);
+        if opening && following {
+            self.keep_in_view(key, cx);
         }
-        self.remeasure(key);
+    }
+
+    /// The owner opened what grows the transcript (a fold, an output, a diagram zoom) while the
+    /// view follows the tail: it stops following where it rests, so what grew stays in view.
+    pub(crate) fn pause_following(&mut self, cx: &mut Context<Self>) {
+        self.hold_above_end();
+        self.view_moved(cx);
+    }
+
+    /// Sets the view a little above the end of the transcript. The list's own pause keeps no hold
+    /// on a bottom-aligned list that rests at its end, and takes a view within a pixel of the end
+    /// for the tail. A transcript that fits has nothing to hold.
+    fn hold_above_end(&mut self) {
+        if f32::from(self.list.max_offset_for_scrollbar().y) > HOLD_ABOVE_END {
+            self.scroll_to_px((self.scrolled_px() - HOLD_ABOVE_END).max(0.0));
+        }
+    }
+
+    /// The view moved with no wheel event: its place is kept, now and again once the list has
+    /// laid out where it rests.
+    fn view_moved(&mut self, cx: &mut Context<Self>) {
+        self.note_place(cx);
+        self.rechecks = 2;
         cx.notify();
     }
 
-    /// The row holding `key` (itself, or inside a fold) changed height: measure it again.
-    pub(super) fn remeasure(&mut self, key: Key) {
-        let holds = |row: &Row| {
-            row.key() == key
-                || matches!(row, Row::Worked { rows, .. } if rows.iter().any(|r| r.key() == key))
-        };
-        if let Some(ix) = self.rows.iter().position(holds) {
-            self.list.splice(ix..ix + 1, 1);
+    /// Runs on every render. The frame after the view moved, the list has laid out where it rests:
+    /// if it took the view back to the tail (what opened sat too near the end to reach the top of
+    /// the view) the view is held off the tail again; either way the place is read from there.
+    fn recheck_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rechecks == 0 {
+            return;
         }
+        self.rechecks -= 1;
+        if self.rechecks > 0 {
+            let this = cx.entity_id();
+            window.on_next_frame(move |_, cx| cx.notify(this));
+            return;
+        }
+        if self.list.is_following_tail() {
+            self.hold_above_end();
+        }
+        self.note_place(cx);
+    }
+
+    /// The owner opens or closes a reasoning row. What the stream or the Thinking setting shows
+    /// open is closed for good by a click, and what the owner opens stays open once the stream
+    /// ends.
+    pub(super) fn toggle_reasoning(&mut self, key: Key, cx: &mut Context<Self>) {
+        if self.reasoning_open(key, cx) {
+            if self.open.contains(&key) {
+                self.open.toggle(key);
+            }
+            self.reasoning_shut.insert(key);
+            self.reflow(key, cx);
+        } else {
+            self.reasoning_shut.remove(&key);
+            self.toggle(key, cx);
+        }
+    }
+
+    /// Whether the reasoning row `key` shows its text.
+    pub(super) fn reasoning_open(&self, key: Key, cx: &gpui::App) -> bool {
+        let by_setting = match Prefs::thinking(cx) {
+            ThinkingMode::Open => true,
+            ThinkingMode::Closed => false,
+            ThinkingMode::Auto | ThinkingMode::Preview => self.streaming_open == Some(key),
+        };
+        self.open.contains(&key) || (by_setting && !self.reasoning_shut.contains(&key))
+    }
+
+    /// The reasoning row that is the end of a live run is the one streaming; when that changes
+    /// the old and the new row are measured again.
+    fn track_streaming_reasoning(&mut self, cx: &Context<Self>) {
+        let streaming = match self.rows.last() {
+            Some(Row::Reasoning { key, .. }) if self.is_live(cx) => Some(*key),
+            _ => None,
+        };
+        if streaming == self.streaming_open {
+            return;
+        }
+        let before = std::mem::replace(&mut self.streaming_open, streaming);
+        for key in before.into_iter().chain(streaming) {
+            self.remeasure(key);
+        }
+    }
+
+    /// The Thinking setting changed: the reasoning rows are measured again.
+    fn follow_thinking_setting(&mut self, cx: &gpui::App) {
+        let now = Prefs::thinking(cx);
+        if now == self.thinking_seen {
+            return;
+        }
+        self.thinking_seen = now;
+        for ix in 0..self.items.len() {
+            if matches!(self.items.row(&self.rows, ix), Some(Row::Reasoning { .. })) {
+                self.measure_again(ix);
+            }
+        }
+    }
+
+    /// Stops following the tail, with the item of `key` at the top of the view. Putting an item at
+    /// the top stops following on its own (and the recheck holds the view off the tail when the
+    /// item sits too near the end to reach the top); with no such item the view is held above the
+    /// end where it rests.
+    pub(super) fn keep_in_view(&mut self, key: Key, cx: &mut Context<Self>) {
+        match self.items.item_of(key) {
+            Some(ix) => self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            }),
+            None => self.hold_above_end(),
+        }
+        self.view_moved(cx);
+    }
+
+    /// What `key` shows changed: a fold's rows come into the list or leave it; anything else is
+    /// one item that is measured again.
+    pub(super) fn reflow(&mut self, key: Key, cx: &mut Context<Self>) {
+        let is_fold = self
+            .items
+            .item_of(key)
+            .and_then(|ix| self.items.row(&self.rows, ix))
+            .is_some_and(|row| matches!(row, Row::Worked { .. }));
+        if is_fold {
+            self.reproject(cx);
+        } else {
+            self.remeasure(key);
+        }
+        self.find_note_change(cx);
+        cx.notify();
+    }
+
+    /// The row holding `key` changed height: measure its item again.
+    pub(super) fn remeasure(&mut self, key: Key) {
+        if let Some(ix) = self.items.item_of(key) {
+            self.measure_again(ix);
+        }
+    }
+
+    /// Item `ix` is measured again the next time it is drawn; its old height stands until then,
+    /// and the view's place in it does not move.
+    fn measure_again(&self, ix: usize) {
+        #[cfg(test)]
+        self.remeasured.set(self.remeasured.get() + 1);
+        self.list.remeasure_items(ix..ix + 1);
+    }
+
+    /// The open folds changed: the items are made again over the same rows, and the list is told
+    /// which came or went. The fold's head keeps its place.
+    fn reproject(&mut self, cx: &mut Context<Self>) {
+        self.replace_rows(0, None, cx);
+    }
+
+    /// Makes the items of the rows from top-level row `from` on (the rows before it did not
+    /// change) and tells the list what differs. `rows` are the new rows from `from`: `None`
+    /// when the rows stay and only the open folds changed.
+    fn replace_rows(&mut self, from: usize, rows: Option<Vec<Row>>, cx: &mut Context<Self>) {
+        let from = from.min(self.rows.len());
+        let rows_replaced = rows.is_some();
+        let old_rows = match rows {
+            Some(new) => {
+                let old = self.rows.split_off(from);
+                self.rows.extend(new);
+                old
+            }
+            // The rows stay where they are: compare them with themselves.
+            None => Vec::new(),
+        };
+        let same_rows = old_rows.is_empty() && from == 0;
+        let was_last_done = self
+            .items
+            .last_done_item()
+            .map(|ix| self.items.items[ix].key);
+        let before = self.items.len();
+        let open = &self.open;
+        let old_items = self
+            .items
+            .reproject(&self.rows, from, |k| open.contains(&k));
+        let at = before - old_items.len();
+        let replaced = rows_replaced;
+        let plan = items::diff(
+            Side {
+                rows: if same_rows { &self.rows } else { &old_rows },
+                base: if same_rows { 0 } else { from },
+                items: &old_items,
+            },
+            Side {
+                rows: &self.rows,
+                base: 0,
+                items: &self.items.items[at..],
+            },
+            at,
+        );
+        self.apply_plan(&plan);
+        // The Done that says what the branch holds moved to another row: both are measured again.
+        let now_last_done = self
+            .items
+            .last_done_item()
+            .map(|ix| self.items.items[ix].key);
+        if was_last_done != now_last_done {
+            for key in was_last_done.into_iter().chain(now_last_done) {
+                self.remeasure(key);
+            }
+        }
+        if replaced && !plan.is_empty() {
+            self.rail_changed();
+            // New events: the find count follows, soon, from a timer this arms.
+            self.find_note_change(cx);
+        }
+    }
+
+    /// Tells the list what [`items::diff`] found.
+    fn apply_plan(&self, plan: &items::Plan) {
+        if let Some((range, count)) = &plan.splice {
+            self.list.splice(range.clone(), *count);
+        }
+        for &ix in &plan.remeasure {
+            self.measure_again(ix);
+        }
+    }
+
+    /// The rows changed: the tick rail is worked out again, once, not on every frame.
+    fn rail_changed(&mut self) {
+        self.reorder();
+        self.ticks = convo::tick_marks(&self.rows);
+        self.row_starts = convo::row_starts(&self.rows);
     }
 
     /// Rebuilds the rows from the store and tells the list what changed.
@@ -369,26 +802,77 @@ impl RunScreen {
             .approvals_for(&self.run)
             .cloned()
             .collect();
-        self.rebuild_rows(routing, &pending, cx);
+        if !self.advance_latest(routing.clone(), &pending, cx) {
+            self.rebuild_rows(routing, &pending, cx);
+        }
+        self.track_streaming_reasoning(cx);
+        self.sync_visuals(cx);
         self.measure_activity_chips(cx);
         self.keep_menu(&pending);
         self.resolve_panel_key(cx);
+        self.follow_place();
         self.follow_changes(cx);
         self.follow_thread(cx);
     }
 
-    /// Chips under the transcript's agent text change those rows' height: measure them again when
-    /// the run's agents appear or go.
+    /// Chips under the transcript's agent text change those rows' height: measure the prose rows
+    /// they hang under again when the run's agents appear or go.
     fn measure_activity_chips(&mut self, cx: &gpui::App) {
-        let chips = self
+        let spawned: Vec<usize> = self
             .store
             .read(cx)
             .run_activity(&self.run)
-            .map_or(0, |a| a.agents.len());
-        if chips != self.activity_chips {
-            self.activity_chips = chips;
-            let rows = self.rows.len();
-            self.list.splice(0..rows, rows);
+            .map(|a| a.agents.iter().map(|l| l.spawned_after).collect())
+            .unwrap_or_default();
+        if spawned.len() == self.activity_chips {
+            return;
+        }
+        self.activity_chips = spawned.len();
+        for n in spawned {
+            if let Some(ix) = self.items.prose_item(n) {
+                self.measure_again(ix);
+            }
+        }
+    }
+
+    /// Puts the agent-posted visuals after the entries they were posted with, once each: none with
+    /// a connection that offers none (TRANSCRIPT-12.1, 12.3).
+    fn sync_visuals(&mut self, cx: &mut Context<Self>) {
+        let mut visuals = Vec::new();
+        let mut posted: HashMap<Key, Vec<usize>> = HashMap::new();
+        let store = self.store.read(cx);
+        for (segment, run) in self.runs.iter().enumerate() {
+            for visual in store.run_visuals(run) {
+                if let Some(host) = items::host_of(&self.rows, segment, visual.after.0) {
+                    posted.entry(host).or_default().push(visuals.len());
+                    visuals.push(visual);
+                }
+            }
+        }
+        let moved = self.items.set_posted(posted);
+        if moved || visuals != self.visuals {
+            self.visuals = visuals;
+            self.reproject(cx);
+        }
+    }
+
+    /// The renderers settled something (a diagram, an image, a wrap): a row they drew may be taller
+    /// or shorter now, so the rows in view that hold their output are measured again and none is
+    /// drawn over the one below.
+    fn remeasure_settled(&mut self, cx: &gpui::App) {
+        let seen = markdown_view::settled_generation(cx);
+        if seen == self.settled_seen {
+            return;
+        }
+        self.settled_seen = seen;
+        let top = self.list.logical_scroll_top().item_ix;
+        let end = (top + SETTLED_ITEMS).min(self.items.len());
+        for ix in top..end {
+            let holds_output = self.items.items[ix].visual.is_some()
+                || matches!(self.items.row(&self.rows, ix), Some(Row::Prose { .. }));
+            if holds_output {
+                self.measure_again(ix);
+            }
         }
     }
 
@@ -401,25 +885,136 @@ impl RunScreen {
         }
     }
 
-    /// Rebuilds what changed: the latest run's rows each time, an older run's only when its
-    /// events or summary moved. Rows of older runs sit before it, each run after the first
-    /// behind a divider. The list is told only what differs.
+    /// The latest run's rows from the events that arrived since the last time, when that is all
+    /// there is to do: the older runs are as they were, nothing waits on an approval, the events
+    /// are the ones the builder has taken with more after them, and the rows are the ones it made.
+    /// Then only the first row that differs, the one before it and the rows after them are made
+    /// again as items. Whether it did; if not, the rows are built whole.
+    fn advance_latest(
+        &mut self,
+        routing: Option<RoutingView>,
+        pending: &[Approval],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !pending.is_empty() || self.latest.is_none() {
+            return false;
+        }
+        let ids = self.thread_runs(cx);
+        let segment = ids.len() - 1;
+        let state = self.store.read(cx).state();
+        let Some(run) = state.run(&ids[segment]) else {
+            return false;
+        };
+        let events = state
+            .transcript(&ids[segment])
+            .map_or(&[][..], |t| t.events.as_slice());
+        let older = ids[..segment]
+            .iter()
+            .map(|id| (id.clone(), Self::signature(state, id)))
+            .collect::<Vec<_>>();
+        let Some(latest) = self.latest.as_mut() else {
+            return false;
+        };
+        let continues = latest.fed <= events.len()
+            && latest
+                .fed
+                .checked_sub(1)
+                .is_none_or(|last| Some(events[last].0) == latest.last_seq);
+        let mirrored =
+            self.rows.len() == self.prefix_len + latest.lead.len() + latest.builder.rows().len();
+        if ids != self.runs || older != self.prefix_runs || !continues || !mirrored {
+            return false;
+        }
+
+        let mut first: Option<usize> = None;
+        let mut note = |at: Option<usize>| {
+            if let Some(at) = at {
+                first = Some(first.map_or(at, |was| was.min(at)));
+            }
+        };
+        for (seq, event) in &events[latest.fed..] {
+            let change = latest.builder.push(*seq, event);
+            note(Self::first_row(latest.builder.rows(), &change));
+        }
+        latest.fed = events.len();
+        latest.last_seq = events.last().map(|(seq, _)| *seq);
+        let timed = latest.builder.set_run_time(
+            run.status.is_terminal(),
+            run.created_at_ms,
+            run.updated_at_ms,
+        );
+        note(Self::first_row(latest.builder.rows(), &timed));
+        self.facts = latest.builder.facts().clone();
+
+        let lead = lead_rows(
+            state,
+            &ids[segment],
+            segment,
+            latest.builder.facts().model.clone(),
+            routing,
+        );
+        let lead_len = latest.lead.len();
+        let (from, tail) = if lead != latest.lead {
+            latest.lead = lead;
+            let mut tail = latest.lead.clone();
+            tail.extend_from_slice(latest.builder.rows());
+            (0, tail)
+        } else if let Some(at) = first {
+            // The row before the first that differs goes with it: it was the last one, or
+            // the prose before a `Done`, and is not what it was.
+            let start = (lead_len + at).saturating_sub(1);
+            let mut tail = Vec::new();
+            if start < lead_len {
+                tail.extend_from_slice(&latest.lead[start..]);
+                tail.extend_from_slice(latest.builder.rows());
+            } else {
+                tail.extend_from_slice(&latest.builder.rows()[start - lead_len..]);
+            }
+            (start, tail)
+        } else {
+            return true;
+        };
+        self.replace_rows(self.prefix_len + from, Some(tail), cx);
+        true
+    }
+
+    /// The first top-level row a change says is not what it was.
+    fn first_row(rows: &[Row], change: &Change) -> Option<usize> {
+        match change {
+            Change::Unchanged => None,
+            Change::Folded { turn, .. } => Some(turn.start),
+            Change::Grew(key) | Change::Added(key) => {
+                rows.iter().rposition(|row| row.key() == *key)
+            }
+        }
+    }
+
+    /// What an older run's rows were built from: how many events it has, and how it stands.
+    fn signature(state: &reno_client::State, id: &RunId) -> (usize, Option<RunStatus>) {
+        (
+            state.transcript(id).map_or(0, |t| t.events.len()),
+            state.run(id).map(|r| r.status),
+        )
+    }
+
+    /// Builds the rows whole: the latest run's, and an older run's when its events or summary
+    /// moved. Rows of older runs sit before it, each run after the first behind a divider. The
+    /// list is told only what differs.
     fn rebuild_rows(
         &mut self,
         routing: Option<RoutingView>,
         pending: &[Approval],
         cx: &mut Context<Self>,
     ) {
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
         let ids = self.thread_runs(cx);
+        self.runs.clone_from(&ids);
         let (older, anchor) = ids.split_at(ids.len() - 1);
         let segment_at = ids.len() - 1;
         let state = self.store.read(cx).state();
-        let signature = |id: &RunId| {
-            (
-                state.transcript(id).map_or(0, |t| t.events.len()),
-                state.run(id).map(|r| r.status),
-            )
-        };
         let build = |id: &RunId, with: &[Approval]| {
             let events = state
                 .transcript(id)
@@ -444,30 +1039,72 @@ impl RunScreen {
             }
             built
         };
-        let divider = |id: &RunId, at: usize, model: Option<String>| {
-            state.run(id).filter(|_| at > 0).map(|r| Row::Divider {
-                key: Key::divider(at),
-                executor: r.executor.clone(),
-                model: r.model.clone().or(model),
-                at_ms: r.created_at_ms,
-            })
-        };
-        let prefix_runs: Vec<_> = older.iter().map(|id| (id.clone(), signature(id))).collect();
-        let prefix_same = prefix_runs == self.prefix_runs;
-        let mut built = build(&anchor[0], pending);
-        built.rows = model::with_routing(built.rows, routing);
-        let mut tail: Vec<Row> = divider(&anchor[0], segment_at, built.facts.model.clone())
-            .into_iter()
+        let prefix_runs: Vec<_> = older
+            .iter()
+            .map(|id| (id.clone(), Self::signature(state, id)))
             .collect();
-        tail.extend(built.rows.into_iter().map(|row| row.in_segment(segment_at)));
-        let facts = built.facts;
+        let prefix_same = prefix_runs == self.prefix_runs;
+        let (tail, latest) = match (pending.is_empty(), state.run(&anchor[0])) {
+            (true, Some(run)) => {
+                let events = state
+                    .transcript(&anchor[0])
+                    .map_or(&[][..], |t| t.events.as_slice());
+                let mut builder = TurnBuilder::new(segment_at);
+                for (seq, event) in events {
+                    builder.push(*seq, event);
+                }
+                builder.set_run_time(
+                    run.status.is_terminal(),
+                    run.created_at_ms,
+                    run.updated_at_ms,
+                );
+                let lead = lead_rows(
+                    state,
+                    &anchor[0],
+                    segment_at,
+                    builder.facts().model.clone(),
+                    routing,
+                );
+                let mut tail = lead.clone();
+                tail.extend_from_slice(builder.rows());
+                let latest = Latest {
+                    fed: events.len(),
+                    last_seq: events.last().map(|(seq, _)| *seq),
+                    builder,
+                    lead,
+                };
+                self.facts = latest.builder.facts().clone();
+                (tail, Some(latest))
+            }
+            _ => {
+                let mut built = build(&anchor[0], pending);
+                built.rows = model::with_routing(built.rows, routing);
+                let mut tail: Vec<Row> =
+                    divider_row(state, &anchor[0], segment_at, built.facts.model.clone())
+                        .into_iter()
+                        .collect();
+                tail.extend(built.rows.into_iter().map(|row| row.in_segment(segment_at)));
+                self.facts = built.facts;
+                (tail, None)
+            }
+        };
+        self.latest = latest;
 
         if prefix_same {
-            self.apply_tail(facts, tail);
+            // The older runs' rows and items stay: only the latest run's are made again.
+            let from = self.prefix_len.min(self.rows.len());
+            self.replace_rows(from, Some(tail), cx);
             return;
         }
-        // Some older run moved: build it again, the others come from the cache.
+        // Some older run moved: build it again, the others come from the cache. The runs before
+        // the first that moved, and their rows and items, stay as they are.
+        let same_upto = prefix_runs
+            .iter()
+            .zip(&self.prefix_runs)
+            .take_while(|(now, was)| now == was)
+            .count();
         let mut cache = std::mem::take(&mut self.segments);
+        let mut from = 0;
         let mut rows: Vec<Row> = Vec::new();
         for (at, (id, sig)) in prefix_runs.iter().enumerate() {
             let segment = match cache.remove(id).filter(|c| &c.signature == sig) {
@@ -477,10 +1114,20 @@ impl RunScreen {
                     {
                         self.older_builds += 1;
                     }
-                    let built = build(id, &[]);
-                    let mut seg_rows: Vec<Row> = divider(id, at, built.facts.model.clone())
-                        .into_iter()
-                        .collect();
+                    let events = state
+                        .transcript(id)
+                        .map_or(&[][..], |t| t.events.as_slice());
+                    let mut built = model::build_rows(None, events, &[]);
+                    if let Some(run) = state.run(id) {
+                        let elapsed = convo::run_elapsed_ms(
+                            run.status.is_terminal(),
+                            run.created_at_ms,
+                            run.updated_at_ms,
+                            events,
+                        );
+                        built.rows = model::fold_turns(built.rows, elapsed);
+                    }
+                    let mut seg_rows = lead_rows(state, id, at, built.facts.model.clone(), None);
                     seg_rows.extend(built.rows.into_iter().map(|row| row.in_segment(at)));
                     Segment {
                         signature: *sig,
@@ -488,14 +1135,17 @@ impl RunScreen {
                     }
                 }
             };
-            rows.extend(segment.rows.iter().cloned());
+            if at < same_upto {
+                from += segment.rows.len();
+            } else {
+                rows.extend(segment.rows.iter().cloned());
+            }
             self.segments.insert(id.clone(), segment);
         }
-        self.prefix_len = rows.len();
+        self.prefix_len = from + rows.len();
         self.prefix_runs = prefix_runs;
-        self.feed_markdown(&rows);
         rows.extend(tail);
-        self.apply(Built { rows, facts });
+        self.replace_rows(from, Some(rows), cx);
     }
 
     /// Opens every fold of a finished turn (a screenshot hook: `RENO_OPEN_FOLDS=1`).
@@ -506,11 +1156,16 @@ impl RunScreen {
             .filter(|row| matches!(row, Row::Worked { .. }))
             .map(Row::key)
             .collect();
-        for key in folds {
-            if !self.open.contains(&key) {
-                self.toggle(key, cx);
-            }
+        if folds.is_empty() {
+            return;
         }
+        for key in folds {
+            self.open.owner_open(key);
+        }
+        self.list.pause_following_tail();
+        self.reproject(cx);
+        self.find_note_change(cx);
+        cx.notify();
     }
 
     /// `RENO_BENCH=1`: once the transcript has stopped growing, scroll it from its end to its
@@ -578,28 +1233,135 @@ impl RunScreen {
         .detach();
     }
 
-    /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).
+    /// Brings the row at `ix` to the top of the list.
     fn scroll_to_row(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.list.scroll_to(ListOffset {
-            item_ix: ix,
+            item_ix: self.items.item_of_top(ix),
             offset_in_item: px(0.0),
         });
+        self.note_place(cx);
         cx.notify();
+    }
+
+    /// How far the view is scrolled, in pixels from the start of the transcript. At the tail the
+    /// list's own scroll top is the end of the content, not the top of the view, so it is
+    /// clamped.
+    fn scrolled_px(&self) -> f32 {
+        let end = f32::from(self.list.max_offset_for_scrollbar().y);
+        (-f32::from(self.list.scroll_px_offset_for_scrollbar().y)).clamp(0.0, end)
+    }
+
+    /// Puts the top of the view `to` pixels from the start of the transcript; the end of the
+    /// thread is the tail, which the list follows again.
+    fn scroll_to_px(&mut self, to: f32) {
+        let to = to.clamp(0.0, f32::from(self.list.max_offset_for_scrollbar().y));
+        if to == 0.0 {
+            // Rows not measured yet count for no height, so a pixel offset of 0 could land past
+            // them.
+            self.list.scroll_to(ListOffset::default());
+        } else {
+            self.list
+                .set_offset_from_scrollbar(gpui::point(px(0.0), px(-to)));
+        }
+    }
+
+    /// Scrolls by a page, 90 % of the viewport, up (`dir` -1) or down (1).
+    fn scroll_page(&mut self, dir: i8) {
+        let page = f32::from(self.list.viewport_bounds().size.height) * PAGE_OF_VIEWPORT;
+        self.scroll_to_px(self.scrolled_px() + f32::from(dir) * page);
+    }
+
+    /// Scrolls by three lines of body text, up (`dir` -1) or down (1).
+    fn scroll_lines(&mut self, dir: i8) {
+        self.scroll_to_px(self.scrolled_px() + f32::from(dir) * LINE_STEP);
+    }
+
+    fn scroll_home(&mut self) {
+        self.scroll_to_px(0.0);
+    }
+
+    /// Runs a key's move of the view and keeps the reading place: no wheel event says it moved.
+    fn moved_by_key(&mut self, cx: &mut Context<Self>, step: impl FnOnce(&mut Self)) {
+        step(self);
+        self.note_place(cx);
+        cx.notify();
+    }
+
+    pub(super) fn key_page(&mut self, dir: i8, cx: &mut Context<Self>) {
+        self.moved_by_key(cx, |s| s.scroll_page(dir));
+    }
+
+    pub(super) fn key_lines(&mut self, dir: i8, cx: &mut Context<Self>) {
+        self.moved_by_key(cx, |s| s.scroll_lines(dir));
+    }
+
+    pub(super) fn key_home(&mut self, cx: &mut Context<Self>) {
+        self.moved_by_key(cx, Self::scroll_home);
+    }
+
+    /// Takes the view to the user message before (`dir` -1) or after (1) the one at its top.
+    /// A message whose text starts above the view's top is above it; one that starts within
+    /// `PROMPT_AT_TOP` of it is the one in view. With none that way, the view stays.
+    pub(super) fn step_prompt(&mut self, dir: i8, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.prompt_beside(dir) else {
+            return;
+        };
+        self.scroll_to_message(row, window, cx);
+    }
+
+    /// Brings the user message at top-level row `row` to the top of the view. A message near the
+    /// end cannot reach the top: the list settles at the tail on its next layout, and the place
+    /// is read again from there.
+    fn scroll_to_message(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_to_row(row, cx);
+        let screen = cx.weak_entity();
+        window.on_next_frame(move |_, cx| {
+            screen.update(cx, |this, cx| this.note_place(cx)).ok();
+        });
+    }
+
+    fn prompt_beside(&self, dir: i8) -> Option<usize> {
+        let top = f32::from(self.select.list.get().top());
+        let painted = self.select.registry.borrow();
+        let first_painted = painted
+            .iter()
+            .filter_map(|p| self.items.item_of(p.key))
+            .min()?;
+        // Where a message's text starts, from the view's top; a message not painted is above the
+        // first thing that is, or below the last.
+        let start = |mark: &convo::TickMark| -> f32 {
+            let key = self.rows[mark.row].key();
+            painted
+                .iter()
+                .filter(|p| p.key == key)
+                .map(|p| f32::from(p.bounds.top()) - top)
+                .reduce(f32::min)
+                .unwrap_or(if self.items.item_of_top(mark.row) < first_painted {
+                    f32::NEG_INFINITY
+                } else {
+                    f32::INFINITY
+                })
+        };
+        let row = if dir < 0 {
+            self.ticks.iter().rev().find(|m| start(m) < 0.0)
+        } else {
+            self.ticks.iter().find(|m| start(m) > PROMPT_AT_TOP)
+        };
+        row.map(|m| m.row)
     }
 
     /// The thin rail at the column's left edge: one tick for each user message; a click scrolls
     /// to it.
-    fn tick_rail(
-        &self,
-        theme: &Theme,
-        marks: &[convo::TickMark],
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn tick_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let marks = self.ticks.as_slice();
         let scrolls = f32::from(self.list.max_offset_for_scrollbar().y);
         if marks.is_empty() || !convo::rail_visible(scrolls) {
             return None;
         }
-        let current = convo::current_tick(marks, self.list.logical_scroll_top().item_ix);
+        let top = self
+            .items
+            .top_of(self.list.logical_scroll_top().item_ix, self.rows.len());
+        let current = convo::current_tick(marks, top);
         let (faint, text) = (theme.faint.opacity(0.6), theme.text);
         Some(
             div()
@@ -609,7 +1371,7 @@ impl RunScreen {
                 .left_0()
                 .top_0()
                 .bottom_0()
-                .w(px(RAIL))
+                .w(px(RAIL - scrollbar::WIDTH))
                 .children(marks.iter().enumerate().map(|(n, mark)| {
                     let ix = mark.row;
                     let lit = current == Some(n);
@@ -620,7 +1382,7 @@ impl RunScreen {
                         .absolute()
                         .top(gpui::relative(mark.at))
                         .left_0()
-                        .w(px(RAIL))
+                        .w(px(RAIL - scrollbar::WIDTH))
                         .h(px(12.0))
                         .flex()
                         .items_center()
@@ -635,42 +1397,14 @@ impl RunScreen {
                                 .when(lit, |d| d.debug_selector(|| "tick-current".to_owned()))
                                 .hover(move |s| s.bg(text)),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.scroll_to_message(ix, window, cx)
+                        }))
                 }))
+                // Where the matches are, beside the prompt ticks.
+                .children(self.find_rail_ticks(theme))
                 .into_any_element(),
         )
-    }
-
-    /// Parses each prose row's text, those inside a fold too.
-    fn feed_markdown(&mut self, rows: &[Row]) {
-        for row in rows {
-            match row {
-                Row::Prose { key, text } => {
-                    self.markdown.entry(*key).or_default().set_text(text);
-                }
-                Row::Worked { rows, .. } => self.feed_markdown(rows),
-                _ => {}
-            }
-        }
-    }
-
-    /// The latest run's rows replace what followed the older runs'.
-    fn apply_tail(&mut self, facts: Facts, tail: Vec<Row>) {
-        self.facts = facts;
-        self.feed_markdown(&tail);
-        let at = self.prefix_len.min(self.rows.len());
-        let same = self.rows[at..]
-            .iter()
-            .zip(&tail)
-            .take_while(|(old, new)| old == new)
-            .count();
-        let old_len = self.rows.len() - at;
-        if same < old_len || same < tail.len() {
-            self.list
-                .splice(at + same..self.rows.len(), tail.len() - same);
-        }
-        self.rows.truncate(at);
-        self.rows.extend(tail);
     }
 
     /// Follows the thread: the panel key once the daemon names the thread, and a newer run of
@@ -695,22 +1429,105 @@ impl RunScreen {
     }
 
     /// The panel's key is the thread once the daemon says which it is. Until then (a run just
-    /// started) it is the run; the tabs the person has carry over.
+    /// started) it is the run; the tabs the person has carry over, and so does the place: the
+    /// view the owner moved, else the one the thread was left at.
     fn resolve_panel_key(&mut self, cx: &mut Context<Self>) {
         let want = panel_key_for(self.store.read(cx), &self.run);
         if want == self.panel_key {
             return;
         }
         self.panel_key = want;
-        match Saved::get(&self.panel_key, cx) {
+        let saved = Saved::get(&self.panel_key, cx);
+        let carried = self.panel.place();
+        let place = if self.place_moved {
+            carried
+        } else {
+            saved.as_ref().and_then(|d| d.place).or(carried)
+        };
+        match saved.filter(Descriptors::has_panel) {
             // The thread's tabs are already known (an earlier run of it): they win, unless the
             // person has changed this panel since it opened.
             Some(saved) if !self.panel_touched => {
                 self.panel = PanelState::restore(&saved);
                 self.panel_seeded = true;
+                self.panel.set_place(place);
+                if self.place_moved {
+                    self.persist_panel(cx);
+                }
             }
-            _ => self.persist_panel(cx),
+            _ => {
+                self.panel.set_place(place);
+                self.persist_panel(cx);
+            }
         }
+        if !self.place_moved {
+            self.place_pending = place;
+        }
+    }
+
+    /// The owner moved the view: where it rests now is the place to keep, saved soon. A view at
+    /// the tail has no place.
+    pub(super) fn note_place(&mut self, cx: &mut Context<Self>) {
+        self.rechecks = 0;
+        let place = self.saved_place();
+        self.place_moved = true;
+        self.place_pending = None;
+        if place != self.panel.place() {
+            self.panel.set_place(place);
+            self.persist_place(cx);
+        }
+    }
+
+    /// Where the view rests: the entry at its top and how far into it. `None` while it follows
+    /// the tail, so the thread reopens there. A posted visual has no key of its own to come back
+    /// to: the entry it follows stands in for it, at that entry's top.
+    pub(crate) fn saved_place(&self) -> Option<Place> {
+        let top = self.list.logical_scroll_top();
+        if self.list.is_following_tail() || top.item_ix >= self.items.len() {
+            return None;
+        }
+        let at = self.items.items[..=top.item_ix]
+            .iter()
+            .rposition(|item| item.visual.is_none())?;
+        let offset_pt = if at == top.item_ix {
+            f32::from(top.offset_in_item).round() as i32
+        } else {
+            0
+        };
+        Some(Place {
+            key: self.items.items[at].key.0,
+            offset_pt,
+        })
+    }
+
+    /// Puts the view where `place` says.
+    pub(crate) fn restore_place(&mut self, place: Place) {
+        self.list.scroll_to(place.resolve(&self.items, &self.rows));
+    }
+
+    /// Shows the saved place once the list has laid out and the transcript has come as far as it.
+    /// After a restart the entries arrive after the screen opens, and one that is not there yet
+    /// is not gone. A place saved off the tail rests above the bottom, so one that would rest at
+    /// the bottom means the thread has not come far enough: the view stays at the tail, which
+    /// the list would return to anyway, and the place waits.
+    fn follow_place(&mut self) {
+        let Some(place) = self.place_pending else {
+            return;
+        };
+        if !self.list_has_laid_out() || !place.is_reached(&self.items, &self.rows) {
+            return;
+        }
+        self.restore_place(place);
+        let rests_at = -self.list.scroll_px_offset_for_scrollbar().y;
+        if rests_at + px(1.0) >= self.list.max_offset_for_scrollbar().y {
+            self.list.set_follow_mode(FollowMode::Tail);
+        } else {
+            self.place_pending = None;
+        }
+    }
+
+    fn list_has_laid_out(&self) -> bool {
+        self.list.viewport_bounds().size.height > px(0.0)
     }
 
     /// Keeps what the run changed current: read when the run opens and when it ends, and about
@@ -768,12 +1585,8 @@ impl RunScreen {
         };
         if line != self.result {
             self.result = line;
-            if let Some(ix) = self
-                .rows
-                .iter()
-                .rposition(|r| matches!(r, Row::Done { .. }))
-            {
-                self.list.splice(ix..ix + 1, 1);
+            if let Some(ix) = self.items.last_done_item() {
+                self.measure_again(ix);
             }
         }
     }
@@ -827,22 +1640,6 @@ impl RunScreen {
         });
     }
 
-    fn apply(&mut self, built: Built) {
-        let Built { rows, facts } = built;
-        self.facts = facts;
-        self.feed_markdown(&rows);
-        let same = self
-            .rows
-            .iter()
-            .zip(&rows)
-            .take_while(|(old, new)| old == new)
-            .count();
-        if same < self.rows.len() || same < rows.len() {
-            self.list.splice(same..self.rows.len(), rows.len() - same);
-        }
-        self.rows = rows;
-    }
-
     pub(super) fn summary<'a>(&self, cx: &'a gpui::App) -> Option<&'a RunSummary> {
         self.store.read(cx).state().run(&self.run)
     }
@@ -856,25 +1653,71 @@ impl Render for RunScreen {
         if let Some(files) = self.files.as_mut() {
             files.model.set_show_hidden(show_hidden);
         }
-        let ticks = convo::tick_marks(&self.rows);
+        self.remeasure_settled(cx);
+        self.follow_thinking_setting(cx);
+        self.recheck_view(window, cx);
+        // The texts file themselves again as the list paints them.
+        self.begin_paint();
+        if self.place_pending.is_some() {
+            self.follow_place();
+            if !self.list_has_laid_out() {
+                // The place waits for the list's first layout; the frame after it asks again.
+                let this = cx.entity_id();
+                window.on_next_frame(move |_, cx| cx.notify(this));
+            }
+        }
+        let rail = self.tick_rail(&theme, cx);
         let transcript = div()
             .id("transcript")
+            .debug_selector(|| "transcript".to_owned())
             .relative()
             .flex_1()
             .min_h_0()
             .w_full()
             .max_w(px(COLUMN))
+            .flex()
+            .flex_col()
             .child(
-                div().size_full().pl(px(RAIL)).child(
-                    list(
-                        self.list.clone(),
-                        cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx)),
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .pl(px(RAIL))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event, window, cx| this.select_down(event, window, cx)),
                     )
-                    .size_full(),
-                ),
+                    .child(
+                        list(
+                            self.list.clone(),
+                            cx.processor(|this, ix, _, cx| this.render_row(ix, cx)),
+                        )
+                        .size_full(),
+                    ),
             )
             // After the list, so it is on top of it and takes the clicks.
-            .children(self.tick_rail(&theme, &ticks, cx));
+            .children(self.select_nodes(cx))
+            .children(rail)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(RAIL - scrollbar::WIDTH))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(scrollbar::WIDTH))
+                    .child(scrollbar(&self.list, &theme).on_moved({
+                        let screen = cx.weak_entity();
+                        move |_, cx| {
+                            screen
+                                .update(cx, |this, cx| {
+                                    this.note_place(cx);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    })),
+            )
+            .children(self.jump_control(&theme, cx));
         let chat = div()
             .id("chat-canvas")
             .debug_selector(|| "chat-canvas".to_owned())
@@ -888,6 +1731,7 @@ impl Render for RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
+            .children(self.find_bar_above(&theme, window, cx))
             .child(
                 div()
                     .flex_1()
@@ -920,6 +1764,52 @@ fn tool_calls(rows: &[Row]) -> Box<dyn Iterator<Item = &ToolEntry> + '_> {
     }))
 }
 
+impl Place {
+    /// Where the list goes for this place: the entry itself, at its offset; else the fold that
+    /// holds it or spans where it was; else the next entry after it in the thread; else the end,
+    /// which is the tail.
+    pub(crate) fn resolve(&self, items: &Projection, rows: &[Row]) -> ListOffset {
+        let (item_ix, offset_pt) = self.landing(items, rows).unwrap_or((items.len(), 0));
+        ListOffset {
+            item_ix,
+            offset_in_item: px(offset_pt as f32),
+        }
+    }
+
+    /// Whether the thread has come as far as this place: the entry is there, or its own run has
+    /// an entry after it. An entry of a later run does not say so, because the runs of a thread
+    /// arrive one by one.
+    pub(crate) fn is_reached(&self, items: &Projection, rows: &[Row]) -> bool {
+        let key = Key(self.key);
+        let Some((at, _)) = self.landing(items, rows) else {
+            return false;
+        };
+        items.item_of(key).is_some()
+            || key
+                .order()
+                .zip(items.items[at].key.order())
+                .is_some_and(|(wanted, found)| wanted.0 == found.0)
+    }
+
+    fn landing(&self, items: &Projection, rows: &[Row]) -> Option<(usize, i32)> {
+        let key = Key(self.key);
+        if let Some(at) = items.item_of(key) {
+            return Some((at, self.offset_pt));
+        }
+        let wanted = key.order()?;
+        items.items.iter().enumerate().find_map(|(at, item)| {
+            // A fold spans its rows: an entry gone from inside it lands on its head.
+            let last = match items.row(rows, at) {
+                Some(Row::Worked { rows: inner, .. }) => inner.last().map_or(item.key, Row::key),
+                _ => item.key,
+            };
+            last.order()
+                .is_some_and(|end| end >= wanted)
+                .then_some((at, 0))
+        })
+    }
+}
+
 /// The panel key of `run`: its thread when the daemon has threads and has named it, else the run.
 fn panel_key_for(store: &Store, run: &RunId) -> PanelKey {
     match store.thread_of(run) {
@@ -949,10 +1839,14 @@ mod convo_tests;
 #[cfg(test)]
 mod files_tests;
 #[cfg(test)]
+mod find_tests;
+#[cfg(test)]
 mod history_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
 mod persist_tests;
+#[cfg(test)]
+mod select_tests;
 #[cfg(test)]
 mod terminal_tests;

@@ -10,7 +10,7 @@ use gpui::{
 use reno_proto::InstallStatus;
 
 use super::SettingsScreen;
-use crate::prefs::{self, AccentName, Mode, Motion, Prefs, SendWith, ThemeName};
+use crate::prefs::{self, AccentName, Mode, Motion, Prefs, SendWith, ThemeName, ThinkingMode};
 use crate::summary;
 use crate::ui::kit;
 use crate::ui::motion::{self, ReduceMotion};
@@ -102,6 +102,21 @@ fn choice<T: Copy + PartialEq + 'static>(
         .into_any_element()
 }
 
+/// The math sizes, 90 to 150 % in steps of 10.
+fn math_size_choice(theme: &Theme, current: u8, cx: &mut Context<SettingsScreen>) -> AnyElement {
+    kit::segmented(theme)
+        .children(prefs::MATH_SIZES.map(|size| {
+            kit::segment(
+                theme,
+                format!("math-size-{size}"),
+                format!("{size} %"),
+                size == current,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| prefs::update(cx, |p| p.math_size = size)))
+        }))
+        .into_any_element()
+}
+
 fn switch(
     theme: &Theme,
     id: &'static str,
@@ -171,8 +186,32 @@ impl SettingsScreen {
                     ),
                     row(theme, "Theme", None, self.themes(theme, &p, cx), false),
                     row(theme, "Accent", None, self.accents(theme, &p, cx), false),
-                    row(theme, "Reduce motion", None, motion_choice, true),
-                ],
+                    row(theme, "Reduce motion", None, motion_choice, false),
+                    row(
+                        theme,
+                        "Typeset math",
+                        Some("Off shows formulas as their TeX source.".into()),
+                        switch(
+                            theme,
+                            "typeset-math",
+                            p.typeset_math,
+                            |p| p.typeset_math = !p.typeset_math,
+                            cx,
+                        ),
+                        !p.typeset_math,
+                    ),
+                ]
+                .into_iter()
+                .chain((p.typeset_math).then(|| {
+                    row(
+                        theme,
+                        "Math size",
+                        Some("As a share of the text size.".into()),
+                        math_size_choice(theme, p.math_size, cx),
+                        true,
+                    )
+                }))
+                .collect(),
             ),
         ]
     }
@@ -271,6 +310,27 @@ impl SettingsScreen {
             SendWith::Enter => "\u{21e7} Enter starts a new line.",
             SendWith::CommandEnter => "Enter starts a new line; \u{2318} Enter sends.",
         };
+        let thinking = choice(
+            theme,
+            "thinking",
+            &[
+                (ThinkingMode::Auto, "auto", "Auto"),
+                (ThinkingMode::Preview, "preview", "Preview"),
+                (ThinkingMode::Open, "open", "Always open"),
+                (ThinkingMode::Closed, "closed", "Always closed"),
+            ],
+            p.thinking,
+            |p, v| p.thinking = v,
+            cx,
+        );
+        let thinking_help = match p.thinking {
+            ThinkingMode::Auto => "Open while the agent reasons, closed once it has.",
+            ThinkingMode::Preview => {
+                "A window of up to 16 lines while the agent reasons, closed once it has."
+            }
+            ThinkingMode::Open => "Reasoning stays open.",
+            ThinkingMode::Closed => "Reasoning stays closed until you open it.",
+        };
         vec![
             page::title(
                 theme,
@@ -305,6 +365,13 @@ impl SettingsScreen {
                                 },
                                 cx,
                             ),
+                            false,
+                        ),
+                        row(
+                            theme,
+                            "Thinking",
+                            Some(thinking_help.into()),
+                            thinking,
                             true,
                         ),
                     ],

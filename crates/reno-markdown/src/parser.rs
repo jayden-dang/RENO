@@ -16,7 +16,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use pulldown_cmark::{
-    Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag,
+    TagEnd,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,9 @@ pub struct InlineStyle {
     pub file_label: Option<String>,
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,
+    pub footnote_ref: Option<String>,
+    /// Absolute source bytes of the reference, including its Markdown markers.
+    pub footnote_range: Option<Range<usize>>,
     /// Inline TeX math (`$…$`, `\(…\)`): `text` is the TeX source without delimiters.
     pub math: bool,
 }
@@ -81,7 +85,18 @@ pub enum Block {
         code: String,
     },
     BlockQuote {
+        kind: Option<Callout>,
         children: Vec<Block>,
+    },
+    Footnote {
+        label: String,
+        blocks: Vec<Block>,
+        range: Range<usize>,
+    },
+    FrontMatter {
+        pairs: Vec<(String, String)>,
+        /// Original spellings and byte ranges, in pair order.
+        lines: Vec<(String, Range<usize>)>,
     },
     List {
         ordered_start: Option<u64>,
@@ -98,6 +113,27 @@ pub enum Block {
         tex: String,
     },
     Rule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callout {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl From<BlockQuoteKind> for Callout {
+    fn from(kind: BlockQuoteKind) -> Self {
+        match kind {
+            BlockQuoteKind::Note => Self::Note,
+            BlockQuoteKind::Tip => Self::Tip,
+            BlockQuoteKind::Important => Self::Important,
+            BlockQuoteKind::Warning => Self::Warning,
+            BlockQuoteKind::Caution => Self::Caution,
+        }
+    }
 }
 
 /// GFM column alignment for a table (mdast `align`; `None` renders as Left).
@@ -144,6 +180,9 @@ fn options() -> Options {
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_MATH
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_GFM
 }
 
 /// Parse a whole source into a [`BlockTree`].
@@ -171,7 +210,17 @@ fn parse_breaking(source: &str, offset: usize, options: Options, breaks: bool) -
     // in its first pass); a message must never take the app down with it.
     // Such a source renders as its plain text.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parse_rewritten(source, offset, options, breaks)
+        let body_options = options - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+        if offset == 0
+            && let Some(front) = leading_front_matter(source, options)
+        {
+            let body = front.range.end;
+            let mut tree = parse_rewritten(&source[body..], body, body_options, breaks);
+            tree.blocks.insert(0, Arc::new(front));
+            tree
+        } else {
+            parse_rewritten(source, offset, body_options, breaks)
+        }
     }))
     .unwrap_or_else(|_| BlockTree {
         blocks: vec![Arc::new(TopBlock {
@@ -183,6 +232,54 @@ fn parse_breaking(source: &str, offset: usize, options: Options, breaks: bool) -
                 }],
             },
         })],
+    })
+}
+
+fn starts_front_matter(source: &str) -> bool {
+    source
+        .trim_start_matches('\u{feff}')
+        .strip_prefix("---")
+        .and_then(|rest| rest.split_once('\n'))
+        .is_some_and(|(line, _)| line.trim().is_empty())
+}
+
+fn leading_front_matter(source: &str, options: Options) -> Option<TopBlock> {
+    if !starts_front_matter(source) {
+        return None;
+    }
+    let (Event::Start(Tag::MetadataBlock(_)), range) =
+        Parser::new_ext(source, options).into_offset_iter().next()?
+    else {
+        return None;
+    };
+    if range.start != source.len() - source.trim_start_matches('\u{feff}').len() {
+        return None;
+    }
+    let mut lines = source[range.clone()].split_inclusive('\n');
+    let mut at = range.start + lines.next()?.len();
+    lines.next_back();
+    let mut pairs = Vec::new();
+    let mut spellings = Vec::new();
+    for line in lines {
+        let start = at;
+        at += line.len();
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.starts_with(char::is_whitespace) || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':')
+            && !key.trim().is_empty()
+        {
+            pairs.push((key.trim().to_owned(), value.trim().to_owned()));
+            spellings.push((line.to_owned(), start..start + line.len()));
+        }
+    }
+    (!pairs.is_empty()).then_some(TopBlock {
+        range,
+        block: Block::FrontMatter {
+            pairs,
+            lines: spellings,
+        },
     })
 }
 
@@ -399,7 +496,25 @@ fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -
     // A subtree past `MAX_NESTING` collapses to its text: (open starts in it,
     // its range, the text so far).
     let mut collapsing: Option<(usize, Range<usize>, String)> = None;
-    for (event, range) in events {
+    let mut events = events.into_iter().peekable();
+    while let Some((event, range)) = events.next() {
+        let event = match event {
+            Event::InlineHtml(ref text) if text.starts_with("<!--") => continue,
+            Event::Html(text) => {
+                let mut html = text.into_string();
+                while let Some((Event::Html(text), _)) =
+                    events.next_if(|(e, _)| matches!(e, Event::Html(_)))
+                {
+                    html.push_str(&text);
+                }
+                let visible = html_without_comments(html);
+                if visible.is_empty() {
+                    continue;
+                }
+                Event::Html(visible.into())
+            }
+            _ => event,
+        };
         let range = range.start + offset..range.end + offset;
         if let Some((depth, _, text)) = &mut collapsing {
             match &event {
@@ -526,6 +641,109 @@ fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -
         }
     }
     BlockTree { blocks }
+}
+
+fn html_without_comments(html: String) -> String {
+    if !html.contains("<!--") {
+        return html;
+    }
+    let mut visible = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    let mut raw_tag: Option<&str> = None;
+    while let Some(next) = html[at..].find('<') {
+        let start = at + next;
+        let tail = &html[start + 1..];
+        at = start + 1;
+
+        if raw_tag.is_none() {
+            if let Some(comment) = tail.strip_prefix("!--") {
+                visible.push_str(&html[copied..start]);
+                copied = start + 4 + comment_end(comment);
+                at = copied;
+                continue;
+            }
+            if let Some(cdata) = tail.strip_prefix("![CDATA[") {
+                at = cdata.find("]]>").map_or(html.len(), |end| start + 12 + end);
+                continue;
+            }
+        }
+
+        let closing = tail.starts_with('/');
+        let tag = tail.strip_prefix('/').unwrap_or(tail);
+        let name = if let Some(raw) = raw_tag {
+            let Some((name, rest)) = tag.split_at_checked(raw.len()) else {
+                continue;
+            };
+            if !closing
+                || !name.eq_ignore_ascii_case(raw)
+                || !rest.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>'))
+            {
+                continue;
+            }
+            name
+        } else {
+            if !tag.starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '!' | '?')) {
+                continue;
+            }
+            let name_end = tag
+                .find(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '<' | '>'))
+                .unwrap_or(tag.len());
+            &tag[..name_end]
+        };
+
+        at = tag_end(&html[at..]).map_or(html.len(), |len| at + len);
+        if closing {
+            raw_tag = None;
+        } else if name.eq_ignore_ascii_case("plaintext") {
+            break;
+        } else if [
+            "script", "style", "textarea", "title", "iframe", "xmp", "noembed", "noframes",
+        ]
+        .iter()
+        .any(|raw| name.eq_ignore_ascii_case(raw))
+        {
+            raw_tag = Some(name);
+        }
+    }
+    if copied == 0 {
+        html
+    } else {
+        visible.push_str(&html[copied..]);
+        visible
+    }
+}
+
+fn comment_end(comment: &str) -> usize {
+    if comment.starts_with('>') {
+        return 1;
+    }
+    if comment.starts_with("->") {
+        return 2;
+    }
+    let bytes = comment.as_bytes();
+    bytes
+        .windows(3)
+        .enumerate()
+        .find_map(|(at, triple)| match triple {
+            b"-->" => Some(at + 3),
+            b"--!" if bytes.get(at + 3) == Some(&b'>') => Some(at + 4),
+            _ => None,
+        })
+        .unwrap_or(bytes.len())
+}
+
+fn tag_end(tag: &str) -> Option<usize> {
+    let mut quote = None;
+    for (at, byte) in tag.bytes().enumerate() {
+        match (quote, byte) {
+            (Some(open), byte) if open == byte => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(at + 1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Insert a backslash before the `$` at each (ascending) offset, so it reads
@@ -1437,8 +1655,14 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             }
             vec![Block::CodeBlock { language, code }]
         }
-        Tag::BlockQuote(_) => vec![Block::BlockQuote {
+        Tag::BlockQuote(kind) => vec![Block::BlockQuote {
+            kind: kind.map(Callout::from),
             children: parse_block_sequence(cur),
+        }],
+        Tag::FootnoteDefinition(label) => vec![Block::Footnote {
+            label: label.into_string(),
+            range: cur.events[cur.ix - 1].1.clone(),
+            blocks: parse_block_sequence(cur),
         }],
         Tag::List(ordered_start) => {
             let mut items = Vec::new();
@@ -1493,7 +1717,6 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
                 }]
             }
         }
-        // Transparent containers (footnote definitions when enabled, etc.).
         _ => parse_block_sequence(cur),
     }
 }
@@ -1742,7 +1965,14 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
                 style,
             );
         }
-        Event::FootnoteReference(t) => push(runs, format!("[{t}]"), style.clone()),
+        Event::FootnoteReference(label) => {
+            let mut style = style.clone();
+            style.footnote_ref = Some(label.into_string());
+            let range = range.unwrap();
+            let (spelling, _) = cur.spelling(&range);
+            style.footnote_range = Some(range);
+            push(runs, spelling.to_owned(), style);
+        }
         Event::Start(tag) => {
             let mut inner = style.clone();
             match tag {
@@ -1880,7 +2110,11 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style.link.is_some() || run.style.code || run.style.math {
+        if run.style.link.is_some()
+            || run.style.code
+            || run.style.math
+            || run.style.footnote_ref.is_some()
+        {
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -1982,7 +2216,10 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     for run in runs {
         match out.last_mut() {
             Some(last)
-                if last.style == run.style && run.style.image.is_none() && !run.style.math =>
+                if last.style == run.style
+                    && run.style.image.is_none()
+                    && run.style.footnote_ref.is_none()
+                    && !run.style.math =>
             {
                 last.text.push_str(&run.text)
             }
@@ -2110,7 +2347,17 @@ impl IncrementalParser {
         if !self.full_only && has_link_defs(&self.source[scan_from..]) {
             self.full_only = true;
         }
-        if self.full_only {
+        // A closing metadata fence can reclassify blocks all the way back to byte zero.
+        let closed_front_matter = starts_front_matter(&self.source)
+            && !self
+                .tree
+                .blocks
+                .first()
+                .is_some_and(|top| matches!(top.block, Block::FrontMatter { .. }))
+            && self.source[scan_from..]
+                .lines()
+                .any(|line| matches!(line.trim_end_matches(' '), "---" | "..."));
+        if self.full_only || closed_front_matter {
             self.tree = parse_full(&self.source);
             self.last_parse_bytes = self.source.len();
             self.stable_prefix_blocks = 0;
@@ -2194,7 +2441,11 @@ impl IncrementalParser {
         // tail to mend.
         if matches!(
             last.block,
-            Block::CodeBlock { .. } | Block::Rule | Block::Table { .. } | Block::Math { .. }
+            Block::CodeBlock { .. }
+                | Block::Rule
+                | Block::Table { .. }
+                | Block::Math { .. }
+                | Block::FrontMatter { .. }
         ) {
             return;
         }
@@ -2229,8 +2480,18 @@ impl IncrementalParser {
         };
         // Count toward the O(tail) instrumentation — this is real parse work,
         // in the same bound as the reparse that produced the block.
-        self.last_parse_bytes += mended.len();
-        let mut tail = parse_at(&mended, start).blocks;
+        let mut tail = if self.full_only && start > 0 && tail.contains("[^") {
+            let mut context = String::with_capacity(start + mended.len());
+            context.push_str(&self.source[..start]);
+            context.push_str(&mended);
+            self.last_parse_bytes += context.len();
+            let mut reparsed = parse_full(&context).blocks;
+            let first = reparsed.partition_point(|top| top.range.start < start);
+            reparsed.split_off(first)
+        } else {
+            self.last_parse_bytes += mended.len();
+            parse_at(&mended, start).blocks
+        };
         for top in &mut tail {
             let top = Arc::make_mut(top);
             // Display ranges point back into the unmended source; synthetic
@@ -2244,8 +2505,12 @@ impl IncrementalParser {
                 }
                 at
             };
-            let start = clamp(top.range.start);
-            top.range = start..clamp(top.range.end).max(start);
+            let clamp_range = |range: &mut Range<usize>| {
+                let start = clamp(range.start);
+                *range = start..clamp(range.end).max(start);
+            };
+            clamp_range(&mut top.range);
+            clamp_footnote_ranges(&mut top.block, &clamp_range);
         }
         self.display_from = self
             .tree
@@ -2257,6 +2522,44 @@ impl IncrementalParser {
     }
 }
 
+fn clamp_footnote_ranges(block: &mut Block, clamp: &impl Fn(&mut Range<usize>)) {
+    let clamp_run = |run: &mut InlineRun| {
+        if let Some(range) = &mut run.style.footnote_range {
+            clamp(range);
+        }
+    };
+    match block {
+        Block::Footnote { range, blocks, .. } => {
+            clamp(range);
+            blocks
+                .iter_mut()
+                .for_each(|child| clamp_footnote_ranges(child, clamp));
+        }
+        Block::BlockQuote { children, .. } => {
+            children
+                .iter_mut()
+                .for_each(|child| clamp_footnote_ranges(child, clamp));
+        }
+        Block::List { items, .. } => {
+            items
+                .iter_mut()
+                .flatten()
+                .for_each(|child| clamp_footnote_ranges(child, clamp));
+        }
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+            runs.iter_mut().for_each(clamp_run)
+        }
+        Block::Table { header, rows, .. } => {
+            header
+                .iter_mut()
+                .flatten()
+                .chain(rows.iter_mut().flatten().flatten())
+                .for_each(clamp_run);
+        }
+        _ => {}
+    }
+}
+
 /// How many formulas (inline runs and display blocks) `blocks` hold.
 fn formulas(blocks: &[Arc<TopBlock>]) -> usize {
     fn runs(runs: &[InlineRun]) -> usize {
@@ -2265,14 +2568,17 @@ fn formulas(blocks: &[Arc<TopBlock>]) -> usize {
     fn in_block(block: &Block) -> usize {
         match block {
             Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r),
-            Block::BlockQuote { children } => children.iter().map(in_block).sum(),
+            Block::BlockQuote { children, .. }
+            | Block::Footnote {
+                blocks: children, ..
+            } => children.iter().map(in_block).sum(),
             Block::List { items, .. } => items.iter().flatten().map(in_block).sum(),
             Block::Table { header, rows, .. } => {
                 header.iter().map(|cell| runs(cell)).sum::<usize>()
                     + rows.iter().flatten().map(|cell| runs(cell)).sum::<usize>()
             }
             Block::Math { .. } => 1,
-            Block::CodeBlock { .. } | Block::Rule => 0,
+            Block::CodeBlock { .. } | Block::FrontMatter { .. } | Block::Rule => 0,
         }
     }
     blocks.iter().map(|top| in_block(&top.block)).sum()
@@ -2322,6 +2628,193 @@ mod tests {
     use super::*;
 
     #[test]
+    fn footnotes_parse_as_references_and_definitions() {
+        let source = "Read this[^why][^why] often.\n\nNext paragraph.\n\nMore.\n\n[^why]: A **bold** reason.\n";
+        let tree = parse_full(source);
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected prose");
+        };
+        let references: Vec<_> = runs
+            .iter()
+            .filter_map(|run| Some((run.style.footnote_ref.as_deref()?, run.text.as_str())))
+            .collect();
+        assert_eq!(references, [("why", "[^why]"), ("why", "[^why]")]);
+        let note = tree.blocks.last().unwrap();
+        let Block::Footnote {
+            label,
+            blocks,
+            range,
+        } = &note.block
+        else {
+            panic!("expected a note definition");
+        };
+        assert_eq!(label, "why");
+        assert_eq!(*range, note.range);
+        assert_eq!(&source[note.range.clone()], "[^why]: A **bold** reason.\n");
+        let [Block::Paragraph { runs }] = blocks.as_slice() else {
+            panic!("expected a paragraph inside the note");
+        };
+        assert!(runs.iter().any(|run| run.text == "bold" && run.style.bold));
+        assert_eq!(stream(1, source).tree(), &tree);
+    }
+
+    #[test]
+    fn a_nested_footnote_keeps_its_multiline_source_range() {
+        let source =
+            "> [^q]: First paragraph.\n>\n>     Second paragraph.\n>\n> Outside.\n\nSee [^q].";
+        let tree = parse_full(source);
+        let Block::BlockQuote { children, .. } = &tree.blocks[0].block else {
+            panic!("expected the containing quote");
+        };
+        let Block::Footnote {
+            label,
+            blocks,
+            range,
+        } = &children[0]
+        else {
+            panic!("expected the note inside the quote");
+        };
+        assert_eq!(label, "q");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            source[range.clone()].trim_end_matches(['\n', '>']),
+            "[^q]: First paragraph.\n>\n>     Second paragraph."
+        );
+        assert_eq!(stream(1, source).tree(), &tree);
+    }
+
+    #[test]
+    fn streaming_styles_keep_links_to_earlier_footnotes() {
+        let source = "[^note]: Explanation.\n\nSecond.\n\nRead this[^note] and **more";
+        let streamed = stream(1, source);
+        let tree = streamed.display_tree();
+        let Block::Paragraph { runs } = &tree.blocks.last().unwrap().block else {
+            panic!("the last block is prose");
+        };
+        assert!(
+            runs.iter()
+                .any(|run| run.style.footnote_ref.as_deref() == Some("note"))
+        );
+        assert!(runs.iter().any(|run| run.text == "more" && run.style.bold));
+    }
+
+    #[test]
+    fn yaml_front_matter_parses_as_pairs() {
+        let source = "---\r\ntitle: Bounded shutdown\r\n# internal comment\r\nstatus: draft: ready\r\n---\r\n\r\nReply.\r\n";
+        let tree = parse_full(source);
+        let Block::FrontMatter { pairs, .. } = &tree.blocks[0].block else {
+            panic!("expected leading metadata");
+        };
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>(),
+            [("title", "Bounded shutdown"), ("status", "draft: ready")]
+        );
+        assert_eq!(&source[tree.blocks[1].range.clone()], "Reply.\r\n");
+        let later = "Intro.\n\nSecond.\n\nThird.\n\n---\nkey: value\n---\n\nTail.\n";
+        for source in [source, later, &format!("---\nleading: yes\n---\n\n{later}")] {
+            let full = parse_full(source);
+            assert_eq!(stream(1, source).tree(), &full);
+            assert_eq!(
+                full.blocks
+                    .iter()
+                    .filter(|top| matches!(top.block, Block::FrontMatter { .. }))
+                    .count(),
+                usize::from(source.starts_with("---"))
+            );
+        }
+    }
+
+    #[test]
+    fn gfm_callouts_carry_their_kind() {
+        for (marker, expected) in [
+            ("NOTE", Callout::Note),
+            ("TIP", Callout::Tip),
+            ("IMPORTANT", Callout::Important),
+            ("WARNING", Callout::Warning),
+            ("CAUTION", Callout::Caution),
+        ] {
+            let source = format!("> [!{marker}]\n> Explain this.\n");
+            let tree = parse_full(&source);
+            let Block::BlockQuote { kind, children } = &tree.blocks[0].block else {
+                panic!("expected a quote container");
+            };
+            assert_eq!(*kind, Some(expected));
+            assert!(
+                matches!(children.as_slice(), [Block::Paragraph { runs }] if runs.len() == 1
+                && runs[0].text == "Explain this.")
+            );
+            assert_eq!(stream(1, &source).tree(), &tree);
+        }
+        assert!(matches!(
+            parse_full("> A regular quote.\n").blocks[0].block,
+            Block::BlockQuote { kind: None, .. }
+        ));
+    }
+
+    #[test]
+    fn html_comments_are_dropped() {
+        let source =
+            "Before <!-- inline --> after\n\n<!-- block\nsecret -->\n\n<span>kept</span>\n";
+        let tree = parse_full(source);
+        let text: Vec<String> = tree
+            .blocks
+            .iter()
+            .map(|top| match &top.block {
+                Block::Paragraph { runs } => runs.iter().map(|run| run.text.as_str()).collect(),
+                other => panic!("expected a paragraph, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(text, ["Before  after", "<span>kept</span>"]);
+    }
+
+    #[test]
+    fn actual_html_comments_are_hidden_without_changing_raw_tag_literals() {
+        let source = "<div title=\"<!--\">Visible<!-- drop --> text</div>\n\n<script>const marker = '<!--';</script>\n\n<div title=\"first\n<!-- still an attribute\">There</div>\n\n<script>\n<!-- still script text -->\n</script>\n";
+        let tree = parse_full(source);
+        let text: Vec<String> = tree
+            .blocks
+            .iter()
+            .map(|top| match &top.block {
+                Block::Paragraph { runs } => runs.iter().map(|run| run.text.as_str()).collect(),
+                other => panic!("expected raw HTML as text, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "<div title=\"<!--\">Visible text</div>",
+                "<script>const marker = '<!--';</script>",
+                "<div title=\"first\n<!-- still an attribute\">There</div>",
+                "<script>\n<!-- still script text -->\n</script>",
+            ]
+        );
+    }
+
+    #[test]
+    fn mended_note_ranges_stop_at_the_real_source_end() {
+        for source in [
+            "See [^end].\n\n[^end]: Read **more",
+            "> [^end]: Read **more",
+        ] {
+            let tree = stream(1, source).display_tree();
+            let last = &tree.blocks.last().unwrap().block;
+            let note = match last {
+                Block::BlockQuote { children, .. } => &children[0],
+                other => other,
+            };
+            let Block::Footnote { range, blocks, .. } = note else {
+                panic!("expected a note, got {note:?}");
+            };
+            assert!(matches!(blocks.as_slice(), [Block::Paragraph { runs }]
+                if runs.iter().any(|run| run.text == "more" && run.style.bold)));
+            assert_eq!(&source[range.clone()], "[^end]: Read **more");
+        }
+    }
+
+    #[test]
     fn task_ranges_survive_nested_lists_unicode_crlf_and_streaming() {
         let source = "Título 🦀\r\n\r\nIntro\r\n\r\n- [ ] repetida\r\n  - [X] repetida\r\n\r\n> - [x] citada\r\n\r\n```md\r\n- [ ] literal\r\n```\r\n";
         fn collect(block: &Block, tasks: &mut Vec<TaskMarker>) {
@@ -2333,7 +2826,7 @@ mod tests {
                     .iter()
                     .flatten()
                     .for_each(|block| collect(block, tasks)),
-                Block::BlockQuote { children } => {
+                Block::BlockQuote { children, .. } => {
                     children.iter().for_each(|block| collect(block, tasks))
                 }
                 _ => {}
@@ -2720,7 +3213,7 @@ mod tests {
                         out.push_str(&r.text);
                     }
                 }
-                Block::BlockQuote { children } => children.iter().for_each(|c| walk(c, out)),
+                Block::BlockQuote { children, .. } => children.iter().for_each(|c| walk(c, out)),
                 Block::List { items, .. } => items.iter().flatten().for_each(|c| walk(c, out)),
                 _ => {}
             }
@@ -3213,7 +3706,7 @@ mod math_tests {
             ]
         );
         assert_eq!(items[1], [display("y")]);
-        let Block::BlockQuote { children } = &blocks("> q\n> $$z$$\n")[0] else {
+        let Block::BlockQuote { children, .. } = &blocks("> q\n> $$z$$\n")[0] else {
             panic!("quote");
         };
         assert_eq!(children, &[paragraph(vec![plain("q")]), display("z")]);
@@ -3372,7 +3865,7 @@ mod math_tests {
         assert_eq!(blocks("# h \\(\nx \\)")[1], paragraph(vec![plain("x )")]));
         assert_eq!(blocks("a \\(\n- x \\)").len(), 2);
         // Quoted paragraphs continue over their `>` lines.
-        let Block::BlockQuote { children } = &blocks("> \\[\n> x\n> \\]\n")[0] else {
+        let Block::BlockQuote { children, .. } = &blocks("> \\[\n> x\n> \\]\n")[0] else {
             panic!("quote");
         };
         assert_eq!(children, &[display("x")]);
@@ -3441,7 +3934,7 @@ mod math_tests {
             }
         );
         // Fences in a quote or a list item keep their spelling too.
-        let Block::BlockQuote { children } = &blocks("> ```\n> \\(x\\)\n> ```\n")[0] else {
+        let Block::BlockQuote { children, .. } = &blocks("> ```\n> \\(x\\)\n> ```\n")[0] else {
             panic!("quote");
         };
         assert_eq!(
@@ -3603,7 +4096,7 @@ mod math_tests {
     /// and no formula spans a heading or HTML block nested in one.
     #[test]
     fn latex_delimiters_follow_container_structure() {
-        let Block::BlockQuote { children } = &blocks(">     \\(x\\) code\n")[0] else {
+        let Block::BlockQuote { children, .. } = &blocks(">     \\(x\\) code\n")[0] else {
             panic!("quote");
         };
         assert_eq!(
@@ -3635,7 +4128,7 @@ mod math_tests {
         ] {
             assert_no_math(source);
         }
-        let Block::BlockQuote { children } =
+        let Block::BlockQuote { children, .. } =
             &blocks("> [r]: https://x.y/a,\\(b\\)\n>\n> see [w][r]\n")[0]
         else {
             panic!("quote");
@@ -3648,7 +4141,7 @@ mod math_tests {
             Some("https://x.y/a,(b)")
         );
         // Math still renders inside containers.
-        let Block::BlockQuote { children } = &blocks("> q \\(x\n> y\\) z\n")[0] else {
+        let Block::BlockQuote { children, .. } = &blocks("> q \\(x\n> y\\) z\n")[0] else {
             panic!("quote");
         };
         assert_eq!(
@@ -3824,7 +4317,7 @@ mod math_tests {
                             .filter(|run| run.style.code)
                             .map(|run| run.text.clone()),
                     ),
-                    Block::BlockQuote { children } => walk(children, out),
+                    Block::BlockQuote { children, .. } => walk(children, out),
                     Block::List { items, .. } => items.iter().for_each(|item| walk(item, out)),
                     _ => {}
                 }
@@ -3917,7 +4410,7 @@ mod math_tests {
             blocks
                 .iter()
                 .map(|block| match block {
-                    Block::BlockQuote { children } => 1 + depth(children),
+                    Block::BlockQuote { children, .. } => 1 + depth(children),
                     Block::List { items, .. } => {
                         1 + items.iter().map(|item| depth(item)).max().unwrap_or(0)
                     }
