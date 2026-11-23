@@ -5850,6 +5850,7 @@ dependencies = [
  "tiny-skia",
  "tokio",
  "ttf-parser",
+ "unicase",
  "unicode-segmentation",
  "usvg",
 ]

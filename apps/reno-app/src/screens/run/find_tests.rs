@@ -1781,3 +1781,181 @@ fn closing_search_leaves_streaming_reasoning_open_and_a_stream_ending_keeps_sear
     draw(vcx);
     assert!(!open(vcx), "and closes with search once the stream is over");
 }
+
+#[gpui::test]
+fn footnotes_draw_at_the_reply_end_and_a_reference_click_scrolls_to_its_note(
+    cx: &mut TestAppContext,
+) {
+    use reno_client::fake::transcript::{RENDER2_REPLY, RENDER2_RUN};
+
+    use crate::panel::persist::{PanelStore, path_in};
+    use crate::panel::saved::Saved;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = path_in(temp.path());
+    cx.update(|cx| Saved::install(path.clone(), cx));
+    let (_store, root, vcx) = setup(cx);
+    vcx.simulate_resize(gpui::size(px(1280.0), px(480.0)));
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id(RENDER2_RUN), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("the second Render check is open");
+    let reply = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            s.items().items.iter().enumerate().find_map(|(ix, item)| {
+                let Row::Prose { key, text } = s.items().row(s.rows(), ix)? else {
+                    return None;
+                };
+                (item.visual.is_none() && text.as_str() == RENDER2_REPLY).then_some((ix, *key))
+            })
+        })
+    };
+    wait_for(vcx, "the render check reply arrived", |vcx| {
+        reply(vcx).is_some()
+    });
+    let (ix, key) = reply(vcx).unwrap();
+    screen.update(vcx, |s, cx| {
+        s.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+        s.note_place(cx);
+        cx.notify();
+    });
+    draw(vcx);
+
+    let target = "The wait was open-ended before this change.";
+    let note_is_visible = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            s.painted_point(target, 0)
+                .is_some_and(|point| s.list.viewport_bounds().contains(&point))
+        })
+    };
+    assert!(!note_is_visible(vcx), "the note begins below the viewport");
+    let (reference, before) = screen.read_with(vcx, |s, _| {
+        let reference = s
+            .painted_point("now.[1]", "now.[".len())
+            .expect("an inline footnote reference");
+        assert!(s.list.viewport_bounds().contains(&reference));
+        (reference, s.scroll_offset())
+    });
+    vcx.simulate_click(reference, gpui::Modifiers::none());
+    draw(vcx);
+    assert!(note_is_visible(vcx), "the click reveals the note's text");
+    let (panel_key, place) = screen.read_with(vcx, |s, _| {
+        let [body, note] = ["The flow, from the worktree:", target]
+            .map(|text| s.painted_point(text, 0).expect("painted reply text"));
+        assert!(note.y > body.y, "the footnotes follow the main reply");
+        assert_ne!(s.scroll_offset(), before);
+        assert!(
+            s.saved_place().is_some(),
+            "the viewport stopped following the live end"
+        );
+        assert_eq!(s.panel_state().place(), s.saved_place());
+        (s.panel_key().clone(), s.saved_place())
+    });
+    vcx.update(|_, cx| Saved::flush(cx));
+    assert_eq!(
+        PanelStore::load(&path)
+            .0
+            .get(&panel_key)
+            .and_then(|panel| panel.place),
+        place
+    );
+
+    let start = RENDER2_REPLY.find(target).unwrap();
+    screen.update(vcx, |s, _| {
+        s.select_source(key, start..start + target.len())
+    });
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.selected_text()).as_deref(),
+        Some(target)
+    );
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    type_query(vcx, "ended");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 1"));
+}
+
+#[gpui::test]
+fn dragging_in_either_direction_across_a_hoisted_note_copies_the_visible_ranges(
+    cx: &mut TestAppContext,
+) {
+    use gpui::{Modifiers, MouseButton};
+
+    const REPLY: &str = "Read this[^note].\n\n[^note]: Café from the real note.\n\nSkip this line.\n\n**Only the painted tail.**";
+    let run = run_id(reno_client::fake::transcript::RENDER2_RUN);
+    let (store, root, vcx) = setup(cx);
+    root.update_in(vcx, |r, window, cx| r.open_run(run.clone(), window, cx));
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    wait_for(vcx, "the seeded run caught up", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.rows().iter().any(|row|
+            matches!(row, Row::Prose { text, .. } if text == "Running the suite one last time.")
+        )
+        })
+    });
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 3,
+                session: SessionRef("selection".into()),
+            },
+            text(REPLY),
+            ExecEvent::Done {
+                stop: StopReason::Completed,
+                result: None,
+                diagnostic: None,
+                reason: None,
+            },
+        ],
+    );
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    let points = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            let tail = s.painted_point("the painted tail.", 0)?;
+            let note = s.painted_point("Café from", "Café".len())?;
+            let view = s.list.viewport_bounds();
+            (view.contains(&tail) && view.contains(&note)).then_some((tail, note))
+        })
+    };
+    wait_for(vcx, "the tail and the hoisted note are visible", |vcx| {
+        points(vcx).is_some()
+    });
+    let (tail, note) = points(vcx).unwrap();
+    let from = REPLY.find("the painted tail.").unwrap();
+    let start_of_note = REPLY.find("[^note]:").unwrap();
+    let to = REPLY.find("Café").unwrap() + "Café".len();
+    for (a, b) in [(tail, note), (note, tail)] {
+        vcx.simulate_mouse_down(a, MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_move(b, MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_up(b, MouseButton::Left, Modifiers::none());
+        draw(vcx);
+        vcx.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("the painted tail.\n\nCafé")
+        );
+        let anchors = screen.read_with(vcx, |s, _| s.selection_anchors());
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0].key, anchors[1].key);
+        assert_eq!(anchors[0].range.as_ref(), Some(&(from..REPLY.len())));
+        assert_eq!(anchors[1].range.as_ref(), Some(&(start_of_note..to)));
+        assert!(
+            anchors
+                .iter()
+                .flat_map(|a| &a.range)
+                .all(|r| { REPLY.is_char_boundary(r.start) && REPLY.is_char_boundary(r.end) })
+        );
+        screen.update(vcx, |s, cx| s.copy_markdown(cx));
+        assert_eq!(
+            vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("the painted tail.**\n\n[^note]: Café")
+        );
+    }
+}

@@ -555,6 +555,13 @@ impl RunScreen {
             current: hits
                 .iter()
                 .position(|&at| self.find.found.current == Some(at)),
+            current_source: self
+                .find
+                .found
+                .current
+                .and_then(|at| self.find.found.hits.get(at))
+                .filter(|hit| hit.key == key)
+                .map(|hit| hit.range.clone()),
         }))
     }
 

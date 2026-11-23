@@ -251,13 +251,19 @@ pub(crate) fn paths_in(tree: &reno_markdown::BlockTree) -> Vec<String> {
     fn block(b: &Block, out: &mut Vec<String>) {
         match b {
             Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
-            Block::BlockQuote { children } => children.iter().for_each(|c| block(c, out)),
+            Block::BlockQuote { children, .. }
+            | Block::Footnote {
+                blocks: children, ..
+            } => children.iter().for_each(|c| block(c, out)),
             Block::List { items, .. } => items.iter().flatten().for_each(|c| block(c, out)),
             Block::Table { header, rows, .. } => {
                 header.iter().for_each(|c| runs(c, out));
                 rows.iter().flatten().for_each(|c| runs(c, out));
             }
-            Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
+            Block::CodeBlock { .. }
+            | Block::Math { .. }
+            | Block::FrontMatter { .. }
+            | Block::Rule => {}
         }
     }
     let mut out = Vec::new();

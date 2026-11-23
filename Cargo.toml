@@ -41,6 +41,7 @@ anyhow = "1"
 rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 proptest = "1"
+unicase = "=2.10.0"
 unicode-segmentation = "1"
 regex = "=1.13.1"
 

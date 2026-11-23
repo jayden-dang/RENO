@@ -162,6 +162,16 @@ impl RunScreen {
             .into_any_element()
     }
 
+    fn reveal_footnote(&mut self, note: gpui::Bounds<gpui::Pixels>, cx: &mut Context<Self>) {
+        let viewport = self.list.viewport_bounds();
+        if note.top() >= viewport.top() && note.bottom() <= viewport.bottom() {
+            return;
+        }
+        let start = self.scrolled_px() + f32::from(note.top() - viewport.top() - px(12.0));
+        self.scroll_to_px(start);
+        self.view_moved(cx);
+    }
+
     /// One row. `top` is its item's index in the list; a row inside a fold has none.
     fn row_body(
         &self,
@@ -190,6 +200,7 @@ impl RunScreen {
                 // words and its texts tracked for selection.
                 let client = self.store.read(cx).client();
                 let screen = cx.weak_entity();
+                let note_screen = screen.clone();
                 let host =
                     Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
                         .when_grown(Some(Grew(Rc::new(move |cx| {
@@ -201,13 +212,18 @@ impl RunScreen {
                                 })
                                 .ok();
                         }))))
+                        .on_footnote(move |note, cx| {
+                            note_screen
+                                .update(cx, |this, cx| this.reveal_footnote(note, cx))
+                                .ok();
+                        })
                         .while_streaming(streaming)
                         .marked(self.find_marks(*key))
                         .selectable(Some(Rc::new(SelectHost {
                             registry: self.select.registry.clone(),
                             key: *key,
-                            atoms: stream.atoms(),
-                            selected: self.selected_in_prose(*key, text.len()),
+                            anchors: stream.anchors(),
+                            selected: self.selection_for(*key),
                             style: pick::selection_style(theme),
                         })));
                 div()

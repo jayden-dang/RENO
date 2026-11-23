@@ -12,6 +12,7 @@
 //! chips, "Thinking", hover times) is not one. Pure: no window, no layout.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use crate::transcript::{Key, Row};
 use crate::vm::anchor::{self, Atom};
@@ -49,6 +50,10 @@ impl Slot {
 
     pub(crate) const WHOLE: Self = Self::new(0, Kind::Whole);
     pub(crate) const HEAD: Self = Self::new(0, Kind::Head);
+
+    pub(crate) const fn prose(section: usize) -> Self {
+        Self::new(section, Kind::Whole)
+    }
 }
 
 /// A place in the transcript: the entry (by its place in reading order), one of its texts, and a
@@ -145,6 +150,21 @@ impl Selection {
         };
         (from < to.min(len)).then(|| from..to.min(len))
     }
+
+    pub(crate) fn within_source(
+        &self,
+        ordinal: usize,
+        slot: Slot,
+        span: &Range<usize>,
+    ) -> Option<Range<usize>> {
+        in_source_span(self.within(ordinal, slot, Some(span.end))?, span)
+    }
+}
+
+fn in_source_span(range: Range<usize>, span: &Range<usize>) -> Option<Range<usize>> {
+    let from = range.start.max(span.start);
+    let to = range.end.min(span.end);
+    (from < to).then_some(from..to)
 }
 
 /// One text an entry shows, as atoms over its source.
@@ -153,11 +173,10 @@ pub(crate) struct Text {
     pub(crate) slot: Slot,
     /// `false` for a text that has no source.
     pub(crate) sourced: bool,
-    /// Length of the source the atoms cover.
-    pub(crate) len: usize,
-    /// The source text itself (empty for a text that has none).
-    pub(crate) source: String,
-    pub(crate) atoms: Vec<Atom>,
+    span: Range<usize>,
+    pub(crate) source: Rc<str>,
+    atoms: Rc<Vec<Atom>>,
+    atom_span: Range<usize>,
 }
 
 impl Text {
@@ -166,9 +185,10 @@ impl Text {
         Self {
             slot,
             sourced: true,
-            len: text.len(),
-            source: text.to_owned(),
-            atoms: vec![Atom::plain(0..text.len(), text)],
+            span: 0..text.len(),
+            source: Rc::from(text),
+            atoms: Rc::new(vec![Atom::plain(0..text.len(), text)]),
+            atom_span: 0..1,
         }
     }
 
@@ -177,14 +197,15 @@ impl Text {
         Self {
             slot,
             sourced: false,
-            len: 0,
-            source: String::new(),
-            atoms: vec![Atom::plain(0..0, text)],
+            span: 0..0,
+            source: Rc::from(""),
+            atoms: Rc::new(vec![Atom::plain(0..0, text)]),
+            atom_span: 0..1,
         }
     }
 
     pub(crate) fn copy_all(&self) -> String {
-        anchor::copy(&self.atoms, 0..self.len.max(1))
+        anchor::copy(&self.atoms[self.atom_span.clone()], 0..self.span.end.max(1))
     }
 }
 
@@ -217,14 +238,21 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
         }
         Row::Prose { key, text } => {
             let tree = (shown.tree)(*key, text);
-            let atoms = anchor::atoms(text, &tree);
-            vec![Text {
-                slot: Slot::WHOLE,
-                sourced: true,
-                len: text.len(),
-                source: text.clone(),
-                atoms,
-            }]
+            let prose = anchor::prose(text, &tree);
+            let source: Rc<str> = Rc::from(text.as_str());
+            prose
+                .sections
+                .into_iter()
+                .enumerate()
+                .map(|(ix, section)| Text {
+                    slot: Slot::prose(ix),
+                    sourced: true,
+                    span: section.source,
+                    source: source.clone(),
+                    atoms: prose.atoms.clone(),
+                    atom_span: section.atoms,
+                })
+                .collect()
         }
         Row::Reasoning { key, text } => {
             let mut out = vec![Text::sourceless(Slot::HEAD, "Reasoning")];
@@ -323,7 +351,11 @@ fn covered<'a>(
             texts_of(e.row, shown)
                 .into_iter()
                 .filter_map(move |t| {
-                    let range = sel.within(e.ordinal, t.slot, t.sourced.then_some(t.len))?;
+                    let range = if t.sourced {
+                        sel.within_source(e.ordinal, t.slot, &t.span)
+                    } else {
+                        sel.within(e.ordinal, t.slot, None)
+                    }?;
                     Some((*e, t, range))
                 })
                 .collect::<Vec<_>>()
@@ -348,21 +380,37 @@ pub(crate) fn joined(
     sel: &Selection,
     entries: &[Entry<'_>],
     shown: &Shown<'_>,
+    markdown: bool,
     part: impl Fn(&Text, Range<usize>) -> String,
 ) -> String {
     let mut out: Vec<(usize, String)> = Vec::new();
+    let mut previous_end = None;
     for (e, t, range) in covered(sel, entries, shown) {
+        let range_end = range.end;
+        let start = range.start;
         let part = part(&t, range);
         if part.is_empty() {
             continue;
         }
         match out.last_mut() {
             Some((ordinal, text)) if *ordinal == e.ordinal => {
-                text.push('\n');
+                if matches!(e.row, Row::Prose { .. }) {
+                    if !markdown || previous_end != Some(start) {
+                        if !markdown || !text.ends_with('\n') {
+                            text.push('\n');
+                        }
+                        if !markdown || !text.ends_with("\n\n") {
+                            text.push('\n');
+                        }
+                    }
+                } else {
+                    text.push('\n');
+                }
                 text.push_str(&part);
             }
             _ => out.push((e.ordinal, part)),
         }
+        previous_end = Some(range_end);
     }
     out.into_iter()
         .map(|(_, t)| t)
@@ -372,9 +420,9 @@ pub(crate) fn joined(
 
 /// What ⌘C puts on the clipboard: the text of each covered entry as the owner saw it.
 pub(crate) fn copy_text(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>) -> String {
-    joined(sel, entries, shown, |t, range| {
+    joined(sel, entries, shown, false, |t, range| {
         if t.sourced {
-            anchor::copy(&t.atoms, range)
+            anchor::copy(&t.atoms[t.atom_span.clone()], range)
         } else {
             t.copy_all()
         }
@@ -401,11 +449,12 @@ pub(crate) fn block_at(at: Pos, entries: &[Entry<'_>], shown: &Shown<'_>) -> Opt
             .find(|b| b.range.start <= at.off)
             .or(tree.blocks.first())
             .map(|b| b.range.clone())
-            .unwrap_or(0..text.len);
+            .unwrap_or_else(|| text.span.clone());
+        let top = in_source_span(top, &text.span)?;
         let body = text.source.get(top.clone()).unwrap_or_default();
         top.start..top.start + body.trim_end().len()
     } else {
-        0..text.len
+        text.span
     };
     (range.start < range.end).then(|| Selection {
         anchor: at_off(range.start),

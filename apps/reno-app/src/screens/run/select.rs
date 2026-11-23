@@ -138,14 +138,22 @@ impl RunScreen {
     #[cfg(test)]
     pub(crate) fn select_source(&mut self, key: Key, range: Range<usize>) {
         let ordinal = self.select.order[&key];
-        let at = |off| Pos {
-            ordinal,
-            slot: Slot::WHOLE,
-            off,
+        let anchors = self.markdown.peek(&key).map(|stream| stream.anchors());
+        let at = |off, end| {
+            let section = anchors.as_ref().and_then(|prose| {
+                prose.sections.iter().position(|section| {
+                    section.source.contains(&off) || (end && section.source.end == off)
+                })
+            });
+            Pos {
+                ordinal,
+                slot: Slot::prose(section.unwrap_or(0)),
+                off,
+            }
         };
         self.select.current = Some(Selection {
-            anchor: at(range.start),
-            head: at(range.end),
+            anchor: at(range.start, false),
+            head: at(range.end, true),
         });
     }
 
@@ -161,15 +169,9 @@ impl RunScreen {
     }
 
     /// The selection, if any, as the row `key` is drawn: its entry's place in reading order.
-    fn selection_for(&self, key: Key) -> Option<(Selection, usize)> {
+    pub(super) fn selection_for(&self, key: Key) -> Option<(Selection, usize)> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
         Some((sel, *self.select.order.get(&key)?))
-    }
-
-    /// The bytes of the reply's source that are selected.
-    pub(super) fn selected_in_prose(&self, key: Key, len: usize) -> Option<Range<usize>> {
-        let (sel, ordinal) = self.selection_for(key)?;
-        sel.within(ordinal, Slot::WHOLE, Some(len))
     }
 
     /// The highlights over one text: the selection under the find hits, which win where they meet.

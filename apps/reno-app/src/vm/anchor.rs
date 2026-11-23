@@ -10,8 +10,9 @@
 //! Pure: no window, no layout.
 
 use std::ops::Range;
+use std::rc::Rc;
 
-use reno_markdown::{Block, BlockTree, InlineRun};
+use reno_markdown::{Block, BlockTree, InlineRun, InlineStyle};
 
 use crate::links;
 use crate::ui::markdown_view::link::file_target;
@@ -171,7 +172,7 @@ pub(crate) fn copy(atoms: &[Atom], sel: Range<usize>) -> String {
 /// delimiters and markup as the owner wrote them. A text with no source (a fold head, a step
 /// line) is given as shown.
 pub(crate) fn source_of(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>) -> String {
-    selection::joined(sel, entries, shown, |t, range| {
+    selection::joined(sel, entries, shown, true, |t, range| {
         if t.sourced {
             t.source.get(range).unwrap_or_default().to_owned()
         } else {
@@ -180,12 +181,39 @@ pub(crate) fn source_of(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_
     })
 }
 
-/// The runs, code lines, formulas and diagrams of `tree` (parsed from `source`), in drawing
-/// order, each with the source bytes it came from.
-pub(crate) fn atoms(source: &str, tree: &BlockTree) -> Vec<Atom> {
+#[derive(Clone, Debug)]
+pub(crate) struct Section {
+    pub(crate) source: Range<usize>,
+    pub(crate) atoms: Range<usize>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Prose {
+    pub(crate) atoms: Rc<Vec<Atom>>,
+    pub(crate) sections: Vec<Section>,
+}
+
+impl Prose {
+    pub(crate) fn section_at(&self, atom: usize) -> usize {
+        self.sections
+            .partition_point(|section| section.atoms.end <= atom)
+    }
+}
+
+struct Note {
+    source: Range<usize>,
+    children: Vec<Range<usize>>,
+    atoms: Vec<Atom>,
+}
+
+/// Tracks every selectable prose span in drawing order, retaining absolute source byte ranges.
+pub(crate) fn prose(source: &str, tree: &BlockTree) -> Prose {
     let mut b = Builder {
         source,
         out: Vec::new(),
+        footnotes: Vec::new(),
+        root_notes: Vec::new(),
+        note_parent: None,
         cursor: 0,
         end: source.len(),
         lead: Gap::Joined,
@@ -198,12 +226,60 @@ pub(crate) fn atoms(source: &str, tree: &BlockTree) -> Vec<Atom> {
             .then(|| trimmed(source, b.cursor..b.end));
         b.block(&top.block, Gap::Blank);
     }
-    b.out
+
+    let mut sections = Vec::new();
+    let mut atoms = b.out;
+    add_sections(&mut sections, 0..source.len(), &b.root_notes, &atoms, 0);
+    for note in b.footnotes {
+        let first = atoms.len();
+        atoms.extend(note.atoms);
+        add_sections(&mut sections, note.source, &note.children, &atoms, first);
+    }
+    Prose {
+        atoms: Rc::new(atoms),
+        sections,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn atoms(source: &str, tree: &BlockTree) -> Vec<Atom> {
+    Rc::unwrap_or_clone(prose(source, tree).atoms)
+}
+
+fn add_sections(
+    sections: &mut Vec<Section>,
+    scope: Range<usize>,
+    hoisted: &[Range<usize>],
+    atoms: &[Atom],
+    mut first: usize,
+) {
+    let mut from = scope.start;
+    for removed in hoisted {
+        let end = from.max(removed.start);
+        let after = first + atoms[first..].partition_point(|atom| atom.src.start < end);
+        if first < after {
+            sections.push(Section {
+                source: from..end,
+                atoms: first..after,
+            });
+        }
+        from = end.max(removed.end);
+        first = after;
+    }
+    if first < atoms.len() || hoisted.is_empty() {
+        sections.push(Section {
+            source: from..scope.end.max(from),
+            atoms: first..atoms.len(),
+        });
+    }
 }
 
 struct Builder<'a> {
     source: &'a str,
     out: Vec<Atom>,
+    footnotes: Vec<Note>,
+    root_notes: Vec<Range<usize>>,
+    note_parent: Option<usize>,
     /// Where in the source the next run is looked for.
     cursor: usize,
     /// The end of the top-level block being walked.
@@ -272,7 +348,7 @@ impl Builder<'_> {
                     block: None,
                 });
             }
-            Block::BlockQuote { children } => {
+            Block::BlockQuote { children, .. } => {
                 for (n, child) in children.iter().enumerate() {
                     self.block(child, if n == 0 { lead } else { Gap::Blank });
                 }
@@ -298,6 +374,13 @@ impl Builder<'_> {
                     }
                 }
             }
+            Block::Footnote { blocks, range, .. } => self.footnote(blocks, range),
+            Block::FrontMatter { pairs } => {
+                for (ix, (key, value)) in pairs.iter().enumerate() {
+                    self.lead = if ix == 0 { lead } else { Gap::Line };
+                    self.runs(&[front_matter_run(key, value)]);
+                }
+            }
             Block::Rule => {}
         }
     }
@@ -314,6 +397,18 @@ impl Builder<'_> {
 
     fn run(&mut self, run: &InlineRun) -> Atom {
         let style = &run.style;
+        if let Some(label) = &style.footnote_ref {
+            let src = self.find_exact(&run.text);
+            let text = footnote_marker(label);
+            return Atom {
+                src,
+                copy: text.clone(),
+                text,
+                gap: Gap::Joined,
+                shape: Shape::Whole,
+                block: None,
+            };
+        }
         if let Some(image) = &style.image {
             let src = self.find_image().unwrap_or(self.cursor..self.cursor);
             return Atom {
@@ -338,7 +433,7 @@ impl Builder<'_> {
                 block: None,
             };
         }
-        let (src, shape) = self.find_text(&run.text);
+        let (src, shape) = self.find_text(&run.text, !style.code);
         // A link to a worktree file, drawn with a label, copies its path.
         let copy = match style.link.as_deref().map(str::trim) {
             Some(dest)
@@ -358,6 +453,39 @@ impl Builder<'_> {
             shape,
             block: None,
         }
+    }
+
+    fn footnote(&mut self, blocks: &[Block], range: &Range<usize>) {
+        let source = range.start.min(self.end)..range.end.min(self.end);
+        let index = self.footnotes.len();
+        let children = match self.note_parent {
+            Some(parent) => &mut self.footnotes[parent].children,
+            None => &mut self.root_notes,
+        };
+        children.push(source.clone());
+        self.footnotes.push(Note {
+            source: source.clone(),
+            children: Vec::new(),
+            atoms: Vec::new(),
+        });
+
+        let parent = self.note_parent.replace(index);
+        let end = std::mem::replace(&mut self.end, source.end);
+        self.cursor = source.start;
+        if let Some(close) = self.window().find("]:") {
+            self.cursor += close + 2;
+        }
+        let first = self.out.len();
+        for child in blocks {
+            self.block(child, Gap::Blank);
+        }
+        self.footnotes[index].atoms = self.out.split_off(first);
+        if let Some(atom) = self.footnotes[index].atoms.first_mut() {
+            atom.gap = Gap::Blank;
+        }
+        self.cursor = source.end;
+        self.end = end;
+        self.note_parent = parent;
     }
 
     fn window(&self) -> &str {
@@ -381,15 +509,30 @@ impl Builder<'_> {
 
     /// A run's text after the cursor, allowing what the parser changes: a line break read as a
     /// space, a backslash before punctuation.
-    fn find_text(&mut self, text: &str) -> (Range<usize>, Shape) {
+    fn find_text(&mut self, text: &str, skip_comments: bool) -> (Range<usize>, Shape) {
         if text.is_empty() {
             return (self.cursor..self.cursor, Shape::Exact);
         }
         let word_end = text.find(char::is_whitespace).unwrap_or(text.len()).max(1);
         let word = &text[..word_end.min(text.len())];
         let window = self.window();
+        let skip_comments = skip_comments && !text.contains("<!--");
+        let mut seen = 0;
         for (at, _) in window.match_indices(word) {
-            if let Some((len, pairs)) = walk(&window[at..], text) {
+            if skip_comments {
+                while seen < at {
+                    let Some(open) = window[seen..at].find("<!--") else {
+                        seen = at;
+                        break;
+                    };
+                    seen += open;
+                    seen += html_comment_len(&window[seen..]).unwrap_or(4);
+                }
+                if at < seen {
+                    continue;
+                }
+            }
+            if let Some((len, pairs)) = walk(&window[at..], text, skip_comments) {
                 let from = self.cursor + at;
                 let pairs: Vec<_> = pairs.iter().map(|(s, t)| (from + s, *t)).collect();
                 self.cursor = from + len;
@@ -454,24 +597,54 @@ impl Builder<'_> {
     }
 }
 
+pub(crate) fn footnote_marker(label: &str) -> String {
+    format!("[{label}]")
+}
+
+pub(crate) fn front_matter_run(key: &str, value: &str) -> InlineRun {
+    let text = if value.is_empty() {
+        format!("{key}:")
+    } else {
+        format!("{key}: {value}")
+    };
+    InlineRun {
+        text,
+        style: InlineStyle::default(),
+    }
+}
+
 /// Reads `text` off the front of `source`: a run of whitespace in the text matches a run of
 /// whitespace in the source (a line break, with its quote or list margin), and a backslash
 /// before punctuation is skipped. The source bytes used, with `(source, text)` offsets at each
 /// character; `None` when the text is not there.
-fn walk(source: &str, text: &str) -> Option<(usize, Vec<(usize, usize)>)> {
+fn walk(source: &str, text: &str, skip_comments: bool) -> Option<(usize, Vec<(usize, usize)>)> {
     let mut pairs = Vec::new();
     let mut at = 0;
     let mut chars = text.char_indices().peekable();
     while let Some((t, c)) = chars.next() {
+        if skip_comments {
+            while let Some(len) = html_comment_len(&source[at..]) {
+                at += len;
+            }
+        }
         pairs.push((at, t));
         if c.is_whitespace() {
-            let run = source[at..]
-                .find(|s: char| !s.is_whitespace() && s != '>')
-                .unwrap_or(source.len() - at);
-            if run == 0 {
+            let start = at;
+            loop {
+                at += source[at..]
+                    .find(|s: char| !s.is_whitespace() && s != '>')
+                    .unwrap_or(source.len() - at);
+                let Some(len) = skip_comments
+                    .then(|| html_comment_len(&source[at..]))
+                    .flatten()
+                else {
+                    break;
+                };
+                at += len;
+            }
+            if at == start {
                 return None;
             }
-            at += run;
             while chars.peek().is_some_and(|(_, n)| n.is_whitespace()) {
                 chars.next();
             }
@@ -487,6 +660,11 @@ fn walk(source: &str, text: &str) -> Option<(usize, Vec<(usize, usize)>)> {
         }
     }
     Some((at, pairs))
+}
+
+fn html_comment_len(source: &str) -> Option<usize> {
+    let body = source.strip_prefix("<!--")?;
+    body.find("-->").map(|start| start + 7)
 }
 
 #[cfg(test)]

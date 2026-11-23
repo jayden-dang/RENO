@@ -16,9 +16,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, IntoElement,
-    Pixels, RenderOnce, SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
-    Window, div, prelude::*, px,
+    AnyElement, App, Bounds, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText,
+    IntoElement, Pixels, RenderOnce, SharedString, StrikethroughStyle, StyledText, TextRun,
+    UnderlineStyle, Window, div, prelude::*, px,
 };
 use reno_client::Client;
 use reno_markdown::mend::PENDING_LINK_URL;
@@ -26,6 +26,7 @@ use reno_markdown::parser::TableAlign;
 use reno_markdown::{Block, BlockTree, IncrementalParser, InlineRun};
 use reno_proto::RunId;
 use reno_syntax::{HighlightKind, HighlightRequest, HighlightSpan, HighlightedDocument};
+use unicase::UniCase;
 
 use self::chrome::Card;
 use self::image::ImageHost;
@@ -35,8 +36,8 @@ use self::select::{Map, Registry, Seg, Track, highlight_runs};
 use super::kit::MONO;
 use super::theme::Theme;
 use crate::transcript::Key;
-use crate::vm::anchor::Atom;
-use crate::vm::selection::Slot;
+use crate::vm::anchor::{Prose, footnote_marker, front_matter_run};
+use crate::vm::selection::{Selection, Slot};
 
 pub(crate) mod chrome;
 pub(crate) mod image;
@@ -56,7 +57,7 @@ pub(crate) struct Streaming {
     parser: IncrementalParser,
     tree: BlockTree,
     /// The drawn runs lined up with the source, made when selection first asks for them.
-    atoms: std::cell::RefCell<Option<Rc<Vec<Atom>>>>,
+    anchors: RefCell<Option<Rc<Prose>>>,
 }
 
 impl Streaming {
@@ -68,16 +69,16 @@ impl Streaming {
         }
         self.parser.set_text(text);
         self.tree = self.parser.display_tree();
-        self.atoms.take();
+        self.anchors.take();
         true
     }
 
     /// The drawn runs, code lines, formulas and diagrams of the tree, with their source.
-    pub(crate) fn atoms(&self) -> Rc<Vec<Atom>> {
-        self.atoms
+    pub(crate) fn anchors(&self) -> Rc<Prose> {
+        self.anchors
             .borrow_mut()
             .get_or_insert_with(|| {
-                Rc::new(crate::vm::anchor::atoms(self.parser.source(), &self.tree))
+                Rc::new(crate::vm::anchor::prose(self.parser.source(), &self.tree))
             })
             .clone()
     }
@@ -118,6 +119,7 @@ pub(crate) struct Host {
     /// Told when the owner zooms a diagram in, so a host that follows the end of its content can
     /// stop following.
     pub(crate) grew: Option<Grew>,
+    footnotes: Option<FootnoteNavigation>,
 }
 
 /// What a host does when something the owner opened grows what it shows.
@@ -130,12 +132,24 @@ impl std::fmt::Debug for Grew {
     }
 }
 
+type RevealFootnote = dyn Fn(Bounds<Pixels>, &mut App);
+
+#[derive(Clone)]
+struct FootnoteNavigation(Rc<RevealFootnote>);
+
+impl std::fmt::Debug for FootnoteNavigation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FootnoteNavigation")
+    }
+}
+
 /// What to paint over a reply: what to look for, and which of the reply's drawn matches is the one the
 /// find bar is on (counted from zero in drawing order; `None` when it is in another row).
 #[derive(Debug)]
 pub(crate) struct Marks {
     pub(crate) matcher: Rc<crate::vm::find::Matcher>,
     pub(crate) current: Option<usize>,
+    pub(crate) current_source: Option<Range<usize>>,
 }
 
 /// A reply drawn for the transcript's selection.
@@ -143,10 +157,18 @@ pub(crate) struct SelectHost {
     pub(crate) registry: Registry,
     pub(crate) key: Key,
     /// The reply's runs lined up with its source.
-    pub(crate) atoms: Rc<Vec<Atom>>,
-    /// The selected bytes of the reply's source.
-    pub(crate) selected: Option<Range<usize>>,
+    pub(crate) anchors: Rc<Prose>,
+    pub(crate) selected: Option<(Selection, usize)>,
     pub(crate) style: HighlightStyle,
+}
+
+impl SelectHost {
+    fn selected_at(&self, atom: usize) -> Option<Range<usize>> {
+        let (selection, ordinal) = self.selected?;
+        let section = self.anchors.section_at(atom);
+        let source = &self.anchors.sections.get(section)?.source;
+        selection.within_source(ordinal, Slot::prose(section), source)
+    }
 }
 
 impl std::fmt::Debug for SelectHost {
@@ -168,6 +190,7 @@ impl Host {
             marks: None,
             select: None,
             grew: None,
+            footnotes: None,
         }
     }
 
@@ -186,6 +209,7 @@ impl Host {
             marks: None,
             select: None,
             grew: None,
+            footnotes: None,
         }
     }
 
@@ -204,6 +228,14 @@ impl Host {
     /// Says what to do when the owner zooms a diagram in.
     pub(crate) fn when_grown(mut self, grew: Option<Grew>) -> Self {
         self.grew = grew;
+        self
+    }
+
+    pub(crate) fn on_footnote(
+        mut self,
+        reveal: impl Fn(Bounds<Pixels>, &mut App) + 'static,
+    ) -> Self {
+        self.footnotes = Some(FootnoteNavigation(Rc::new(reveal)));
         self
     }
 
@@ -237,6 +269,8 @@ pub(crate) fn settled_generation(cx: &App) -> u64 {
 struct Env<'a> {
     theme: &'a Theme,
     host: &'a Host,
+    footnotes: HashMap<UniCase<&'a str>, usize>,
+    footnote_bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     window: &'a Window,
     base: gpui::TextStyle,
     scale: f32,
@@ -275,9 +309,17 @@ impl RenderOnce for Markdown {
         let base = window.text_style();
         let (typeset, percent) = crate::prefs::math(cx);
         let size = base.font_size.to_pixels(window.rem_size());
+        let mut notes = Vec::new();
+        collect_footnotes(self.tree.blocks.iter().map(|top| &top.block), &mut notes);
         let env = Env {
             theme: &self.theme,
             host: &self.host,
+            footnotes: notes
+                .iter()
+                .enumerate()
+                .map(|(ix, (label, _))| (UniCase::new(*label), ix))
+                .collect(),
+            footnote_bounds: Rc::default(),
             window,
             scale: window.scale_factor(),
             math: typeset.then(|| f32::from(size) * f32::from(percent) / 100.0),
@@ -292,6 +334,7 @@ impl RenderOnce for Markdown {
             .blocks
             .iter()
             .enumerate()
+            .filter(|(_, top)| !matches!(top.block, Block::Footnote { .. }))
             .map(|(at, top)| match &top.block {
                 Block::CodeBlock { code, language }
                     if self.host.streaming && at == last && is_mermaid(language) =>
@@ -308,16 +351,22 @@ impl RenderOnce for Markdown {
                 other => block(other, &env, cx),
             })
             .collect::<Vec<_>>();
+        let footnotes = (!notes.is_empty()).then(|| draw_footnotes(&notes, &env, cx));
         // The draw took exactly the atoms the anchors made for this tree, in the same order:
         // selection maps painted text to source through them.
         if let Some(select) = &self.host.select {
             debug_assert_eq!(
                 env.atom_at.get(),
-                select.atoms.len(),
+                select.anchors.atoms.len(),
                 "atoms and drawing differ"
             );
         }
-        div().flex().flex_col().gap(px(10.0)).children(blocks)
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .children(blocks)
+            .children(footnotes)
     }
 }
 
@@ -333,6 +382,72 @@ pub(crate) fn blocks_with(tree: &BlockTree, theme: &Theme, host: Host) -> AnyEle
         host,
     }
     .into_any_element()
+}
+
+type Footnote<'a> = (&'a str, &'a [Block]);
+
+fn collect_footnotes<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+    notes: &mut Vec<Footnote<'a>>,
+) {
+    for block in blocks {
+        match block {
+            Block::Footnote { label, blocks, .. } => {
+                notes.push((label, blocks));
+                collect_footnotes(blocks, notes);
+            }
+            Block::BlockQuote { children, .. } => collect_footnotes(children, notes),
+            Block::List { items, .. } => collect_footnotes(items.iter().flatten(), notes),
+            _ => {}
+        }
+    }
+}
+
+fn draw_footnotes(notes: &[Footnote<'_>], env: &Env, cx: &mut App) -> AnyElement {
+    let bounds = env.footnote_bounds.clone();
+    div()
+        .on_children_prepainted(move |positions, _, _| *bounds.borrow_mut() = positions)
+        .debug_selector(|| "md-footnotes".to_owned())
+        .border_t_1()
+        .border_color(env.theme.hairline)
+        .pt(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(
+            notes
+                .iter()
+                .map(|(label, blocks)| {
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(env.theme.muted)
+                                .child(footnote_marker(label)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .children(body_blocks(blocks, env, cx)),
+                        )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_any_element()
+}
+
+fn body_blocks(nodes: &[Block], env: &Env, cx: &mut App) -> Vec<AnyElement> {
+    nodes
+        .iter()
+        .filter(|block| !matches!(block, Block::Footnote { .. }))
+        .map(|node| block(node, env, cx))
+        .collect()
 }
 
 fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
@@ -367,7 +482,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
             let at = env.take_atoms(1);
             display_math(tex, at, env, cx)
         }
-        Block::BlockQuote { children } => div()
+        Block::BlockQuote { children, .. } => div()
             .pl(px(12.0))
             .border_l_2()
             .border_color(theme.hairline)
@@ -375,12 +490,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .children(
-                children
-                    .iter()
-                    .map(|b| block(b, env, cx))
-                    .collect::<Vec<_>>(),
-            )
+            .children(body_blocks(children, env, cx))
             .into_any_element(),
         Block::List {
             ordered_start,
@@ -415,9 +525,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
                                     .flex()
                                     .flex_col()
                                     .gap(px(4.0))
-                                    .children(
-                                        item.iter().map(|b| block(b, env, cx)).collect::<Vec<_>>(),
-                                    ),
+                                    .children(body_blocks(item, env, cx)),
                             )
                     })
                     .collect::<Vec<_>>(),
@@ -428,6 +536,17 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
             rows,
             align,
         } => table(header, rows, align, env, cx),
+        Block::Footnote { .. } => div().into_any_element(),
+        Block::FrontMatter { pairs } => div()
+            .flex()
+            .flex_col()
+            .children(
+                pairs
+                    .iter()
+                    .map(|(key, value)| inline(&[front_matter_run(key, value)], env, cx))
+                    .collect::<Vec<_>>(),
+            )
+            .into_any_element(),
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
@@ -622,13 +741,14 @@ fn layers(
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut out = Vec::new();
     if let Some(select) = &env.host.select
-        && let Some(selected) = &select.selected
+        && let Some(seg) = segs.first()
+        && let Some(selected) = select.selected_at(seg.atom)
     {
         let map = Map::Atoms {
-            atoms: select.atoms.clone(),
+            atoms: select.anchors.atoms.clone(),
             segs: segs.to_vec(),
         };
-        if let Some(range) = map.layout_range(selected, len, false) {
+        if let Some(range) = map.layout_range(&selected, len, false) {
             out.push((range, select.style));
         }
     }
@@ -644,20 +764,31 @@ fn layers(
 
 /// The find hits in `text`, which starts at byte `base` of its laid-out text, numbered in drawing
 /// order across the reply, with whether each is the one the bar is on.
-fn find_hits(env: &Env, text: &str, base: usize) -> Vec<(Range<usize>, bool)> {
+fn find_hits(env: &Env, text: &str, base: usize, atom: Option<usize>) -> Vec<(Range<usize>, bool)> {
     let Some(marks) = &env.host.marks else {
         return Vec::new();
     };
+    let source = atom
+        .and_then(|ix| env.host.select.as_ref()?.anchors.atoms.get(ix))
+        .filter(|atom| !atom.src.is_empty());
     marks
         .matcher
         .matches(text)
         .into_iter()
         .map(|range| {
             let n = env.hit_at.replace(env.hit_at.get() + 1);
-            (
-                base + range.start..base + range.end,
-                marks.current == Some(n),
-            )
+            let current = match source {
+                Some(atom) => marks.current_source.as_ref().is_some_and(|current| {
+                    let src = if atom.is_atomic() {
+                        atom.src.clone()
+                    } else {
+                        atom.src_at(range.start)..atom.src_at(range.end)
+                    };
+                    src.start < current.end && current.start < src.end
+                }),
+                None => marks.current == Some(n),
+            };
+            (base + range.start..base + range.end, current)
         })
         .collect()
 }
@@ -670,9 +801,9 @@ fn tracked(env: &Env, element: AnyElement, layout: gpui::TextLayout, segs: Vec<S
             layout,
             (
                 select.key,
-                Slot::WHOLE,
+                Slot::prose(select.anchors.section_at(segs[0].atom)),
                 Map::Atoms {
-                    atoms: select.atoms.clone(),
+                    atoms: select.anchors.atoms.clone(),
                     segs,
                 },
             ),
@@ -688,7 +819,8 @@ fn atom_selected(env: &Env, at: usize) -> bool {
     let Some(select) = &env.host.select else {
         return false;
     };
-    let (Some(selected), Some(atom)) = (&select.selected, select.atoms.get(at)) else {
+    let (Some(selected), Some(atom)) = (select.selected_at(at), select.anchors.atoms.get(at))
+    else {
         return false;
     };
     if atom.src.is_empty() {
@@ -739,7 +871,7 @@ fn code_lines(
                 })
                 .into_iter()
                 .collect();
-            let finds = find_hits(env, line, 0);
+            let finds = find_hits(env, line, 0, atoms.map(|base| base + ix));
             let runs = highlight_runs(runs, &layers(env, &segs, line.len(), &finds));
             let styled = StyledText::new(SharedString::from((*line).to_owned())).with_runs(runs);
             let layout = styled.layout().clone();
@@ -1107,6 +1239,11 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
     inline_at(runs, first, env, cx)
 }
 
+enum InlineAction {
+    Link(Action),
+    Footnote(usize),
+}
+
 /// [`inline`] for runs that are atoms `first`, `first + 1`, ... of the reply.
 fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyElement {
     let theme = env.theme;
@@ -1115,7 +1252,7 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
     let font_size = base.font_size.to_pixels(env.window.rem_size());
     let mut text = String::new();
     let mut spans = Vec::with_capacity(runs.len());
-    let mut links: Vec<(Range<usize>, Action)> = Vec::new();
+    let mut links: Vec<(Range<usize>, InlineAction)> = Vec::new();
     let mut overlays: Vec<Overlay> = Vec::new();
     let mut segs: Vec<Seg> = Vec::new();
     let mut finds: Vec<(Range<usize>, bool)> = Vec::new();
@@ -1158,6 +1295,8 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
             });
             continue;
         }
+        let marker = style.footnote_ref.as_deref().map(footnote_marker);
+        let shown = marker.as_deref().unwrap_or(&run.text);
         let mut action = style
             .link
             .as_deref()
@@ -1179,15 +1318,25 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
         }
         // A streaming link and every link in the preview look like links; in the transcript one
         // the policy will not open is plain text.
-        let link = action.is_some()
+        let footnote = style
+            .footnote_ref
+            .as_ref()
+            .filter(|_| env.host.footnotes.is_some())
+            .and_then(|label| env.footnotes.get(&UniCase::new(label.as_str())))
+            .copied();
+        let link = footnote.is_some()
+            || action.is_some()
             || (style.link.is_some()
                 && (matches!(policy, LinkPolicy::Preview)
                     || style.link.as_deref() == Some(PENDING_LINK_URL)));
-        if let Some(action) = action {
-            links.push((text.len()..text.len() + run.text.len(), action));
+        if let Some(action) = footnote
+            .map(InlineAction::Footnote)
+            .or_else(|| action.map(InlineAction::Link))
+        {
+            links.push((from..from + shown.len(), action));
         }
         spans.push(TextRun {
-            len: run.text.len(),
+            len: shown.len(),
             font,
             color: if link { theme.accent } else { base.color },
             background_color: (style.code || style.math).then(|| theme.raised.opacity(0.55)),
@@ -1201,12 +1350,12 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
                 color: Some(base.color),
             }),
         });
-        text.push_str(&run.text);
+        text.push_str(shown);
         segs.push(Seg {
             layout: from..text.len(),
             atom: first + n,
         });
-        finds.extend(find_hits(env, &run.text, from));
+        finds.extend(find_hits(env, shown, from, Some(first + n)));
     }
     let spans = highlight_runs(spans, &layers(env, &segs, text.len(), &finds));
     let styled = StyledText::new(SharedString::from(text.clone())).with_runs(spans);
@@ -1218,11 +1367,18 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
         text.hash(&mut hasher);
         let (ranges, actions): (Vec<_>, Vec<_>) = links.into_iter().unzip();
         let policy = policy.clone();
+        let navigation = env.host.footnotes.clone();
+        let bounds = env.footnote_bounds.clone();
         InteractiveText::new(("md-text", hasher.finish() as usize), styled)
-            .on_click(ranges, move |ix, window, cx| {
-                if let Some(action) = actions.get(ix) {
-                    policy.run(action, window, cx);
+            .on_click(ranges, move |ix, window, cx| match actions.get(ix) {
+                Some(InlineAction::Link(action)) => policy.run(action, window, cx),
+                Some(InlineAction::Footnote(target)) => {
+                    let destination = bounds.borrow().get(*target).copied();
+                    if let (Some(navigation), Some(destination)) = (&navigation, destination) {
+                        (navigation.0)(destination, cx);
+                    }
                 }
+                None => {}
             })
             .into_any_element()
     };
@@ -1383,11 +1539,14 @@ mod tests {
         let host = Host::preview().marked(Some(Rc::new(Marks {
             matcher,
             current: Some(1),
+            current_source: None,
         })));
         vcx.update(|window, _| {
             let env = Env {
                 theme: &theme,
                 host: &host,
+                footnotes: HashMap::new(),
+                footnote_bounds: Rc::default(),
                 window,
                 base: window.text_style(),
                 scale: 1.0,
@@ -1397,8 +1556,8 @@ mod tests {
                 hit_at: std::cell::Cell::new(0),
             };
             // Two runs, as `inline` goes through them: one match in the first, two in the second.
-            let first = find_hits(&env, "draws it", 0);
-            let second = find_hits(&env, "a Draw and draw", 8);
+            let first = find_hits(&env, "draws it", 0, None);
+            let second = find_hits(&env, "a Draw and draw", 8, None);
             assert_eq!(first, vec![(0..4, false)]);
             assert_eq!(
                 second,
@@ -1413,6 +1572,60 @@ mod tests {
             assert_eq!(layers[0].1, hit(false));
             assert_eq!(layers[1].1, hit(true));
             assert_ne!(layers[0].1, layers[1].1);
+        });
+    }
+
+    #[gpui::test]
+    fn a_current_find_match_follows_its_source_when_a_note_moves_after_the_tail(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, vcx) = cx.add_window_view(|_, _| gpui::Empty);
+        let theme = Theme::for_appearance(crate::ui::theme::Appearance::Dark);
+        let source = "Intro[^a].\n\n[^a]: Search in the note.\n\nSearch in the tail.";
+        let start = source.find("Search").unwrap();
+        let mut stream = Streaming::default();
+        stream.set_text(source);
+        let host = Host::transcript(None, None, None)
+            .marked(Some(Rc::new(Marks {
+                matcher: Rc::new(
+                    crate::vm::find::Query {
+                        text: "Search".into(),
+                        ..Default::default()
+                    }
+                    .compile()
+                    .unwrap(),
+                ),
+                current: Some(0),
+                current_source: Some(start..start + "Search".len()),
+            })))
+            .selectable(Some(Rc::new(SelectHost {
+                registry: Registry::default(),
+                key: Key(0),
+                anchors: stream.anchors(),
+                selected: None,
+                style: HighlightStyle::default(),
+            })));
+        vcx.update(|window, _| {
+            let env = Env {
+                theme: &theme,
+                host: &host,
+                footnotes: HashMap::new(),
+                footnote_bounds: Rc::default(),
+                window,
+                base: window.text_style(),
+                scale: 1.0,
+                math: None,
+                cards: Default::default(),
+                atom_at: Default::default(),
+                hit_at: Default::default(),
+            };
+            let atoms = &host.select.as_ref().unwrap().anchors.atoms;
+            let match_in = |text| {
+                let ix = atoms.iter().position(|atom| atom.text == text).unwrap();
+                find_hits(&env, text, 0, Some(ix))
+            };
+            assert_eq!(match_in("Search in the tail."), [(0..6, false)]);
+            assert_eq!(match_in("Search in the note."), [(0..6, true)]);
         });
     }
 

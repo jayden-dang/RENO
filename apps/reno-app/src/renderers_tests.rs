@@ -273,7 +273,7 @@ fn wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways(cx: &mut TestAppC
     let host = Host::transcript(None, None, None).selectable(Some(Rc::new(SelectHost {
         registry: registry.clone(),
         key: Key(1),
-        atoms: stream.atoms(),
+        anchors: stream.anchors(),
         selected: None,
         style: selection_style(&Theme::for_appearance(Appearance::Light)),
     })));
@@ -826,4 +826,95 @@ fn the_re_raster_fires_once_after_the_last_zoom_step(cx: &mut TestAppContext) {
         .advance_clock(RERASTER_AFTER + std::time::Duration::from_millis(1));
     vcx.run_until_parked();
     assert_eq!(fired(vcx), 2);
+}
+
+#[gpui::test]
+fn a_footnote_defined_mid_reply_draws_after_the_tail_and_retains_its_source(
+    cx: &mut TestAppContext,
+) {
+    use crate::transcript::Key;
+    use crate::ui::markdown_view::{SelectHost, select::Registry};
+
+    let source = "Ordinary quote and note[^strasse], plus a second note[^LABEL].\n\n[^Straße]: Draw the note.\n\nDraw the tail.\n\n[^label]: Another note.";
+    let mut stream = Streaming::default();
+    stream.set_text(source);
+    let registry = Registry::default();
+    let revealed = Rc::new(RefCell::new(Vec::new()));
+    let track_reveal = revealed.clone();
+    let host = Host::transcript(None, None, None)
+        .on_footnote(move |target, _| track_reveal.borrow_mut().push(target))
+        .selectable(Some(Rc::new(SelectHost {
+            registry: registry.clone(),
+            key: Key(0),
+            anchors: stream.anchors(),
+            selected: None,
+            style: Default::default(),
+        })));
+    let (_view, vcx) = probe(cx, source, host, Appearance::Dark);
+    let refs_and_notes = {
+        let pieces = registry.borrow();
+        let piece = |text| {
+            pieces
+                .iter()
+                .find(|p| p.layout.text().contains(text))
+                .unwrap()
+        };
+        let tail = piece("Draw the tail.");
+        let note = piece("Draw the note.");
+        assert!(tail.bounds.top() < note.bounds.top());
+        for (part, literally) in [(tail, "Draw the tail."), (note, "Draw the note.")] {
+            let offset = part.layout.text().find(literally).unwrap();
+            let range = part.map.source_range(offset..offset + literally.len());
+            assert_eq!(&source[range], literally);
+        }
+        let prose = piece("Ordinary quote and note");
+        [
+            ("[strasse]", "[^strasse]", note.bounds.center()),
+            (
+                "[LABEL]",
+                "[^LABEL]",
+                piece("Another note.").bounds.center(),
+            ),
+        ]
+        .map(|(drawn, spelled, destination)| {
+            let at = prose.layout.text().find(drawn).unwrap();
+            let range = prose.map.source_range(at..at + drawn.len());
+            assert_eq!(&source[range], spelled);
+            let origin = prose.layout.position_for_index(at + 1).unwrap();
+            let click = origin + gpui::point(px(1.0), prose.layout.line_height() / 2.0);
+            (click, destination)
+        })
+    };
+    assert!(painted(vcx, "md-footnotes"));
+    for (click, destination) in refs_and_notes {
+        vcx.simulate_click(click, gpui::Modifiers::none());
+        assert!(revealed.borrow_mut().pop().unwrap().contains(&destination));
+    }
+}
+
+#[gpui::test]
+fn hiding_an_inline_comment_preserves_the_visible_texts_source_anchors(cx: &mut TestAppContext) {
+    use crate::transcript::Key;
+    use crate::ui::markdown_view::{SelectHost, select::Registry};
+
+    let source = "Before <!-- after --> after.";
+    let mut stream = Streaming::default();
+    stream.set_text(source);
+    let registry = Registry::default();
+    let host = Host::transcript(None, None, None).selectable(Some(Rc::new(SelectHost {
+        registry: registry.clone(),
+        key: Key(0),
+        anchors: stream.anchors(),
+        selected: None,
+        style: Default::default(),
+    })));
+    let (_view, _) = probe(cx, source, host, Appearance::Dark);
+    let pieces = registry.borrow();
+    let piece = pieces.last().unwrap();
+    let text = piece.layout.text();
+    assert_eq!(text, "Before  after.");
+    let offset = text.find("after").unwrap();
+    let range = piece.map.source_range(offset..offset + "after".len());
+    assert_eq!(range.start, source.rfind("after").unwrap());
+    assert_eq!(&source[range], "after");
 }
