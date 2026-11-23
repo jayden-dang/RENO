@@ -433,13 +433,13 @@ and its scrollbar hooks (`set_offset_from_scrollbar`, `max_offset_for_scrollbar`
 
 **Depends-on:** Task 6, Task 7, Task 8
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `page_line_home_and_end_keys_scroll_the_transcript`;
   - `shift_page_keys_go_to_the_previous_and_next_prompt`.
   Run: `cargo test -p reno-app keys_scroll` — expect: fails.
-- [ ] **Step 2:** Bind the actions. A page is 90 % of the viewport and a line step is three lines (TRANSCRIPT-5.1). Run:
+- [x] **Step 2:** Bind the actions. A page is 90 % of the viewport and a line step is three lines (TRANSCRIPT-5.1). Run:
   `cargo test -p reno-app` — expect: pass, with the composer's keys unchanged.
-- [ ] **Step 3:** Commit `transcript: page, line, home, end and prompt-to-prompt keys`.
+- [x] **Step 3:** Commit `transcript: page, line, home, end and prompt-to-prompt keys`.
 
 _Requirements: TRANSCRIPT-5.1, TRANSCRIPT-5.2_
 
