@@ -1,7 +1,7 @@
 # Roadmap: Reno
 
 Status: Approved
-Date: 2026-11-22
+Date: 2026-11-23
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -22,11 +22,12 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 ## Focus
 
 **Now:** ROAD-33, ROAD-56
-**Next:** ROAD-55, ROAD-53, MILE-1, MILE-11
+**Next:** MILE-13, ROAD-55, ROAD-53, MILE-1, MILE-11
 
 | ID | Milestone | Depends-on | Commitment |
 |---|---|---|---|
 | MILE-10 | Workflow design on a mocked daemon | none | Planned |
+| MILE-13 | Daily work in a thread | none | Planned |
 | MILE-1 | Harness parity | MILE-10 | Planned |
 | MILE-2 | Choose where and how a task runs | MILE-10 | Planned |
 | MILE-3 | Harness depth | MILE-1 | Planned |
@@ -61,6 +62,21 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Closed:** None
 **Deferred:** None
 **Blockers:** None
+
+## MILE-13 — Daily work in a thread
+
+**Outcome:** The owner starts and continues work in a Delta-style thread, submits source-anchored comments and receives linked answers, chooses the context and harness actions to send, and brings terminal output into the conversation with each harness's supported behavior made clear.
+**Goals:** GOAL-1, GOAL-6, GOAL-7, GOAL-8, GOAL-11
+**Members:**
+- **ROAD-71** thread-chat-workflow — After: ROAD-33 — Surfaces: `apps/reno-app/`, `crates/reno-client/`, `crates/reno-proto/`, `crates/reno-kernel/`, `crates/reno-store/`, `crates/reno-harness/` — Notes: [ROAD-71](roads/ROAD-71.notes.md) — Card: [ROAD-71](roads/ROAD-71.md)
+- **ROAD-60** comments-on-the-transcript — After: ROAD-71, ROAD-33, ROAD-31 — Surfaces: `apps/reno-app/`, `crates/reno-client/`, `crates/reno-proto/`, `crates/reno-kernel/`, `crates/reno-store/`, `crates/reno-harness/` — Notes: [ROAD-60](roads/ROAD-60.notes.md) — Card: [ROAD-60](roads/ROAD-60.md)
+- **ROAD-72** thread-context-and-invocations — After: ROAD-71 — Surfaces: `apps/reno-app/`, `crates/reno-client/`, `crates/reno-proto/`, `crates/reno-harness/`, `apps/renod/` — Card: [ROAD-72](roads/ROAD-72.md)
+- **ROAD-73** terminal-in-thread-chat — After: ROAD-71, ROAD-72 — Surfaces: `apps/reno-app/`, `crates/reno-client/`, `crates/reno-proto/`, `apps/renod/src/terminals/`, `crates/reno-term/` — Card: [ROAD-73](roads/ROAD-73.md)
+**Depends-on:** none
+**Commitment:** Planned
+**Closed:** None
+**Deferred:** None
+**Blockers:** ROAD-71 starts with frame-change only after ROAD-33 is complete; detailed requirements, UI choices and implementation boundaries are decided there. — Notes: [MILE-13](milestones/MILE-13.notes.md)
 
 ## MILE-1 — Harness parity
 
@@ -166,6 +182,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-43** split-chats → MILE-6 (2026-11-19, after the new shell exists)
 - ~~**ROAD-44**~~ agent-published-visuals → MILE-6 (2026-11-19) — retired 2026-11-22: static visuals an agent posts moved into ROAD-33, scripted ones into ROAD-58
 - **ROAD-58** agent-scripted-visuals → MILE-6 (2026-11-22, reverses the earlier ruling that Reno renders harness output, not agent-written UI; needs a vision edit and an ADR first) — Notes: [ROAD-58](roads/ROAD-58.notes.md)
+- **ROAD-59** edit-a-past-prompt-and-regenerate → MILE-6 (2026-11-22, split from ROAD-33; needs a per-executor rewind and a ruling on the worktree, as Reno does not replace a harness's loop) — Notes: [ROAD-59](roads/ROAD-59.notes.md)
 - **ROAD-45** window-capture-into-composer → MILE-6 (2026-11-19, a person's tool in its own boundary crate, after the redesign)
 **Blockers:** None
 

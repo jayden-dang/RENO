@@ -22,7 +22,19 @@ Done: ROAD-29, ROAD-30
 
 ## Next
 
-### 1. ROAD-55 — app-crate-split
+### 1. MILE-13 — Daily work in a thread
+
+| ROAD | Item | State | Claimed by | Waiting on |
+|---|---|---|---|---|
+| ROAD-33 | transcript | Ready | — | — |
+| ROAD-60 | comments-on-the-transcript | Not started | — | ROAD-33, ROAD-71 |
+| ROAD-71 | thread-chat-workflow | Not started | — | ROAD-33 |
+| ROAD-72 | thread-context-and-invocations | Not started | — | ROAD-71 |
+| ROAD-73 | terminal-in-thread-chat | Not started | — | ROAD-71, ROAD-72 |
+
+Done: ROAD-31
+
+### 2. ROAD-55 — app-crate-split
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
@@ -30,7 +42,7 @@ Done: ROAD-29, ROAD-30
 
 Done: ROAD-29, ROAD-32
 
-### 2. ROAD-53 — workflow-review-and-contract-drafts
+### 3. ROAD-53 — workflow-review-and-contract-drafts
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
@@ -40,7 +52,7 @@ Done: ROAD-29, ROAD-32
 
 Done: ROAD-31, ROAD-32, ROAD-34, ROAD-35, ROAD-38
 
-### 3. MILE-1 — Harness parity
+### 4. MILE-1 — Harness parity
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
@@ -51,7 +63,7 @@ Done: ROAD-31, ROAD-32, ROAD-34, ROAD-35, ROAD-38
 | ROAD-5 | always-allow-into-harness-settings | Not started | — | ROAD-4 |
 | ROAD-6 | cli-reaches-every-method | Ready | — | — |
 
-### 4. MILE-11 — Bots on Reno's own harness
+### 5. MILE-11 — Bots on Reno's own harness
 
 | ROAD | Item | State | Claimed by | Waiting on |
 |---|---|---|---|---|
