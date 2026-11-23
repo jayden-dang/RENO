@@ -342,6 +342,80 @@ fn math_is_typeset_display_and_inline_or_its_source_when_off(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn inline_math_uses_the_text_size_and_theme_and_keeps_the_tex_when_off(cx: &mut TestAppContext) {
+    const TEX: &str = "314159x^2";
+    const SOURCE: &str = r"Before \(314159x^2\) after.";
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (host, registry) = selectable_reply(SOURCE);
+        cx.update(|cx| {
+            crate::prefs::update(cx, |p| {
+                p.typeset_math = true;
+                p.math_size = 100;
+            })
+        });
+        let (view, vcx) = probe(cx, SOURCE, host, appearance);
+        let layout_text = || {
+            registry
+                .take()
+                .last()
+                .map(|piece| piece.layout.text().to_owned())
+                .unwrap()
+        };
+        let shown = layout_text();
+        vcx.update(|window, _| {
+            assert!(
+                markdown_view::math::has_cached_picture(
+                    TEX,
+                    false,
+                    15.0,
+                    Theme::for_appearance(appearance).text,
+                    window.scale_factor(),
+                ),
+                "typeset with the body size and {appearance:?} text token (layout: {shown:?})"
+            );
+        });
+        assert!(
+            shown.starts_with("Before ") && shown.ends_with(" after."),
+            "{shown:?}"
+        );
+        assert!(!shown.contains(TEX), "the formula is painted as a picture");
+
+        vcx.update(|_, cx| crate::prefs::update(cx, |p| p.typeset_math = false));
+        view.update(vcx, |_, cx| cx.notify());
+        draw(vcx);
+        assert_eq!(layout_text(), "Before 314159x^2 after.");
+    }
+}
+
+#[gpui::test]
+fn invalid_inline_math_draws_its_exact_tex_with_typesetting_enabled(cx: &mut TestAppContext) {
+    const SOURCE: &str = r"Before $\notacommand{x}$ after.";
+    let (host, registry) = selectable_reply(SOURCE);
+    let (_view, _vcx) = probe(cx, SOURCE, host, Appearance::Dark);
+    let pieces = registry.take();
+    let actual = pieces.last().unwrap().layout.text();
+    assert_eq!(actual, r"Before \notacommand{x} after.");
+}
+
+#[gpui::test]
+fn bracket_delimited_display_math_draws_on_its_own_line(cx: &mut TestAppContext) {
+    let source = "Before\n\n\\[x^2\\]\n\nAfter";
+    let (host, registry) = selectable_reply(source);
+    let (_view, vcx) = probe(cx, source, host, Appearance::Dark);
+    let math = vcx.debug_bounds("md-math-display").unwrap();
+    let pieces = registry.take();
+    let prose = |text| {
+        pieces
+            .iter()
+            .find(|piece| piece.layout.text() == text)
+            .unwrap()
+            .bounds
+    };
+    assert!(prose("Before").bottom() <= math.top());
+    assert!(math.bottom() <= prose("After").top());
+}
+
+#[gpui::test]
 fn display_math_reads_at_one_and_a_fifth_of_the_text_size_times_the_math_setting(
     cx: &mut TestAppContext,
 ) {
