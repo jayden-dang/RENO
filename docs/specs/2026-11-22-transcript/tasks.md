@@ -493,11 +493,11 @@ and its scrollbar hooks (`set_offset_from_scrollbar`, `max_offset_for_scrollbar`
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1:** Add the failing test `a_finished_turn_offers_scroll_to_its_prompt_and_the_last_turn_scroll_to_top`.
+- [x] **Step 1:** Add the failing test `a_finished_turn_offers_scroll_to_its_prompt_and_the_last_turn_scroll_to_top`.
   Run: `cargo test -p reno-app turn_offers` — expect: fails.
-- [ ] **Step 2:** Implement the hover actions. Run: `cargo test -p reno-app` — expect: pass, including the tick-rail lock
+- [x] **Step 2:** Implement the hover actions. Run: `cargo test -p reno-app` — expect: pass, including the tick-rail lock
   tests (5.5).
-- [ ] **Step 3:** Commit `transcript: scroll to a turn's prompt, and to the top from the last turn`.
+- [x] **Step 3:** Commit `transcript: scroll to a turn's prompt, and to the top from the last turn`.
 
 _Requirements: TRANSCRIPT-5.4, TRANSCRIPT-5.5_
 
