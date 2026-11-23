@@ -916,7 +916,7 @@ and `prefs.rs`
   - `a_restored_call_shows_no_elapsed_time`;
   - `a_numbered_read_shows_as_a_code_block_and_raw_input_opens`.
   Run: `cargo test -p reno-app changes_tests` — expect: fails.
-- [ ] **Step 3:** Implement the shapes and the cards with kit components. An unknown input shape falls back to raw input.
+- [x] **Step 3:** Implement the shapes and the cards with kit components. An unknown input shape falls back to raw input.
   Run: `cargo test -p reno-app` — expect: pass.
 - [x] **Step 4:** Commit `tools: edit, patch, command and read-file cards from the call's own input`.
 
@@ -951,7 +951,7 @@ and `prefs.rs`
   - `a_call_with_no_result_in_a_completed_turn_stays_pending_in_its_group`, which holds guard 13.15;
   - `a_worktree_path_in_a_tool_result_is_a_button_that_opens_the_file`.
   Run: `cargo test -p reno-app convo_tests` — expect: fails.
-- [ ] **Step 2:** Implement them. Run: `cargo test -p reno-app` — expect: pass, including the guard tests for 13.10–13.15
+- [x] **Step 2:** Implement them. Run: `cargo test -p reno-app` — expect: pass, including the guard tests for 13.10–13.15
   (the Thinking line, the inline approval line, the output block, chips, the parser's reparse, tool grouping).
 - [x] **Step 3:** Commit `transcript: error callouts, hidden empty rows and resource links`.
 
@@ -979,7 +979,7 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
   - `highlights_callouts_and_diagrams_draw_from_theme_tokens_in_light_and_dark`, which asserts the token roles used, not
     pixels.
   Run: `cargo test -p reno-app keyboard` — expect: a control with no focus path fails.
-- [ ] **Step 2:** Give each failing control its focus path and label. Run: `cargo test -p reno-app` — expect: pass.
+- [x] **Step 2:** Give each failing control its focus path and label. Run: `cargo test -p reno-app` — expect: pass.
 - [x] **Step 3:** Commit `a11y: every new transcript control works from the keyboard`.
 
 _Requirements: TRANSCRIPT-16.8, TRANSCRIPT-16.9_
@@ -1047,7 +1047,7 @@ _Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.
   - `reno_bench_find_opens_the_strip_with_the_query` (app).
   Run: `cargo test -p renod long_reply`, `cargo test -p xtask long_frame` and `cargo test -p reno-app bench_find` — expect:
   each fails.
-- [ ] **Step 2:** Implement the mock, the hook, both scenarios and the budget row. Rewrite BENCHMARKS.md's "a target, not a
+- [x] **Step 2:** Implement the mock, the hook, both scenarios and the budget row. Rewrite BENCHMARKS.md's "a target, not a
   budget" line. Run the three commands — expect: pass. The `Steady` and `Burst` tests are unchanged (1.11).
 - [ ] **Step 3:** Manual acceptance on a quiet Mac: `cargo xtask bench --app`. Expect:
   - long transcript, long reply and find while streaming each at p95 ≤ 16.7 ms;
