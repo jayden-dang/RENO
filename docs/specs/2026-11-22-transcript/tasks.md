@@ -519,14 +519,14 @@ _Requirements: TRANSCRIPT-5.4, TRANSCRIPT-5.5_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `class_state_er_gantt_and_pie_each_draw`, table-driven with one row per type;
   - `a_changed_source_keeps_the_previous_drawing_until_the_new_one_lands`;
   - `the_code_tab_shows_the_source_and_preview_the_drawing`.
   Run: `cargo test -p reno-app mermaid` — expect: fails.
-- [ ] **Step 2:** Enable the features and implement the tabs and the previous-drawing state. A type that cannot draw goes
+- [x] **Step 2:** Enable the features and implement the tabs and the previous-drawing state. A type that cannot draw goes
   through `reroute-plan`. Run: `cargo test -p reno-app` — expect: pass.
-- [ ] **Step 3:** Run `cargo deny check` and `cargo machete` — expect: pass. Commit
+- [x] **Step 3:** Run `cargo deny check` and `cargo machete` — expect: pass. Commit
   `diagrams: class, state, ER, gantt and pie; Preview and Code tabs; keep the previous drawing`.
 
 _Requirements: TRANSCRIPT-10.1, TRANSCRIPT-10.2, TRANSCRIPT-10.3, TRANSCRIPT-10.5, TRANSCRIPT-10.6_
