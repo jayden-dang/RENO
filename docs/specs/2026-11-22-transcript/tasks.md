@@ -638,17 +638,17 @@ enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, str
 
 **Depends-on:** Task 1, Task 7, Task 13
 
-- [ ] **Step 1:** Add failing parser tests:
+- [x] **Step 1:** Add failing parser tests:
   - `footnotes_parse_as_references_and_definitions`;
   - `yaml_front_matter_parses_as_pairs`;
   - `gfm_callouts_carry_their_kind`;
   - `html_comments_are_dropped`.
   Run: `cargo test -p reno-markdown` — expect: the new tests fail; the 100 existing ones pass.
-- [ ] **Step 2:** Enable the options and map their events. Run: `cargo test -p reno-markdown` — expect: all pass.
-- [ ] **Step 3:** Add the failing GPUI test `footnotes_draw_at_the_reply_end_and_a_reference_click_scrolls_to_its_note`, on
+- [x] **Step 2:** Enable the options and map their events. Run: `cargo test -p reno-markdown` — expect: all pass.
+- [x] **Step 3:** Add the failing GPUI test `footnotes_draw_at_the_reply_end_and_a_reference_click_scrolls_to_its_note`, on
   `render2`. Draw the footnote list and wire the click. Run: `cargo test -p reno-app` — expect: pass, including the kept
   8.1, 8.2, 8.5 and 8.6 tests.
-- [ ] **Step 4:** Commit `markdown: footnotes, front matter and callout kinds; a footnote reference scrolls to its note`.
+- [x] **Step 4:** Commit `markdown: footnotes, front matter and callout kinds; a footnote reference scrolls to its note`.
 
 _Requirements: TRANSCRIPT-8.1, TRANSCRIPT-8.2, TRANSCRIPT-8.4, TRANSCRIPT-8.5, TRANSCRIPT-8.6_
 
