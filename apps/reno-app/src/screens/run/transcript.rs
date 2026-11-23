@@ -445,6 +445,13 @@ impl RunScreen {
             .text_size(px(13.0))
             .text_color(theme.muted)
             .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
+            .focusable()
+            .tab_stop(true)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .focus_visible(kit::focus_ring(theme))
             .hover(move |s| s.text_color(text))
             .child(self.text_piece(
                 theme,
@@ -592,9 +599,11 @@ impl RunScreen {
             .iter()
             .rposition(|row| matches!(row, Row::User { steer: false, .. }));
         let last_turn = self.items.is_last_done(self.items.item_of_top(top + 1));
+        let ring = theme.accent;
         let reveal = |d: gpui::Stateful<gpui::Div>| {
             d.opacity(0.0)
                 .group_hover(turn_end_group(key), |s| s.opacity(1.0))
+                .focus_visible(move |style| style.border_1().border_color(ring).opacity(1.0))
         };
         div()
             .flex()
@@ -858,6 +867,7 @@ impl RunScreen {
                         &[],
                     ),
                 )
+                .aria_label("Reasoning")
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_reasoning(key, cx))),
             )
             .when(open, |d| {
@@ -1027,6 +1037,12 @@ pub(super) fn disclosure(
         .text_size(px(14.5))
         .text_color(theme.muted)
         .cursor_pointer()
+        .role(gpui::Role::Button)
+        .focusable()
+        .tab_stop(true)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(kit::focus_ring(theme))
         .hover({
             let text = theme.text;
             move |s| s.text_color(text)

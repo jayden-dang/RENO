@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use gpui::{
-    AnyElement, App, Div, ImageFormat, MouseButton, SharedString, Stateful, Task, div, img,
+    AnyElement, App, Div, ImageFormat, MouseButton, Role, SharedString, Stateful, Task, div, img,
     prelude::*, px,
 };
 use reno_client::Client;
@@ -392,6 +392,7 @@ pub(crate) fn view(
                 target,
                 atom,
                 markdown,
+                theme,
             );
         }
         Classified::Refused => failed_note(theme, not_loaded_text(alt, src)),
@@ -405,6 +406,7 @@ pub(crate) fn view(
             target,
             atom,
             markdown,
+            theme,
         ),
         None => body,
     }
@@ -416,6 +418,7 @@ fn clickable(
     target: &str,
     atom: usize,
     markdown: &Host,
+    theme: &Theme,
 ) -> AnyElement {
     if action == Action::Plain {
         return body.into_any_element();
@@ -423,6 +426,13 @@ fn clickable(
     let policy = markdown.links.clone();
     let target = target.to_owned();
     body.cursor_pointer()
+        .role(Role::Button)
+        .aria_label(format!("Open {target}"))
+        .focusable()
+        .tab_stop(true)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(crate::ui::kit::focus_ring(theme))
         .on_click(move |_, window, cx| policy.run(&action, window, cx))
         .when_some(markdown.link_menu.clone(), |card, menu| {
             let (track, tracked_target) = (menu.clone(), target.clone());

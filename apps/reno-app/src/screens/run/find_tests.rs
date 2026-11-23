@@ -2055,3 +2055,97 @@ fn find_reveals_a_clipped_table_match_again_after_manual_pan(cx: &mut TestAppCon
         );
     }
 }
+
+#[gpui::test]
+fn every_new_control_is_reachable_and_operable_by_keyboard(cx: &mut TestAppContext) {
+    bind(cx);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run_id("builder1"), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .unwrap();
+    wait_for(vcx, "transcript is ready", |vcx| painted(vcx, "thinking"));
+    screen.update_in(vcx, |screen, window, cx| screen.focus_run_input(window, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("shift-tab");
+    assert!(vcx.update(|window, cx| screen.read(cx).transcript_focus.is_focused(window)));
+    vcx.simulate_keystrokes("f6");
+    draw(vcx);
+    assert!(
+        !vcx.update(|window, cx| screen.read(cx).transcript_focus.is_focused(window)),
+        "F6 enters the visible transcript controls"
+    );
+    assert!(
+        !vcx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window)),
+        "control focus stays in the reading surface"
+    );
+}
+
+#[gpui::test]
+fn keyboard_opens_a_history_fold_and_its_command_output(cx: &mut TestAppContext) {
+    bind(cx);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run_id("builder0"), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .unwrap();
+    wait_for(vcx, "completed run has replayed", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            matches!(s.rows().last(), Some(Row::Done { .. }))
+        })
+    });
+    let fold = screen.read_with(vcx, |s, _| {
+        s.rows()
+            .iter()
+            .find_map(|row| {
+                match row {
+            Row::Worked { key, rows, .. } if rows.iter().any(|row| {
+                matches!(row, Row::Tools { calls, .. } if calls.iter().any(|call| call.id == "t2"))
+            }) => Some(*key),
+            _ => None,
+        }
+            })
+            .unwrap()
+    });
+    let focus_button = |vcx: &mut VisualTestContext, id: &str| {
+        let selector = Box::leak(id.to_owned().into_boxed_str());
+        for _ in 0..30 {
+            let bounds = vcx.debug_bounds(selector).unwrap();
+            let focused = vcx.update(|window, cx| {
+                let bounds = window
+                    .pixel_snap_bounds(bounds)
+                    .scale(window.scale_factor());
+                let ink = crate::ui::theme::current(cx).accent;
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.bounds == bounds && quad.border_color == ink)
+            });
+            if focused {
+                vcx.simulate_keystrokes("enter");
+                draw(vcx);
+                return;
+            }
+            vcx.update(|window, cx| window.focus_next(cx));
+            draw(vcx);
+        }
+        panic!("keyboard did not reach {id}");
+    };
+    screen.update_in(vcx, |s, window, cx| window.focus(&s.transcript_focus, cx));
+    vcx.simulate_keystrokes("f6");
+    draw(vcx);
+    focus_button(vcx, &format!("worked-{}", fold.0));
+    wait_for(vcx, "tool is visible inside the open fold", |vcx| {
+        painted(vcx, "step-t2")
+    });
+    focus_button(vcx, "step-t2");
+    assert!(painted(vcx, "tool-output-t2"));
+}

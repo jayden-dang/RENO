@@ -16,10 +16,11 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, FontStyle, FontWeight, HighlightStyle, HitboxBehavior,
-    Hsla, InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, RenderOnce, Role, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
-    TextRun, Toggled, UnderlineStyle, Window, canvas, div, point, prelude::*, px, size,
+    AnyElement, App, Bounds, CursorStyle, Div, ElementId, FontStyle, FontWeight, HighlightStyle,
+    HitboxBehavior, Hsla, InteractiveText, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, Role, ScrollHandle, SharedString,
+    Stateful, StrikethroughStyle, StyledText, TextRun, Toggled, UnderlineStyle, Window, canvas,
+    div, point, prelude::*, px, size,
 };
 use reno_client::Client;
 use reno_markdown::mend::PENDING_LINK_URL;
@@ -1083,6 +1084,81 @@ fn code_lines(
 }
 
 /// The code area of a frame: mono, with its lines wrapped or scrolling sideways.
+fn keyboard_horizontal(
+    viewport: Stateful<Div>,
+    scroll: ScrollHandle,
+    label: &'static str,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let accent = theme.accent;
+    viewport
+        .track_scroll(&scroll)
+        .role(Role::ScrollView)
+        .aria_label(label)
+        .focusable()
+        .tab_stop(true)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(move |style| style.border_color(accent))
+        .on_key_down(move |event, window, cx| {
+            let key = &event.keystroke;
+            if key.modifiers.platform || key.modifiers.control || key.modifiers.alt {
+                return;
+            }
+            let offset = scroll.offset();
+            let reach = scroll.max_offset().x;
+            if reach <= px(0.0) {
+                return;
+            }
+            let step = px(80.0);
+            let x = match key.key.as_str() {
+                "left" => offset.x + step,
+                "right" => offset.x - step,
+                "home" => px(0.0),
+                "end" => -reach,
+                _ => return,
+            };
+            scroll.set_offset(point(x.clamp(-reach, px(0.0)), offset.y));
+            window.refresh();
+            cx.stop_propagation();
+        })
+}
+
+#[derive(IntoElement)]
+struct HorizontalCode {
+    key: usize,
+    content: AnyElement,
+    theme: Theme,
+}
+
+impl RenderOnce for HorizontalCode {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let id: ElementId = ("md-code-scroll", self.key).into();
+        let scroll = horizontal_state(id.clone(), window);
+        keyboard_horizontal(
+            div()
+                .id(id)
+                .w_full()
+                .flex()
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis(),
+            scroll,
+            "Scroll code horizontally",
+            &self.theme,
+        )
+        .child(self.content)
+    }
+}
+
+fn horizontal_state(id: ElementId, window: &mut Window) -> ScrollHandle {
+    window.with_global_id(id, |id, window| {
+        window.with_element_state(id, |state: Option<ScrollHandle>, _| {
+            let state = state.unwrap_or_default();
+            (state.clone(), state)
+        })
+    })
+}
+
 fn code_body(
     code: &str,
     (language, atoms): (Option<&str>, Option<usize>),
@@ -1102,14 +1178,16 @@ fn code_body(
     if wrapped {
         area.w_full().min_w_0().into_any_element()
     } else {
-        div()
-            .id(("md-code-scroll", key as usize))
-            .w_full()
-            .flex()
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .child(area.flex_none().min_w_full().whitespace_nowrap())
-            .into_any_element()
+        HorizontalCode {
+            key: key as usize,
+            content: area
+                .flex_none()
+                .min_w_full()
+                .whitespace_nowrap()
+                .into_any_element(),
+            theme: *env.theme,
+        }
+        .into_any_element()
     }
 }
 
@@ -1211,10 +1289,80 @@ pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElemen
 }
 
 /// Where the zoom of a diagram is kept: its key, and how far it is zoomed now.
+#[derive(Clone)]
 struct Zooming {
     key: u64,
     now: Option<chrome::Zoom>,
     grew: Option<Grew>,
+}
+
+#[derive(IntoElement)]
+struct DiagramViewport {
+    scroll_key: usize,
+    content: AnyElement,
+    zoom: Option<Zooming>,
+    natural: f32,
+    column: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl RenderOnce for DiagramViewport {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let id: ElementId = ("md-diagram-scroll", self.scroll_key).into();
+        let scroll = horizontal_state(id.clone(), window);
+        let theme = super::theme::current(cx);
+        let label = if self.zoom.is_some() {
+            "Diagram. Arrow keys scroll. Plus and minus zoom. Zero resets zoom."
+        } else {
+            "Scroll diagram horizontally"
+        };
+        keyboard_horizontal(
+            div()
+                .id(id)
+                .debug_selector(|| "md-diagram".to_owned())
+                .relative()
+                .w_full()
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis(),
+            scroll,
+            label,
+            &theme,
+        )
+        .when_some(self.zoom, |d, zoom| {
+            d.on_key_down(move |event, window, cx| {
+                if event.keystroke.modifiers.platform
+                    || event.keystroke.modifiers.alt
+                    || event.keystroke.modifiers.control
+                {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "0" => chrome::reset_zoom(zoom.key, cx),
+                    "+" | "=" => zoom_drawing(&zoom, self.column.get(), self.natural, 120.0, cx),
+                    "-" => zoom_drawing(&zoom, self.column.get(), self.natural, -120.0, cx),
+                    _ => return,
+                }
+                window.refresh();
+                cx.stop_propagation();
+            })
+        })
+        .child(self.content)
+    }
+}
+
+fn zoom_drawing(
+    zoom: &Zooming,
+    bounds: Option<Bounds<Pixels>>,
+    natural: f32,
+    delta: f32,
+    cx: &mut App,
+) {
+    let Some(bounds) = bounds else { return };
+    let inner = f32::from(bounds.size.width) - 2.0 * DIAGRAM_PAD;
+    let fit = picture::shown_width(inner, natural, DIAGRAM_MIN_SCALE) / natural.max(1.0);
+    let grew = chrome::zoom_by(zoom.key, delta, fit, cx);
+    if let Some(Grew(grew)) = zoom.grew.as_ref().filter(|_| grew) {
+        grew(cx);
+    }
 }
 
 /// The picture inside a box that scrolls sideways. With a `zooming`, holding the command key while
@@ -1236,13 +1384,10 @@ fn diagram_in_scroller(
     let (width, height) = (diagram.width * scale, diagram.height * scale);
     let column: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = Rc::default();
     let natural = diagram.width;
-    div()
-        .debug_selector(|| "md-diagram".to_owned())
-        .id(("md-diagram-scroll", scroll_key as usize))
-        .relative()
+    let keyboard_zoom = zooming.clone();
+    let content = div()
         .w_full()
-        .overflow_x_scroll()
-        .restrict_scroll_to_axis()
+        .min_w_0()
         .child({
             let seen = column.clone();
             gpui::canvas(move |bounds, _, _| seen.set(Some(bounds)), |_, _, _, _| {})
@@ -1266,24 +1411,26 @@ fn diagram_in_scroller(
                     min_scale,
                 })
                 .when_some(zooming, |d, zooming| {
+                    let column = column.clone();
                     d.on_scroll(move |event, window, cx| {
                         if !event.modifiers.platform {
                             return;
                         }
                         cx.stop_propagation();
-                        let Some(bounds) = column.get() else { return };
-                        let inner = f32::from(bounds.size.width) - 2.0 * DIAGRAM_PAD;
-                        let fit = picture::shown_width(inner, natural, DIAGRAM_MIN_SCALE)
-                            / natural.max(1.0);
                         let delta = event.delta.pixel_delta(window.line_height());
-                        let zoomed_in = chrome::zoom_by(zooming.key, f32::from(delta.y), fit, cx);
-                        if let Some(Grew(grew)) = zooming.grew.as_ref().filter(|_| zoomed_in) {
-                            grew(cx);
-                        }
+                        zoom_drawing(&zooming, column.get(), natural, f32::from(delta.y), cx);
                     })
                 }),
         )
-        .into_any_element()
+        .into_any_element();
+    DiagramViewport {
+        scroll_key: scroll_key as usize,
+        content,
+        zoom: keyboard_zoom,
+        natural,
+        column,
+    }
+    .into_any_element()
 }
 
 /// The place of the diagram `ordinal` of the reply being drawn, if the reply has a row of its own:
@@ -1507,21 +1654,25 @@ impl RenderOnce for TableViewport {
             .bg(self.theme.surface)
             .overflow_hidden()
             .child(
-                div()
-                    .when_some(self.reveal, |viewport, reveal| {
-                        let scroll = scroll.clone();
-                        viewport.on_children_prepainted(move |_, window, cx| {
-                            scroll.reveal_match(&reveal, window, cx);
+                keyboard_horizontal(
+                    div()
+                        .when_some(self.reveal, |viewport, reveal| {
+                            let scroll = scroll.clone();
+                            viewport.on_children_prepainted(move |_, window, cx| {
+                                scroll.reveal_match(&reveal, window, cx);
+                            })
                         })
-                    })
-                    .id(self.id)
-                    .debug_selector(|| "md-table-scroll".to_owned())
-                    .w_full()
-                    .flex()
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&scroll.handle)
-                    .child(self.content),
+                        .id(self.id)
+                        .debug_selector(|| "md-table-scroll".to_owned())
+                        .w_full()
+                        .flex()
+                        .overflow_x_scroll()
+                        .restrict_scroll_to_axis(),
+                    scroll.handle.clone(),
+                    "Scroll table horizontally",
+                    &self.theme,
+                )
+                .child(self.content),
             )
             .child(table_scrollbar(scroll, self.theme))
     }
@@ -1640,7 +1791,11 @@ enum InlineAction {
         target: String,
         atom: usize,
     },
-    Footnote(usize),
+    Footnote {
+        target: usize,
+        atom: usize,
+        label: String,
+    },
 }
 
 struct LinkSpan {
@@ -1745,16 +1900,23 @@ fn inline_with_reveal(
             || (style.link.is_some()
                 && (matches!(policy, LinkPolicy::Preview)
                     || style.link.as_deref() == Some(PENDING_LINK_URL)));
-        if let Some(action) = footnote.map(InlineAction::Footnote).or_else(|| {
-            action.map(|action| {
-                let target = style.link.as_deref().unwrap_or(&run.text).to_owned();
-                InlineAction::Link {
-                    action,
-                    target,
-                    atom: first + n,
-                }
+        if let Some(action) = footnote
+            .map(|target| InlineAction::Footnote {
+                target,
+                atom: first + n,
+                label: style.footnote_ref.clone().unwrap_or_default(),
             })
-        }) {
+            .or_else(|| {
+                action.map(|action| {
+                    let target = style.link.as_deref().unwrap_or(&run.text).to_owned();
+                    InlineAction::Link {
+                        action,
+                        target,
+                        atom: first + n,
+                    }
+                })
+            })
+        {
             links.push((from..from + shown.len(), action));
         }
         spans.push(TextRun {
@@ -1808,13 +1970,43 @@ fn inline_with_reveal(
                             range: range.clone(),
                             target: target.clone(),
                         }),
-                        InlineAction::Footnote(_) => None,
+                        InlineAction::Footnote { .. } => None,
                     })
                     .collect::<Vec<_>>();
                 (menu, targets)
             });
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             text.hash(&mut hasher);
+            let footnotes: Vec<_> = env
+                .host
+                .select
+                .as_ref()
+                .into_iter()
+                .flat_map(|select| {
+                    links.iter().filter_map(|(range, action)| {
+                        let InlineAction::Footnote {
+                            target,
+                            atom,
+                            label,
+                        } = action
+                        else {
+                            return None;
+                        };
+                        Some(FootnoteControl {
+                            id: ElementId::Name(
+                                format!("md-footnote-control-{}-{atom}", select.key.0).into(),
+                            ),
+                            label: format!("Go to footnote {label}"),
+                            target: *target,
+                            range: range.clone(),
+                            layout: layout.clone(),
+                            navigation: env.host.footnotes.clone()?,
+                            definitions: env.footnote_bounds.clone(),
+                            ink: theme.accent,
+                        })
+                    })
+                })
+                .collect();
             let (ranges, actions): (Vec<_>, Vec<_>) = links.into_iter().unzip();
             let policy = policy.clone();
             let navigation = env.host.footnotes.clone();
@@ -1822,7 +2014,7 @@ fn inline_with_reveal(
             let text = InteractiveText::new(("md-text", hasher.finish() as usize), styled)
                 .on_click(ranges, move |ix, window, cx| match actions.get(ix) {
                     Some(InlineAction::Link { action, .. }) => policy.run(action, window, cx),
-                    Some(InlineAction::Footnote(target)) => {
+                    Some(InlineAction::Footnote { target, .. }) => {
                         let destination = bounds.borrow().get(*target).copied();
                         if let (Some(navigation), Some(destination)) = (&navigation, destination) {
                             (navigation.0)(destination, cx);
@@ -1830,10 +2022,19 @@ fn inline_with_reveal(
                     }
                     None => {}
                 });
-            if let Some((menu, targets)) = targets {
+            let text = if let Some((menu, targets)) = targets {
                 inline_link_menu(text, layout.clone(), menu, targets)
             } else {
                 text.into_any_element()
+            };
+            if footnotes.is_empty() {
+                text
+            } else {
+                div()
+                    .relative()
+                    .child(text)
+                    .children(footnotes)
+                    .into_any_element()
             }
         };
     let element = tracked(env, element, layout.clone(), segs);
@@ -1877,6 +2078,64 @@ fn table_match_edges(
         }
     };
     Some((start.min(end) + align_offset, start.max(end) + align_offset))
+}
+
+#[derive(IntoElement)]
+struct FootnoteControl {
+    id: ElementId,
+    label: String,
+    target: usize,
+    range: Range<usize>,
+    layout: gpui::TextLayout,
+    navigation: FootnoteNavigation,
+    definitions: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    ink: Hsla,
+}
+
+impl RenderOnce for FootnoteControl {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = window.with_global_id(self.id.clone(), |id, window| {
+            window.with_element_state(id, |handle: Option<gpui::FocusHandle>, _| {
+                let handle = handle.unwrap_or_else(|| cx.focus_handle().tab_stop(true));
+                (handle.clone(), handle)
+            })
+        });
+        let focused = focus.clone();
+        div()
+            .absolute()
+            .size_0()
+            .id(self.id)
+            .track_focus(&focus)
+            .tab_stop(true)
+            .role(Role::Button)
+            .aria_label(self.label)
+            .on_key_down(move |event, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    && let Some(bounds) = self.definitions.borrow().get(self.target).copied()
+                {
+                    (self.navigation.0)(bounds, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _| {
+                        if focused.is_focused(window)
+                            && let Some(bounds) = link_bounds(&self.layout, &self.range)
+                        {
+                            window.paint_quad(gpui::outline(
+                                bounds,
+                                self.ink,
+                                gpui::BorderStyle::Solid,
+                            ));
+                        }
+                    },
+                )
+                .absolute()
+                .size_0(),
+            )
+    }
 }
 
 fn inline_link_menu(

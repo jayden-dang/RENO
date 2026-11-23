@@ -733,14 +733,17 @@ impl RunScreen {
     fn find_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
         [
             kit::icon_button(theme, "find-prev", Icon::ChevUp, 26.0)
+                .aria_label("Previous match")
                 .tooltip(kit::tip("Previous match"))
                 .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx)))
                 .into_any_element(),
             kit::icon_button(theme, "find-next", Icon::ChevDown, 26.0)
+                .aria_label("Next match")
                 .tooltip(kit::tip("Next match"))
                 .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx)))
                 .into_any_element(),
             kit::icon_button(theme, "find-close", Icon::X, 26.0)
+                .aria_label("Close Find")
                 .tooltip(kit::tip("Close"))
                 .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
                 .into_any_element(),
@@ -761,6 +764,13 @@ impl RunScreen {
             .id("find-bar")
             .debug_selector(|| "find-bar".to_owned())
             .key_context(look::BAR_CONTEXT)
+            .tab_group()
+            .on_action(|_: &crate::actions::NextTranscriptControl, window, cx| {
+                window.focus_next(cx)
+            })
+            .on_action(
+                |_: &crate::actions::PreviousTranscriptControl, window, cx| window.focus_prev(cx),
+            )
             .flex_none()
             .w_full()
             .h(px(36.0))

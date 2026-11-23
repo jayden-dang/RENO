@@ -1369,3 +1369,136 @@ fn an_uppercase_task_marker_copies_the_drawn_state_and_keeps_its_markdown_bytes(
     assert_eq!(marker.search_source(&(0.."☑".len())), Some(range.clone()));
     assert_eq!(crate::vm::anchor::copy(&atoms, range), "☑ ");
 }
+
+#[gpui::test]
+fn a_wide_table_is_reachable_and_scrolls_with_the_keyboard(cx: &mut TestAppContext) {
+    let source = format!(
+        "| Left | Right |\n| --- | --- |\n| first cell | `{}` |",
+        "wide code ".repeat(100)
+    );
+    let (host, registry) = selectable_reply(&source);
+    let (_view, vcx) = probe(cx, &source, host, Appearance::Dark);
+    let left = || {
+        registry
+            .take()
+            .into_iter()
+            .rfind(|piece| piece.layout.text() == "Right")
+            .unwrap()
+            .bounds
+            .left()
+    };
+    let before = left();
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.simulate_keystrokes("right");
+    draw(vcx);
+    assert!(left() < before, "the focused viewport pans right");
+    vcx.simulate_keystrokes("left");
+    draw(vcx);
+    assert_eq!(left(), before);
+}
+
+#[gpui::test]
+fn highlights_callouts_and_diagrams_draw_from_theme_tokens_in_light_and_dark(
+    cx: &mut TestAppContext,
+) {
+    use crate::vm::find::Query;
+    use markdown_view::Marks;
+
+    let source = "> [!WARNING]\n> Caution ahead. Caution again.\n\n```mermaid\nflowchart LR\n A[Start] --> B[Stop]\n```";
+    let (start, length) = (source.find("Caution").unwrap(), "Caution".len());
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (host, _) = selectable_reply(source);
+        let host = host.marked(Some(Rc::new(Marks {
+            matcher: Rc::new(
+                Query {
+                    text: "Caution".to_owned(),
+                    ..Default::default()
+                }
+                .compile()
+                .unwrap(),
+            ),
+            current: Some(0),
+            current_source: Some(start..start + length),
+            source_hits: Vec::new(),
+            reveal: None,
+        })));
+        let (_, vcx) = probe(cx, source, host, appearance);
+        let theme = Theme::for_appearance(appearance);
+        let callout = vcx.debug_bounds("md-callout-warning").unwrap();
+        vcx.update(|window, _| {
+            let bounds = window
+                .pixel_snap_bounds(callout)
+                .scale(window.scale_factor());
+            let quads = window.painted_quads();
+            let ordinary = Some(theme.warning.opacity(if appearance == Appearance::Dark {
+                0.25
+            } else {
+                0.18
+            }));
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.bounds == bounds && quad.border_color == theme.warning)
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| bounds.contains(&quad.bounds.center())
+                        && quad.background.as_solid() == Some(theme.accent))
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| bounds.contains(&quad.bounds.center())
+                        && quad.background.as_solid() == ordinary),
+                "ordinary match uses the warning tint"
+            );
+        });
+        let hex = |color| {
+            let [r, g, b, _] = markdown_view::math::bytes_of(color);
+            format!("#{r:02x}{g:02x}{b:02x}")
+        };
+        let directive = markdown_view::mermaid::init_directive(&theme);
+        for (var, color) in [
+            ("background", theme.surface),
+            ("primaryColor", theme.raised),
+            ("primaryTextColor", theme.text),
+            ("primaryBorderColor", theme.faint),
+            ("lineColor", theme.muted),
+        ] {
+            assert!(directive.contains(&format!("\"{var}\":\"{}\"", hex(color))));
+        }
+    }
+}
+
+#[gpui::test]
+fn a_footnote_reference_can_be_activated_with_the_keyboard(cx: &mut TestAppContext) {
+    let source = "A reference[^note].\n\n[^note]: The destination.";
+    let (host, _) = selectable_reply(source);
+    let hits = Rc::new(std::cell::Cell::new(0));
+    let count = hits.clone();
+    let host = host.on_footnote(move |_, _| count.set(count.get() + 1));
+    let (_, vcx) = probe(cx, source, host, Appearance::Dark);
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(hits.get(), 1);
+}
+
+#[gpui::test]
+fn diagram_zoom_can_be_changed_and_reset_with_the_keyboard(cx: &mut TestAppContext) {
+    let source = format!("```mermaid\n{WIDE_FLOW}\n```");
+    let (_, vcx) = probe(cx, &source, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+    for _ in 0..8 {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.simulate_keystrokes("=");
+        draw(vcx);
+        if painted(vcx, "diagram-zoom-level") {
+            break;
+        }
+    }
+    assert!(painted(vcx, "diagram-zoom-level"));
+    vcx.simulate_keystrokes("0");
+    draw(vcx);
+    assert!(!painted(vcx, "diagram-zoom-level"));
+}

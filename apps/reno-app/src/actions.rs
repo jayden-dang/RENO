@@ -51,6 +51,8 @@ actions!(
         CloseMenu,
         FocusTranscript,
         FocusRunInput,
+        NextTranscriptControl,
+        PreviousTranscriptControl,
         // The sidebar's thread menu: Escape closes what is open; the others act on the thread.
         DismissSidebar,
         PinThread,
@@ -102,6 +104,16 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(
             "shift-enter",
             FindPrevious,
+            Some(crate::ui::find::BAR_CONTEXT),
+        ),
+        KeyBinding::new(
+            "tab",
+            NextTranscriptControl,
+            Some(crate::ui::find::BAR_CONTEXT),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            PreviousTranscriptControl,
             Some(crate::ui::find::BAR_CONTEXT),
         ),
         KeyBinding::new("ctrl-tab", NextPanelTab, None),

@@ -432,7 +432,15 @@ impl RunScreen {
             .text_color(theme.muted)
             .when_some(toggle.map(|c| c.id.clone()), |d, call_id| {
                 let text = theme.text;
+                let accent = theme.accent;
                 d.cursor_pointer()
+                    .role(Role::Button)
+                    .aria_label(line_text.clone())
+                    .focusable()
+                    .tab_stop(true)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus_visible(move |style| style.border_color(accent))
                     .hover(move |s| s.text_color(text))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_output(key, &call_id, false, cx);
@@ -735,35 +743,26 @@ impl RunScreen {
             (theme.shell, theme.raised, theme.text)
         };
         let copy_text = out.text.clone();
-        let more = (!full && folded.hidden > 0).then(|| {
+        let more = (folded.hidden > 0).then(|| {
             let id = id.clone();
-            div()
-                .id(SharedString::from(format!("output-more-{id}")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("output-more-{id}")
-                })
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.accent)
-                .cursor_pointer()
-                .child(facts::more_label(folded.hidden))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_output(key, &id, true, cx);
-                }))
-        });
-        let less = (full && folded.hidden > 0).then(|| {
-            let id = id.clone();
-            div()
-                .id(SharedString::from(format!("output-less-{id}")))
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.muted)
-                .cursor_pointer()
-                .child("Show less")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_output(key, &id, true, cx);
-                }))
+            let (selector, label) = if full {
+                (format!("output-less-{id}"), "Show less".to_owned())
+            } else {
+                (
+                    format!("output-more-{id}"),
+                    facts::more_label(folded.hidden),
+                )
+            };
+            kit::line_button(
+                theme,
+                format!("output-toggle-{id}"),
+                None,
+                label,
+                kit::Tone::Quiet,
+                true,
+            )
+            .debug_selector(move || selector.clone())
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_output(key, &id, true, cx)))
         });
         let cut = facts::cut_note(out);
         div()
@@ -819,7 +818,6 @@ impl RunScreen {
                     .gap(px(12.0))
                     .px(px(2.0))
                     .children(more)
-                    .children(less)
                     .when_some(cut, |d, note| {
                         d.child(
                             div()
@@ -845,23 +843,18 @@ impl RunScreen {
                     })
                     .child(div().flex_1())
                     .child(
-                        div()
-                            .id(SharedString::from(format!("output-copy-{id}")))
-                            .debug_selector({
-                                let id = id.clone();
-                                move || format!("output-copy-{id}")
-                            })
-                            .text_size(px(12.5))
-                            .text_color(theme.muted)
-                            .cursor_pointer()
-                            .hover({
-                                let text = theme.text;
-                                move |s| s.text_color(text)
-                            })
-                            .child("Copy")
-                            .on_click(move |_, _, cx| {
-                                copy(cx, copy_text.clone(), "Output copied");
-                            }),
+                        kit::line_button(
+                            theme,
+                            format!("output-copy-{id}"),
+                            None,
+                            "Copy",
+                            kit::Tone::Quiet,
+                            true,
+                        )
+                        .aria_label("Copy output")
+                        .on_click(move |_, _, cx| {
+                            copy(cx, copy_text.clone(), "Output copied");
+                        }),
                     ),
             )
             .children(self.resource_links(theme, key, call, cx))

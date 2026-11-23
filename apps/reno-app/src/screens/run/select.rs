@@ -22,8 +22,8 @@ use gpui::{
 
 use super::RunScreen;
 use crate::actions::{
-    End, FocusRunInput, Home, LineDown, LineUp, NextMenuTarget, NextPrompt, OpenMenu, PageDown,
-    PageUp, PrevPrompt, PreviousMenuTarget,
+    End, FocusRunInput, Home, LineDown, LineUp, NextMenuTarget, NextPrompt, NextTranscriptControl,
+    OpenMenu, PageDown, PageUp, PrevPrompt, PreviousMenuTarget, PreviousTranscriptControl,
 };
 use crate::transcript::{Key, Row, ToolEntry};
 use crate::ui::find as look;
@@ -36,6 +36,7 @@ actions!(run_transcript, [CopyTranscript]);
 
 /// The key context of the transcript's focus: ⌘C copies the selection only while it holds focus.
 const CONTEXT: &str = "Transcript";
+pub(super) const CONTROLS_CONTEXT: &str = "TranscriptControls";
 
 /// A drag moves the pointer this far before it is a selection and not a click.
 const DRAG_SLOP: f32 = 3.0;
@@ -60,6 +61,22 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-up", PreviousMenuTarget, Some(CONTEXT)),
         KeyBinding::new("alt-down", NextMenuTarget, Some(CONTEXT)),
         KeyBinding::new("tab", FocusRunInput, Some(CONTEXT)),
+        KeyBinding::new("f6", NextTranscriptControl, Some(CONTROLS_CONTEXT)),
+        KeyBinding::new(
+            "shift-f6",
+            PreviousTranscriptControl,
+            Some(CONTROLS_CONTEXT),
+        ),
+        KeyBinding::new(
+            "tab",
+            NextTranscriptControl,
+            Some("TranscriptControls && !Transcript"),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            PreviousTranscriptControl,
+            Some("TranscriptControls && !Transcript"),
+        ),
     ]);
 }
 

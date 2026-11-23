@@ -26,7 +26,10 @@ use reno_proto::{
 };
 
 use super::ScreenEvent;
-use crate::actions::{ChooseMenuItem, CloseMenu, FocusTranscript, NextMenuItem, PreviousMenuItem};
+use crate::actions::{
+    ChooseMenuItem, CloseMenu, FocusTranscript, NextMenuItem, NextTranscriptControl,
+    PreviousMenuItem, PreviousTranscriptControl,
+};
 use crate::panel::saved::Saved;
 use crate::panel::{Descriptors, PanelKey, PanelState, Place};
 use crate::prefs::{Prefs, ThinkingMode};
@@ -2112,9 +2115,14 @@ impl Render for RunScreen {
             }
         }
         let rail = self.tick_rail(&theme, cx);
+        let [focus, drag_tracker] = self.select_nodes(cx);
         let transcript = div()
             .id("transcript")
             .debug_selector(|| "transcript".to_owned())
+            .key_context(select::CONTROLS_CONTEXT)
+            .tab_group()
+            .on_action(|_: &NextTranscriptControl, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousTranscriptControl, window, cx| window.focus_prev(cx))
             .relative()
             .flex_1()
             .min_h_0()
@@ -2129,6 +2137,7 @@ impl Render for RunScreen {
                     this.open_transcript_menu(event.position, None, None, window, cx);
                 }),
             )
+            .child(focus)
             .child(
                 div()
                     .w_full()
@@ -2148,7 +2157,7 @@ impl Render for RunScreen {
                     ),
             )
             // After the list, so it is on top of it and takes the clicks.
-            .children(self.select_nodes(cx))
+            .child(drag_tracker)
             .when(
                 self.transcript_focus.is_focused(window) && window.last_input_was_keyboard(),
                 |transcript| {
@@ -2173,7 +2182,7 @@ impl Render for RunScreen {
                                 .py(px(3.0))
                                 .text_color(theme.muted)
                                 .text_size(px(11.0))
-                                .child("⌥↑/↓ links and replies · ⇧F10 menu"),
+                                .child("⌥↑/↓ links and replies · ⇧F10 menu · F6 controls"),
                         )
                 },
             )
