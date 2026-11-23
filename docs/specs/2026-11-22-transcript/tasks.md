@@ -464,13 +464,13 @@ and its scrollbar hooks (`set_offset_from_scrollbar`, `max_offset_for_scrollbar`
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `thumb_geometry_tracks_the_offset_and_the_content`;
   - `a_tall_transcript_shows_a_scrollbar_beside_the_rail_and_a_drag_scrolls_it`.
   Run: `cargo test -p reno-app scrollbar` — expect: fails to compile.
-- [ ] **Step 2:** Implement the element. The thumb is `raised`, `faint` on hover. Run: `cargo test -p reno-app` —
+- [x] **Step 2:** Implement the element. The thumb is `raised`, `faint` on hover. Run: `cargo test -p reno-app` —
   expect: pass.
-- [ ] **Step 3:** Commit `ui: a scrollbar for the transcript list`.
+- [x] **Step 3:** Commit `ui: a scrollbar for the transcript list`.
 
 _Requirements: TRANSCRIPT-5.3_
 
