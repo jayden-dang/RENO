@@ -178,6 +178,10 @@ debug = "line-tables-only"
 [profile.dev.build-override]
 opt-level = 0
 
+# Keep the app test binary below the macOS compact-unwind offset limit.
+[profile.test.package.reno-app]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 strip = "symbols"
