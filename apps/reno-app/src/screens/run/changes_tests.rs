@@ -429,3 +429,374 @@ fn the_arrow_on_a_file_opens_it_in_its_own_tab_with_its_diff(cx: &mut TestAppCon
     wait_drawn(vcx, |vcx| painted(vcx, "file-tab-nope.rs"));
     assert!(!painted(vcx, "change-patch-nope.rs"));
 }
+
+fn push_events(
+    vcx: &mut VisualTestContext,
+    store: &Entity<Store>,
+    run: &reno_proto::RunId,
+    events: impl IntoIterator<Item = reno_proto::ExecEvent>,
+) {
+    store.update(vcx, |s, cx| {
+        for event in events {
+            let seq = s
+                .state()
+                .transcript(run)
+                .map_or(reno_proto::Seq(1), reno_client::Transcript::resume_from);
+            s.apply(
+                reno_client::Update::RunEvent {
+                    run: run.clone(),
+                    seq,
+                    event,
+                },
+                cx,
+            );
+        }
+    });
+    draw(vcx);
+}
+
+fn tool(
+    id: &str,
+    name: &str,
+    class: reno_proto::ActionClass,
+    input: serde_json::Value,
+) -> reno_proto::ExecEvent {
+    reno_proto::ExecEvent::Tool {
+        id: id.to_owned(),
+        call: reno_proto::ToolCall::new(name, input, class),
+    }
+}
+
+fn tool_result(id: &str, text: &str) -> reno_proto::ExecEvent {
+    reno_proto::ExecEvent::ToolResult {
+        id: id.to_owned(),
+        ok: true,
+        summary: None,
+        output: Some(reno_proto::ToolOutput {
+            text: text.to_owned(),
+            truncated: false,
+            bytes: text.len() as u64,
+        }),
+    }
+}
+
+#[gpui::test]
+fn a_new_edit_or_command_opens_inside_its_group_while_live(cx: &mut TestAppContext) {
+    use reno_proto::ActionClass::{Command, Edit, Read};
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, "builder1");
+    let run = run_id("builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [
+            tool("quiet-read", "read", Read, json!({"path": "src/lease.rs"})),
+            tool_result("quiet-read", "lease contents"),
+            tool(
+                "expand-no-diff",
+                "edit",
+                Edit,
+                json!({"file_path": "src/lib.rs"}),
+            ),
+            tool(
+                "expand-edit",
+                "edit",
+                Edit,
+                json!({"file_path": "src/lease.rs", "old_string": "before", "new_string": "after"}),
+            ),
+            tool(
+                "expand-command",
+                "bash",
+                Command,
+                json!({"command": "cargo test"}),
+            ),
+        ],
+    );
+    assert!(painted(vcx, "step-quiet-read"));
+    assert!(!painted(vcx, "tool-output-quiet-read"));
+    assert!(!painted(vcx, "tool-detail-expand-no-diff"));
+    assert!(
+        painted(vcx, "tool-detail-expand-edit"),
+        "the pending edit's diff is open"
+    );
+    assert!(
+        painted(vcx, "tool-detail-expand-command"),
+        "the pending command is open"
+    );
+    let bounds = |vcx: &mut VisualTestContext, id| vcx.debug_bounds(id).unwrap();
+    assert!(
+        bounds(vcx, "step-edits").bottom() <= bounds(vcx, "tool-detail-expand-edit").top()
+            && bounds(vcx, "tool-detail-expand-edit").bottom()
+                <= bounds(vcx, "step-expand-command").top()
+            && bounds(vcx, "step-expand-command").bottom()
+                <= bounds(vcx, "tool-detail-expand-command").top()
+    );
+    screen.read_with(vcx, |s, _| {
+        assert!(
+            s.is_following_tail(),
+            "automatic growth follows the live tail"
+        );
+        assert!(matches!(s.rows().last(), Some(Row::Tools { calls, .. }) if
+            calls.iter().map(|c| c.id.as_str()).collect::<Vec<_>>().ends_with(
+                &["quiet-read", "expand-no-diff", "expand-edit", "expand-command"]
+            )
+        ));
+    });
+
+    click(vcx, "step-expand-command");
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [tool_result("expand-command", "command output")],
+    );
+    assert!(!painted(vcx, "tool-detail-expand-command"));
+    assert!(
+        !painted(vcx, "tool-output-expand-command"),
+        "a result respects the owner's close"
+    );
+    click(vcx, "step-expand-command");
+    assert!(
+        painted(vcx, "tool-output-expand-command"),
+        "the owner can reopen it"
+    );
+}
+
+#[gpui::test]
+fn turning_the_settings_off_keeps_them_collapsed(cx: &mut TestAppContext) {
+    use reno_proto::{ActionClass, ExecEvent};
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    open(vcx, &root, "builder1");
+    let run = run_id("builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    let command = |id| tool(id, "bash", ActionClass::Command, json!({"command": "pwd"}));
+    push_events(vcx, &store, &run, [command("already-expanded")]);
+    assert!(painted(vcx, "tool-detail-already-expanded"));
+
+    vcx.update(|_, cx| {
+        crate::prefs::update(cx, |p| {
+            p.expand_new_edits = false;
+            p.expand_new_commands = false;
+        });
+    });
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [
+            tool(
+                "expand-off-edit",
+                "apply_patch",
+                ActionClass::Edit,
+                json!({"patch": "*** Update File: src/lease.rs\n@@\n-before\n+after"}),
+            ),
+            command("expand-off-command"),
+        ],
+    );
+    assert!(painted(vcx, "tool-detail-already-expanded"));
+    for id in ["expand-off-edit", "expand-off-command"] {
+        assert!(painted(vcx, &format!("step-{id}")));
+        assert!(!painted(vcx, &format!("tool-detail-{id}")));
+    }
+
+    click(vcx, "step-expand-off-edit");
+    assert!(painted(vcx, "tool-detail-expand-off-edit"));
+    click(vcx, "step-expand-off-edit");
+    vcx.update(|_, cx| {
+        crate::prefs::update(cx, |p| p.expand_new_commands = true);
+    });
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [
+            ExecEvent::Text {
+                text: "Checking again.".to_owned(),
+            },
+            command("expand-next-command"),
+        ],
+    );
+    assert!(!painted(vcx, "tool-detail-expand-off-command"));
+    assert!(!painted(vcx, "tool-detail-expand-off-edit"));
+    assert!(painted(vcx, "tool-detail-expand-next-command"));
+}
+
+#[gpui::test]
+fn expanding_a_live_call_keeps_the_same_id_in_an_older_run_collapsed(cx: &mut TestAppContext) {
+    use reno_proto::{ActionClass, ExecEvent};
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let old = run_id("builder0");
+    let live = run_id("builder1");
+    let old_screen = open(vcx, &root, "builder0");
+    wait_drawn(vcx, |vcx| {
+        store.read_with(vcx, |s, _| {
+            s.thread_of(&old).is_some()
+                && s.thread_of(&live).is_some()
+                && s.state().transcript(&old).is_some_and(|t| {
+                    t.events
+                        .last()
+                        .is_some_and(|(_, event)| matches!(event, ExecEvent::Done { .. }))
+                })
+        })
+    });
+    let fold = format!("worked-{}", fold_key(vcx, &old_screen, "t2"));
+    store.update(vcx, |s, cx| {
+        let mut threads: Vec<_> = s.state().threads().into_iter().cloned().collect();
+        let new_at = threads
+            .iter()
+            .position(|thread| thread.runs.iter().any(|entry| entry.run_id == live))
+            .unwrap();
+        let mut newer = threads.remove(new_at);
+        let older = threads
+            .iter_mut()
+            .find(|thread| thread.runs.iter().any(|entry| entry.run_id == old))
+            .unwrap();
+        older.runs.append(&mut newer.runs);
+        s.apply(reno_client::Update::Threads(threads), cx);
+    });
+
+    let screen = open(vcx, &root, "builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    let history = |vcx: &mut VisualTestContext| {
+        screen.update(vcx, |s, cx| {
+            let ix = s
+                .rows()
+                .iter()
+                .position(|r| matches!(r, Row::Worked { .. }))
+                .unwrap();
+            s.scroll_to_row(ix, cx);
+        });
+        draw(vcx);
+    };
+    history(vcx);
+    click(vcx, &fold);
+    assert!(painted(vcx, "step-t2"));
+    assert!(!painted(vcx, "tool-output-t2"));
+
+    // The live group's item is outside the old group's overdraw range.
+    let filler = (0..100).flat_map(|n| {
+        [
+            ExecEvent::Reasoning {
+                text: format!("Consider option {n}."),
+            },
+            ExecEvent::Text {
+                text: format!("Checked option {n}."),
+            },
+        ]
+    });
+    push_events(
+        vcx,
+        &store,
+        &live,
+        filler.chain([
+            tool(
+                "t2",
+                "bash",
+                ActionClass::Command,
+                json!({"command":"cargo test --lib"}),
+            ),
+            tool_result("t2", "live result"),
+        ]),
+    );
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    assert!(
+        painted(vcx, "tool-output-t2"),
+        "the live call's result is open"
+    );
+
+    history(vcx);
+    assert!(painted(vcx, "step-t2"));
+    assert!(
+        !painted(vcx, "tool-output-t2"),
+        "the older result stayed collapsed"
+    );
+}
+
+#[gpui::test]
+fn reopening_a_live_run_leaves_its_loaded_calls_collapsed(cx: &mut TestAppContext) {
+    use reno_proto::ActionClass;
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    open(vcx, &root, "builder1");
+    let run = run_id("builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    let command = |id| tool(id, "bash", ActionClass::Command, json!({"command": "pwd"}));
+    push_events(vcx, &store, &run, [command("before-reopening")]);
+    assert!(painted(vcx, "tool-detail-before-reopening"));
+
+    open(vcx, &root, "builder0");
+    open(vcx, &root, "builder1");
+    assert!(painted(vcx, "step-before-reopening"));
+    assert!(!painted(vcx, "tool-detail-before-reopening"));
+    push_events(vcx, &store, &run, [command("after-reopening")]);
+    assert!(!painted(vcx, "tool-detail-before-reopening"));
+    assert!(painted(vcx, "tool-detail-after-reopening"));
+}
+
+#[gpui::test]
+fn closing_find_leaves_an_automatically_opened_command_open(cx: &mut TestAppContext) {
+    use reno_proto::ActionClass;
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, "builder1");
+    let run = run_id("builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    let command = |id| tool(id, "bash", ActionClass::Command, json!({"command": "pwd"}));
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [command("kept"), tool_result("kept", "first output")],
+    );
+    vcx.update(|_, cx| crate::prefs::update(cx, |p| p.expand_new_commands = false));
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [command("find-result"), tool_result("find-result", "needle")],
+    );
+    assert!(painted(vcx, "tool-output-kept"));
+    assert!(!painted(vcx, "tool-output-find-result"));
+
+    screen.update_in(vcx, |s, window, cx| s.open_find(window, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("n e e d l e");
+    draw(vcx);
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.find_count_label()),
+        Some("1 of 1".to_owned())
+    );
+    screen.update(vcx, |s, cx| s.find_step(true, cx));
+    draw(vcx);
+    assert!(painted(vcx, "tool-output-find-result"));
+    assert!(painted(vcx, "tool-output-kept"));
+
+    screen.update_in(vcx, |s, window, cx| s.close_find(window, cx));
+    draw(vcx);
+    assert!(!painted(vcx, "tool-output-find-result"));
+    assert!(painted(vcx, "tool-output-kept"));
+}

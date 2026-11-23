@@ -282,8 +282,9 @@ pub(crate) struct RunScreen {
     reasoning_scroll: gpui::ScrollHandle,
     reasoning_scrolled: std::cell::Cell<Option<(Key, usize)>>,
     /// Tool calls whose output shows, and those showing all of it.
-    outputs_open: Opens<String>,
-    outputs_full: Opens<String>,
+    outputs_open: Opens<output::ToolKey>,
+    outputs_full: Opens<output::ToolKey>,
+    tool_events: output::ToolEvents,
     /// Find in the conversation.
     find: find::Find,
     /// The side panel's tabs, keyed by what the panel belongs to (the run, until threads land).
@@ -423,6 +424,7 @@ impl RunScreen {
                 screen.update(cx, |this, cx| this.note_place(cx)).ok();
             });
         });
+        let tool_events = output::ToolEvents::from_loaded(store.read(cx).state().transcript(&run));
         let mut screen = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 this.refresh(cx);
@@ -458,6 +460,7 @@ impl RunScreen {
             reasoning_scrolled: std::cell::Cell::new(None),
             outputs_open: Opens::default(),
             outputs_full: Opens::default(),
+            tool_events,
             find: find::Find::default(),
             panel_key: key,
             panel,
@@ -876,6 +879,7 @@ impl RunScreen {
         if !self.advance_latest(routing.clone(), &pending, cx) {
             self.rebuild_rows(routing, &pending, cx);
         }
+        self.expand_new_tools(cx);
         self.track_streaming_reasoning(cx);
         self.sync_visuals(cx);
         self.measure_activity_chips(cx);
