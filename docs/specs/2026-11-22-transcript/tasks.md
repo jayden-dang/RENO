@@ -920,6 +920,10 @@ and `prefs.rs`
   Run: `cargo test -p reno-app` — expect: pass.
 - [x] **Step 4:** Commit `tools: edit, patch, command and read-file cards from the call's own input`.
 
+A replay inside an already-live attempt has no marker in the frozen event stream. Calls first observed there may
+auto-expand. Loaded and completed history keeps its collapsed default. Elapsed time requires confirmation that the
+attempt was still queued after the app began following, then live observations of both the call and its result.
+
 _Requirements: TRANSCRIPT-13.5, TRANSCRIPT-13.6, TRANSCRIPT-13.7_
 
 ---
@@ -1041,7 +1045,7 @@ _Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.
 
 **Depends-on:** Task 4, Task 6, Task 27
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `the_long_reply_mock_streams_one_reply_with_code_and_math` (renod);
   - `the_long_frame_row_fails_the_run_when_over_16_7_ms`, which replaces the target test near :731 (xtask);
   - `reno_bench_find_opens_the_strip_with_the_query` (app).
