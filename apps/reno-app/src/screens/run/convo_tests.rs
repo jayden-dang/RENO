@@ -803,3 +803,92 @@ fn a_transcript_that_fits_has_no_scrollbar(cx: &mut TestAppContext) {
     draw(vcx);
     assert!(!painted(vcx, "transcript-scrollbar"));
 }
+
+/// The top-level rows of the final message of each finished turn, in order.
+fn final_message_rows(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> Vec<usize> {
+    let all = rows(vcx, screen);
+    (0..all.len().saturating_sub(1))
+        .filter(|&ix| {
+            matches!(all[ix], Row::Prose { .. }) && matches!(all[ix + 1], Row::Done { .. })
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_finished_turn_offers_scroll_to_its_prompt_and_the_last_turn_scroll_to_top(
+    cx: &mut TestAppContext,
+) {
+    let (_root, vcx, screen) = long_thread(cx);
+    let users = user_rows(vcx, &screen);
+    let finals = final_message_rows(vcx, &screen);
+    assert_eq!(
+        finals.len(),
+        2,
+        "two finished turns: {:?}",
+        kinds(&rows(vcx, &screen))
+    );
+    let key_of = |vcx: &VisualTestContext, row: usize| rows(vcx, &screen)[row].key();
+    let prompt_of =
+        |vcx: &VisualTestContext, row: usize| format!("turn-to-prompt-{}", key_of(vcx, row).0);
+    let place_is_kept = |vcx: &VisualTestContext, what: &str| {
+        screen.read_with(vcx, |s, _| {
+            let place = s.saved_place();
+            assert!(place.is_some(), "{what}: the view rests off the tail");
+            assert_eq!(s.panel_state().place(), place, "{what} left a stale place");
+        });
+    };
+
+    // The view follows the tail, so the last turn's end is in view: both actions are there.
+    let last_prompt = prompt_of(vcx, finals[1]);
+    wait_drawn(vcx, |vcx| painted(vcx, "turn-to-top"));
+    assert!(painted(vcx, &last_prompt));
+
+    // The first turn is not the last: it offers its prompt and no scroll to top.
+    screen.update(vcx, |s, cx| s.scroll_to_row(finals[0], cx));
+    let first_prompt = prompt_of(vcx, finals[0]);
+    wait_drawn(vcx, |vcx| painted(vcx, &first_prompt));
+    assert!(!painted(vcx, "turn-to-top"));
+    // The reply is longer than the view: bring the icons under it into view to click them.
+    let icons = bounds_of(vcx, Box::leak(first_prompt.clone().into_boxed_str()));
+    let past = icons.bottom() - screen.read_with(vcx, |s, _| s.list.viewport_bounds().bottom());
+    screen.update(vcx, |s, cx| {
+        s.list.scroll_by(past + gpui::px(60.0));
+        s.note_place(cx);
+    });
+    draw(vcx);
+    place_is_kept(vcx, "scrolling to the final message");
+    let before = screen.read_with(vcx, |s, _| s.saved_place());
+
+    // Its prompt action takes that turn's own prompt to the top of the view.
+    click(vcx, &first_prompt);
+    assert_eq!(screen.read_with(vcx, |s, _| s.top_row()), users[0]);
+    near(
+        scrolled(vcx, &screen),
+        0.0,
+        "the first prompt is at the top",
+    );
+    place_is_kept(vcx, "scroll to user message");
+    assert_ne!(screen.read_with(vcx, |s, _| s.saved_place()), before);
+
+    // The last turn's prompt action reaches its prompt, which is near the end of the thread.
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+    wait_drawn(vcx, |vcx| painted(vcx, &last_prompt));
+    click(vcx, &last_prompt);
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    draw(vcx);
+    assert!(screen.read_with(vcx, |s, _| s.top_row()) >= users[1]);
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.panel_state().place(), s.saved_place());
+    });
+
+    // Scroll to top takes the view to the very start.
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+    wait_drawn(vcx, |vcx| painted(vcx, "turn-to-top"));
+    click(vcx, "turn-to-top");
+    near(scrolled(vcx, &screen), 0.0, "scroll to top");
+    assert_eq!(screen.read_with(vcx, |s, _| s.top_row()), 0);
+    assert!(!following(vcx, &screen));
+    place_is_kept(vcx, "scroll to top");
+}

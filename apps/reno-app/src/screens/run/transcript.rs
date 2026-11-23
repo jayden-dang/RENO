@@ -182,7 +182,7 @@ impl RunScreen {
                 let item = top.and_then(|ix| self.items.items.get(ix));
                 let actions = item
                     .filter(|item| item.decor.final_message)
-                    .map(|_| self.message_actions(theme, *key, text));
+                    .map(|item| self.message_actions(theme, *key, text, item.top, cx));
                 let streaming = item.is_some_and(|i| i.decor.last) && self.is_live(cx);
                 // The reply is drawn for this run's worktree, with its find hits painted over the
                 // words and its texts tracked for selection.
@@ -199,6 +199,7 @@ impl RunScreen {
                             style: pick::selection_style(theme),
                         })));
                 div()
+                    .group(turn_end_group(*key))
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -439,9 +440,26 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// The quiet icons under the final agent message of a finished turn.
-    fn message_actions(&self, theme: &Theme, key: Key, text: &str) -> AnyElement {
+    /// The quiet icons under the final agent message of a finished turn: Copy always, and while
+    /// the turn's end is hovered, a jump to the turn's prompt and, on the last turn, to the top.
+    /// `top` is the final message's top-level row.
+    fn message_actions(
+        &self,
+        theme: &Theme,
+        key: Key,
+        text: &str,
+        top: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let text = text.to_owned();
+        let prompt = self.rows[..top]
+            .iter()
+            .rposition(|row| matches!(row, Row::User { steer: false, .. }));
+        let last_turn = self.items.is_last_done(self.items.item_of_top(top + 1));
+        let reveal = |d: gpui::Stateful<gpui::Div>| {
+            d.opacity(0.0)
+                .group_hover(turn_end_group(key), |s| s.opacity(1.0))
+        };
         div()
             .flex()
             .items_center()
@@ -452,6 +470,29 @@ impl RunScreen {
                         output::copy(cx, text.clone(), "Message copied");
                     }),
             )
+            .children(prompt.map(|row| {
+                reveal(
+                    kit::icon_button(
+                        theme,
+                        format!("turn-to-prompt-{}", key.0),
+                        Icon::ChevUp,
+                        24.0,
+                    )
+                    .aria_label("Scroll to user message")
+                    .tooltip(kit::tip("Scroll to user message"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.scroll_to_message(row, window, cx);
+                    })),
+                )
+            }))
+            .children(last_turn.then(|| {
+                reveal(
+                    kit::icon_button(theme, "turn-to-top", Icon::Up, 24.0)
+                        .aria_label("Scroll to top")
+                        .tooltip(kit::tip("Scroll to top"))
+                        .on_click(cx.listener(|this, _, _, cx| this.key_home(cx))),
+                )
+            }))
             .into_any_element()
     }
 
@@ -773,6 +814,11 @@ impl RunScreen {
 }
 
 /// An answered question: the question muted above the answer, in the user's bubble.
+/// The hover group of a finished turn's end: its final message and the icons under it.
+fn turn_end_group(key: Key) -> SharedString {
+    SharedString::from(format!("turn-end-{}", key.0))
+}
+
 fn answered_bubble(theme: &Theme, pairs: &[(String, Option<String>)]) -> AnyElement {
     div()
         .id("question-answered")

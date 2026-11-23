@@ -1251,9 +1251,14 @@ impl RunScreen {
         let Some(row) = self.prompt_beside(dir) else {
             return;
         };
+        self.scroll_to_message(row, window, cx);
+    }
+
+    /// Brings the user message at top-level row `row` to the top of the view. A message near the
+    /// end cannot reach the top: the list settles at the tail on its next layout, and the place
+    /// is read again from there.
+    fn scroll_to_message(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.scroll_to_row(row, cx);
-        // A message near the end cannot reach the top: the list settles at the tail on its next
-        // layout, and the place is read again from there.
         let screen = cx.weak_entity();
         window.on_next_frame(move |_, cx| {
             screen.update(cx, |this, cx| this.note_place(cx)).ok();
