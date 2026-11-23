@@ -213,8 +213,8 @@ impl Text {
 /// texts a row shows.
 pub(crate) struct Shown<'a> {
     pub(crate) open: &'a dyn Fn(Key) -> bool,
-    pub(crate) output_open: &'a dyn Fn(&str) -> bool,
-    pub(crate) output_full: &'a dyn Fn(&str) -> bool,
+    pub(crate) output_open: &'a dyn Fn(Key, &str) -> bool,
+    pub(crate) output_full: &'a dyn Fn(Key, &str) -> bool,
     pub(crate) tree: &'a dyn Fn(Key, &str) -> BlockTree,
 }
 
@@ -264,7 +264,7 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
         Row::Worked { secs, .. } => {
             vec![Text::sourceless(Slot::HEAD, &convo::worked_label(*secs))]
         }
-        Row::Tools { calls, .. } => {
+        Row::Tools { key, calls } => {
             let mut out = Vec::new();
             for (n, line) in convo::step_lines(calls).iter().enumerate() {
                 out.push(Text::sourceless(Slot::new(n, Kind::Step), &line.text));
@@ -275,10 +275,10 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
                 let Some((call, output)) = call.and_then(|c| Some((c, c.output.as_ref()?))) else {
                     continue;
                 };
-                if !(shown.output_open)(&call.id) {
+                if !(shown.output_open)(*key, &call.id) {
                     continue;
                 }
-                let body = if (shown.output_full)(&call.id) {
+                let body = if (shown.output_full)(*key, &call.id) {
                     output.text.strip_suffix('\n').unwrap_or(&output.text)
                 } else {
                     facts::fold(&output.text, facts::OUTPUT_LINES).shown
@@ -527,8 +527,8 @@ mod tests {
             let open = |k: Key| self.open.contains(&k);
             let entries = reading(rows, &open);
             let tree = |_: Key, text: &str| reno_markdown::parse_full(text);
-            let out_open = |id: &str| self.outputs.contains(id);
-            let never = |_: &str| false;
+            let out_open = |_: Key, id: &str| self.outputs.contains(id);
+            let never = |_: Key, _: &str| false;
             let shown = Shown {
                 open: &open,
                 output_open: &out_open,

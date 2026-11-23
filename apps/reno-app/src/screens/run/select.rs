@@ -531,8 +531,8 @@ impl RunScreen {
     /// Runs `f` over the entries in reading order and what each shows.
     fn view<T>(&self, f: impl FnOnce(&[Entry<'_>], &Shown<'_>) -> T) -> T {
         let open = |k: Key| self.open.contains(&k);
-        let out_open = |id: &str| self.outputs_open.contains(&id.to_owned());
-        let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
+        let out_open = |_: Key, id: &str| self.outputs_open.contains(&id.to_owned());
+        let out_full = |_: Key, id: &str| self.outputs_full.contains(&id.to_owned());
         let tree = |key: Key, text: &str| {
             self.markdown
                 .peek(&key)

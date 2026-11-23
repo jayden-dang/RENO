@@ -932,7 +932,7 @@ mod tests {
     fn source_between(rows: &[Row], open: &[Key], from: Pos, to: Pos) -> String {
         let is_open = |k: Key| open.contains(&k);
         let entries = selection::reading(rows, &is_open);
-        let never = |_: &str| false;
+        let never = |_: Key, _: &str| false;
         let tree = |_: Key, text: &str| parse_full(text);
         let shown = Shown {
             open: &is_open,
