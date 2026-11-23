@@ -64,6 +64,10 @@ pub(crate) struct Options {
     pub(crate) open: Option<Nav>,
     /// `RENO_OPEN=run_<id>`: open on that run's screen (screenshots, reviews).
     pub(crate) open_run: Option<RunId>,
+    /// Query for the benchmark's Find strip.
+    pub(crate) bench_find: Option<String>,
+    /// The isolated find-burst runner waits for this app to open Find and release it.
+    pub(crate) bench_find_capture: bool,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
     /// `RENO_OPEN=newthread:<root>`: open on the new-thread state for that project (screenshots).
@@ -184,6 +188,10 @@ impl Options {
             .map(Duration::from_millis);
         options.reduce_motion = env("RENO_REDUCE_MOTION").is_some_and(|v| v == "1");
         options.bench = env("RENO_BENCH").is_some_and(|v| v == "1");
+        if options.bench {
+            options.bench_find = env("RENO_BENCH_FIND").filter(|query| !query.trim().is_empty());
+            options.bench_find_capture = env("RENO_BENCH_FIND_CAPTURE").is_some_and(|v| v == "1");
+        }
         options.open = match env("RENO_OPEN").as_deref() {
             None | Some("" | "home") => None,
             Some("runs") => Some(Nav::Runs),
@@ -285,6 +293,8 @@ pub(crate) fn register_fonts(cx: &mut App) {
 pub(crate) struct Start {
     pub(crate) open: Option<Nav>,
     pub(crate) open_run: Option<RunId>,
+    pub(crate) bench_find: Option<String>,
+    pub(crate) bench_find_capture: bool,
     pub(crate) open_project: Option<PathBuf>,
     pub(crate) open_new_thread: Option<PathBuf>,
     /// A panel tab to put in front once `open_run` is open.
@@ -372,6 +382,8 @@ pub(crate) fn run(options: Options) {
         let start = Start {
             open: options.open,
             open_run: options.open_run.clone(),
+            bench_find: options.bench_find.clone(),
+            bench_find_capture: options.bench_find_capture,
             open_project: options.open_project.clone(),
             open_new_thread: options.open_new_thread.clone(),
             panel: options.panel.clone(),
@@ -426,6 +438,8 @@ pub(crate) fn open_window(
     let Start {
         open,
         open_run,
+        bench_find,
+        bench_find_capture,
         open_project,
         open_new_thread,
         panel,
@@ -555,7 +569,17 @@ pub(crate) fn open_window(
                             .timer(Duration::from_millis(1500))
                             .await;
                         root.update_in(cx, |root, window, cx| {
-                            root.open_run(run, window, cx);
+                            root.open_run(run.clone(), window, cx);
+                            if let (Some(query), Some(screen)) =
+                                (&bench_find, root.run_screen().cloned())
+                            {
+                                screen.update(cx, |screen, cx| {
+                                    screen.open_bench_find(query, window, cx)
+                                });
+                                if bench_find_capture {
+                                    crate::bench::find_streaming(root.store.clone(), run, window);
+                                }
+                            }
                             match panel {
                                 Some(Surface::Terminal(_)) => {
                                     if let Some(screen) = root.run_screen().cloned() {
@@ -595,7 +619,7 @@ pub(crate) fn open_window(
                             })
                             .ok();
                         }
-                        if open_folds {
+                        if open_folds && !crate::bench::scroll_script() {
                             cx.background_executor()
                                 .timer(Duration::from_millis(500))
                                 .await;

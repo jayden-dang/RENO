@@ -31,7 +31,11 @@ fn parse_stream_mock(value: &str) -> Result<executors::StreamMock, String> {
     match value {
         "steady" => Ok(executors::StreamMock::Steady),
         "burst" => Ok(executors::StreamMock::Burst),
-        other => Err(format!("want steady or burst, got {other}")),
+        "longreply" => Ok(executors::StreamMock::LongReply),
+        "findburst" => Ok(executors::StreamMock::FindBurst),
+        other => Err(format!(
+            "want steady, burst, longreply or findburst, got {other}"
+        )),
     }
 }
 
@@ -58,7 +62,7 @@ struct Args {
     mock_hold: bool,
     /// Bench only: make the mock stream text at a steady rate (`steady`, the default: about 20
     /// events a second for 60 s) or play 2,000 messages at once (`burst`). Used by the app
-    /// benchmark; it wins over `--mock-hold`.
+    /// benchmark; it wins over `--mock-hold`. Other bench scripts are `longreply` and `findburst`.
     #[arg(
         long,
         env = "RENO_STREAM_MOCK",

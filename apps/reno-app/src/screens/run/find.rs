@@ -220,6 +220,24 @@ impl RunScreen {
         cx.notify();
     }
 
+    /// Installs the benchmark query through the same field as interactive Find.
+    pub(crate) fn open_bench_find(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_find(window, cx);
+        self.find_field(cx)
+            .update(cx, |field, cx| field.set_text(query, cx));
+        self.find_query_changed(query.to_owned(), cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bench_find_query(&self) -> Option<String> {
+        self.find.open.then(|| self.find.query.text.clone())
+    }
+
     /// Esc or the close button: the bar goes, the highlights go, and what search opened closes
     /// again. What the owner opened stays.
     pub(crate) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {

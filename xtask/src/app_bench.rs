@@ -15,7 +15,10 @@
 //! 4. **Long transcript.** `renod --stream-mock=burst` finishes a run of 2,000 messages. The app
 //!    opens it with every fold open and scrolls it from the end to the start and back, one step a
 //!    frame; the time between frames gives p95, and the footprint is sampled while it scrolls.
-//! 5. **GPU memory.** The `IOAccelerator` share of the footprint, taken from the idle window.
+//! 5. **Long reply.** Finish one long Markdown reply, then use the same scripted scroll.
+//! 6. **Find while streaming.** Open Find before releasing the 2,000-message mock burst and
+//!    measure frames until that run's Done event has been drawn.
+//! 7. **GPU memory.** The `IOAccelerator` share of the footprint, taken from the idle window.
 //!
 //! GPUI draws no frame for a window that is covered, so the window must stay on screen and
 //! uncovered. The app prints `first-frame` once and `frames <n>` while it draws; where drawing
@@ -429,35 +432,41 @@ fn measure(
     let (daemon, _) = Daemon::start(bins, &quiet, DaemonOptions::default())?;
     let (cold_start, idle) = if stream_only {
         (
-            Scenario::NotDrawn("not run (--stream-only)".into()),
-            Scenario::NotDrawn("not run (--stream-only)".into()),
+            Scenario::Skipped("not run (--stream-only)".into()),
+            Scenario::Skipped("not run (--stream-only)".into()),
         )
     } else {
         (cold_start(plan, app, &quiet)?, idle(plan, app, &quiet)?)
     };
     daemon.stop()?;
 
-    let (streaming, long_transcript) = if idle_only {
-        (
-            Scenario::NotDrawn("not run (--idle-only)".into()),
-            Scenario::NotDrawn("not run (--idle-only)".into()),
-        )
+    let streaming = if idle_only {
+        Scenario::Skipped("not run (--idle-only)".into())
     } else {
-        (
-            streaming(plan, app, bins, &data_dir(scratch, "stream")?)?,
-            if stream_only {
-                Scenario::NotDrawn("not run (--stream-only)".into())
-            } else {
-                long_transcript(app, bins, &data_dir(scratch, "long")?)?
-            },
-        )
+        streaming(plan, app, bins, &data_dir(scratch, "stream")?)?
     };
+    let transcript = |kind: TranscriptScenario| {
+        if idle_only || stream_only {
+            let option = if idle_only {
+                "--idle-only"
+            } else {
+                "--stream-only"
+            };
+            return Ok(Scenario::Skipped(format!("not run ({option})")));
+        }
+        transcript_scenario(app, bins, &data_dir(scratch, kind.name())?, kind)
+    };
+    let long_transcript = transcript(TranscriptScenario::LongTranscript)?;
+    let long_reply = transcript(TranscriptScenario::LongReply)?;
+    let find_streaming = transcript(TranscriptScenario::FindStreaming)?;
     Ok(Variant {
         allocator: label.to_owned(),
         cold_start,
         idle,
         streaming,
         long_transcript,
+        long_reply,
+        find_streaming,
     })
 }
 
@@ -636,33 +645,65 @@ fn streaming(
     }))
 }
 
-fn long_transcript(app: &Path, bins: &Bins, dir: &Path) -> Result<Scenario<LongTranscript>> {
-    println!("long transcript: a finished run of 2,000 messages, opened and scrolled");
+#[derive(Clone, Copy)]
+enum TranscriptScenario {
+    LongTranscript,
+    LongReply,
+    FindStreaming,
+}
+
+impl TranscriptScenario {
+    fn name(self) -> &'static str {
+        match self {
+            Self::LongTranscript => "long_transcript",
+            Self::LongReply => "long_reply",
+            Self::FindStreaming => "find_streaming",
+        }
+    }
+
+    fn mock(self) -> &'static str {
+        match self {
+            Self::LongTranscript => "burst",
+            Self::LongReply => "longreply",
+            Self::FindStreaming => "findburst",
+        }
+    }
+}
+
+fn transcript_scenario(
+    app: &Path,
+    bins: &Bins,
+    dir: &Path,
+    kind: TranscriptScenario,
+) -> Result<Scenario<LongTranscript>> {
+    let name = kind.name();
+    println!("{name}: collecting transcript frame times and footprint");
     let (daemon, _) = Daemon::start(
         bins,
         dir,
         DaemonOptions {
-            stream_mock: Some("burst"),
+            stream_mock: Some(kind.mock()),
             ..DaemonOptions::default()
         },
     )?;
-    let follower = Follower::start(bins, dir, "long")?;
-    let run = follower.run.clone();
-    follower.wait()?;
-    let mut started = App::start(
-        app,
-        dir,
-        &[
-            (
-                "RENO_OPEN",
-                &format!("run_{}", run.trim_start_matches("run_")),
-            ),
-            ("RENO_OPEN_FOLDS", "1"),
-            ("RENO_BENCH_SCROLL", "1"),
-        ],
-    )?;
+    let follower = Follower::start(bins, dir, name)?;
+    let run = format!("run_{}", follower.run.trim_start_matches("run_"));
+    let mut options = vec![("RENO_OPEN", run.as_str())];
+    let running = if matches!(kind, TranscriptScenario::FindStreaming) {
+        options.extend([
+            ("RENO_BENCH_FIND", "looked at"),
+            ("RENO_BENCH_FIND_CAPTURE", "1"),
+        ]);
+        // The app opens the strip, then sends the steer that releases FindBurst.
+        Some(follower)
+    } else {
+        follower.wait()?;
+        options.extend([("RENO_OPEN_FOLDS", "1"), ("RENO_BENCH_SCROLL", "1")]);
+        None
+    };
+    let mut started = App::start(app, dir, &options)?;
     if started.first_frame()?.is_none() {
-        return Ok(not_drawn("long transcript"));
+        return Ok(not_drawn(name));
     }
     let mut before = None;
     let mut peak = 0.0_f64;
@@ -674,14 +715,14 @@ fn long_transcript(app: &Path, bins: &Bins, dir: &Path) -> Result<Scenario<LongT
             break done;
         }
         if let Some(status) = started.child.try_wait().map_err(|e| e.to_string())? {
-            return Err(format!("reno-app exited during the scroll: {status}"));
+            return Err(format!("reno-app exited during {name}: {status}"));
         }
         if begun.elapsed() > SCROLL_TIMEOUT {
             let drawn = started.frames();
             started.stop();
             daemon.stop()?;
             return Ok(Scenario::NotDrawn(format!(
-                "the scripted scroll did not finish in {} s ({drawn} frames drawn)",
+                "{name} did not finish in {} s ({drawn} frames drawn)",
                 SCROLL_TIMEOUT.as_secs()
             )));
         }
@@ -692,13 +733,33 @@ fn long_transcript(app: &Path, bins: &Bins, dir: &Path) -> Result<Scenario<LongT
         thread::sleep(Duration::from_secs(2));
     };
     let end = footprint(started.pid)?;
-    peak = peak.max(end.total_mib);
+    let lifetime_peak = Command::new("/usr/bin/vmmap")
+        .args(["--summary", &started.pid.to_string()])
+        .output()
+        .ok()
+        .and_then(|output| app_stats::parse_vmmap_peak(&String::from_utf8_lossy(&output.stdout)));
+    peak = peak.max(end.total_mib).max(lifetime_peak.unwrap_or(0.0));
     gpu = gpu.max(end.gpu_mib);
     started.stop();
+    if let Some(running) = running {
+        if rows != 2_000 {
+            drop(running);
+            daemon.stop()?;
+            return Ok(Scenario::NotDrawn(format!(
+                "expected 2,000 streamed messages, saw {rows}"
+            )));
+        }
+        running.wait()?;
+    }
     daemon.stop()?;
+    if matches!(kind, TranscriptScenario::LongTranscript) && rows < 2_000 {
+        return Ok(Scenario::NotDrawn(format!(
+            "expected the open long transcript, saw {rows} rows"
+        )));
+    }
     let Some(frame_ms) = app_stats::frame_latency(&frames).filter(|_| frames.len() >= 20) else {
         return Ok(Scenario::NotDrawn(format!(
-            "{} frames in the scroll",
+            "{} frames in {name}",
             frames.len()
         )));
     };

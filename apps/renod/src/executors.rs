@@ -137,6 +137,10 @@ pub enum StreamMock {
     /// [`BURST_MESSAGES`] messages, each followed by a tool step, with no waiting: a long
     /// finished run to open.
     Burst,
+    /// One long reply with code and math, arriving in chunks without intervening tools.
+    LongReply,
+    /// The same 2,000 messages as Burst, released by the benchmark after Find opens.
+    FindBurst,
 }
 
 /// The rate of [`StreamMock::Steady`].
@@ -172,8 +176,22 @@ pub fn stream_script(kind: StreamMock) -> Vec<MockStep> {
                 }
             }
         }
-        StreamMock::Burst => {
+        StreamMock::LongReply => {
+            let markup = format!("{STREAM_MARKDOWN}$$\\int_0^1 x^2\\,dx = \\tfrac13$$\n\n");
+            for _ in 0..640 {
+                steps.push(MockStep::Sleep(std::time::Duration::from_millis(50)));
+                steps.push(MockStep::text(markup.clone()));
+            }
+        }
+        StreamMock::Burst | StreamMock::FindBurst => {
+            let find = kind == StreamMock::FindBurst;
+            if find {
+                steps.push(MockStep::AwaitSteer);
+            }
             for n in 0..BURST_MESSAGES {
+                if find && n % 20 == 0 {
+                    steps.push(MockStep::Sleep(std::time::Duration::from_millis(16)));
+                }
                 steps.push(MockStep::text(format!(
                     "Message {n}: I looked at `item_{n}` and it reads as expected. \
                      Nothing to change here, so on to the next.\n"
@@ -491,6 +509,52 @@ mod tests {
         assert_eq!(tools, BURST_MESSAGES, "a tool step after each message");
         assert_eq!(dones, 1);
         assert_eq!(slept, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn the_long_reply_mock_streams_one_reply_with_code_and_math() {
+        let script = stream_script(StreamMock::LongReply);
+        let (texts, tools, dones, slept) = shape(&script);
+        assert!(texts > 1, "many deltas contribute to the same reply");
+        assert_eq!(tools, 0, "tool calls would split the reply");
+        assert_eq!(dones, 1);
+        assert!(
+            slept > std::time::Duration::ZERO,
+            "the reply arrives steadily"
+        );
+        let markup: String = script
+            .iter()
+            .filter_map(|step| match step {
+                MockStep::Emit(ExecEvent::Text { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(markup.len() >= 256 * 1024);
+        assert!(markup.contains("```rust"));
+        assert!(markup.contains("$$"));
+        assert_eq!(markup.matches("```").count() % 2, 0);
+    }
+
+    #[test]
+    fn the_find_burst_waits_for_the_open_search_and_keeps_the_same_messages() {
+        let regular = stream_script(StreamMock::Burst);
+        let watched = stream_script(StreamMock::FindBurst);
+        assert!(matches!(watched.get(1), Some(MockStep::AwaitSteer)));
+        let texts = |script: &[MockStep]| {
+            script
+                .iter()
+                .filter_map(|step| match step {
+                    MockStep::Emit(ExecEvent::Text { text }) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&watched), texts(&regular));
+        assert!(
+            texts(&watched)
+                .iter()
+                .all(|text| text.contains("looked at"))
+        );
     }
 
     #[test]

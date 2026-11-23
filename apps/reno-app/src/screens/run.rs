@@ -1438,8 +1438,32 @@ impl RunScreen {
         }
 
         let list = self.list.clone();
-        cx.spawn_in(window, async move |_, cx| {
-            // The rows are in when the count has held for a second and a half.
+        cx.spawn_in(window, async move |screen, cx| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let ready = screen.update(cx, |screen, cx| {
+                    if matches!(screen.rows.last(), Some(Row::Done { .. })) {
+                        screen.open_all_folds(cx);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                match ready {
+                    Ok(true) => break,
+                    Err(_) => return,
+                    Ok(false) if Instant::now() >= deadline => {
+                        bench::report_scroll(0, &[]);
+                        return;
+                    }
+                    Ok(false) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await
+                    }
+                }
+            }
+            // Let the open list lay out and settle before taking the first frame sample.
             let mut held = 0;
             let mut count = 0;
             while held < 6 {

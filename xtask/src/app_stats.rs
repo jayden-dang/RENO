@@ -76,7 +76,7 @@ pub(crate) const BUDGETS: &[Budget] = &[
     },
     Budget {
         key: "long_footprint_mib",
-        label: "Long transcript footprint (peak)",
+        label: "Transcript scenario footprint (peak)",
         unit: "MiB",
         limit: Some(370.0),
         target: None,
@@ -87,8 +87,24 @@ pub(crate) const BUDGETS: &[Budget] = &[
         label: "Long transcript frame time p95",
         unit: "ms",
         limit: Some(16.7),
-        target: Some("ROAD-33"),
-        basis: "one 60 Hz frame; measured p50 29 ms for 2,000 messages in 4 rows, ROAD-33 makes it",
+        target: None,
+        basis: "one 60 Hz frame",
+    },
+    Budget {
+        key: "long_reply_frame_p95_ms",
+        label: "Long reply frame time p95",
+        unit: "ms",
+        limit: Some(16.7),
+        target: None,
+        basis: "one 60 Hz frame",
+    },
+    Budget {
+        key: "find_streaming_frame_p95_ms",
+        label: "Find while streaming frame time p95",
+        unit: "ms",
+        limit: Some(16.7),
+        target: None,
+        basis: "one 60 Hz frame",
     },
     Budget {
         key: "gpu_share_mib",
@@ -226,6 +242,14 @@ pub(crate) fn parse_vmmap(out: &str) -> Option<Footprint> {
     })
 }
 
+/// The process's lifetime peak reported by vmmap, including peaks between benchmark samples.
+pub(crate) fn parse_vmmap_peak(out: &str) -> Option<f64> {
+    out.lines().find_map(|line| {
+        line.strip_prefix("Physical footprint (peak):")
+            .and_then(parse_size_mib)
+    })
+}
+
 /// `first-frame <ms>`.
 pub(crate) fn parse_first_frame(line: &str) -> Option<f64> {
     line.strip_prefix("first-frame ")?.trim().parse().ok()
@@ -260,6 +284,8 @@ pub(crate) enum Scenario<T> {
     Drawn(T),
     /// The window was not drawn: the number would be a fake low one.
     NotDrawn(String),
+    /// A command-line option explicitly excluded this scenario.
+    Skipped(String),
 }
 
 impl<T> Scenario<T> {
@@ -309,6 +335,8 @@ pub(crate) struct Variant {
     pub(crate) idle: Scenario<Load>,
     pub(crate) streaming: Scenario<Load>,
     pub(crate) long_transcript: Scenario<LongTranscript>,
+    pub(crate) long_reply: Scenario<LongTranscript>,
+    pub(crate) find_streaming: Scenario<LongTranscript>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +382,7 @@ fn not_drawn<T>(s: &Scenario<T>) -> Option<String> {
     match s {
         Scenario::Drawn(_) => None,
         Scenario::NotDrawn(why) => Some(format!("window not drawn: {why}")),
+        Scenario::Skipped(why) => Some(why.clone()),
     }
 }
 
@@ -393,12 +422,25 @@ pub(crate) fn lines(v: &Variant) -> Vec<Line> {
         line(
             "long_footprint_mib",
             not_drawn(&v.long_transcript),
-            v.long_transcript.value().map(|l| l.footprint_peak_mib),
+            [&v.long_transcript, &v.long_reply, &v.find_streaming]
+                .into_iter()
+                .filter_map(|scenario| scenario.value().map(|load| load.footprint_peak_mib))
+                .reduce(f64::max),
         ),
         line(
             "long_frame_p95_ms",
             not_drawn(&v.long_transcript),
             v.long_transcript.value().map(|l| l.frame_ms.p95),
+        ),
+        line(
+            "long_reply_frame_p95_ms",
+            not_drawn(&v.long_reply),
+            v.long_reply.value().map(|l| l.frame_ms.p95),
+        ),
+        line(
+            "find_streaming_frame_p95_ms",
+            not_drawn(&v.find_streaming),
+            v.find_streaming.value().map(|l| l.frame_ms.p95),
         ),
         line(
             "gpu_share_mib",
@@ -410,12 +452,18 @@ pub(crate) fn lines(v: &Variant) -> Vec<Line> {
 
 impl Report {
     /// Whether the run passes: no number may be over its budget. A number over a target (a limit
-    /// another roadmap item must meet) is reported, not failed. A scenario that was not drawn is
-    /// not a pass of anything, but it is not a miss either: the table says so.
+    /// another roadmap item must meet) is reported, not failed. Each attempted scenario must
+    /// supply measurements. An explicitly skipped scenario is allowed.
     pub(crate) fn passed(&self) -> bool {
-        self.variants
-            .first()
-            .is_none_or(|v| lines(v).iter().all(|l| !l.fails()))
+        self.variants.first().is_none_or(|v| {
+            let missing = matches!(v.cold_start, Scenario::NotDrawn(_))
+                || matches!(v.idle, Scenario::NotDrawn(_))
+                || matches!(v.streaming, Scenario::NotDrawn(_))
+                || [&v.long_transcript, &v.long_reply, &v.find_streaming]
+                    .into_iter()
+                    .any(|s| matches!(s, Scenario::NotDrawn(_)));
+            !missing && lines(v).iter().all(|l| !l.fails())
+        })
     }
 }
 
@@ -686,7 +734,9 @@ PID    %CPU IDLEW
             }),
             idle,
             streaming: Scenario::Drawn(load(5.0, 150.0)),
-            long_transcript: Scenario::NotDrawn("not run".into()),
+            long_transcript: Scenario::Skipped("not run".into()),
+            long_reply: Scenario::Skipped("not run".into()),
+            find_streaming: Scenario::Skipped("not run".into()),
         }
     }
 
@@ -722,13 +772,15 @@ PID    %CPU IDLEW
                 ("streaming_footprint_mib", Some(260.0)),
                 ("long_footprint_mib", Some(370.0)),
                 ("long_frame_p95_ms", Some(16.7)),
+                ("long_reply_frame_p95_ms", Some(16.7)),
+                ("find_streaming_frame_p95_ms", Some(16.7)),
                 ("gpu_share_mib", None),
             ]
         );
     }
 
     #[test]
-    fn the_long_transcript_frame_time_is_a_target_that_does_not_fail_the_run() {
+    fn the_long_frame_row_fails_the_run_when_over_16_7_ms() {
         let mut v = variant(Scenario::Drawn(load(0.2, 100.0)));
         v.long_transcript = Scenario::Drawn(LongTranscript {
             rows: 4,
@@ -746,14 +798,26 @@ PID    %CPU IDLEW
         let l = lines(&v);
         let frame = l.iter().find(|l| l.key == "long_frame_p95_ms").unwrap();
         assert!(frame.over, "30 ms is past 16.7 ms");
-        assert!(
-            report(v.clone()).passed(),
-            "a target is reported, not failed"
-        );
+        assert!(!report(v.clone()).passed());
+        assert!(frame.target.is_none());
         let text = table(&report(v));
-        assert!(text.contains("over (ROAD-33)"), "{text}");
-        assert!(text.contains("target, ROAD-33"), "{text}");
+        assert!(!text.contains("target, ROAD-33"), "{text}");
         assert!(!text.contains("proposed"), "{text}");
+    }
+
+    #[test]
+    fn the_transcript_peak_is_read_separately_from_the_last_footprint() {
+        assert_eq!(
+            parse_vmmap_peak("Physical footprint: 120.0M\nPhysical footprint (peak): 190.0M"),
+            Some(190.0)
+        );
+    }
+
+    #[test]
+    fn a_required_transcript_scenario_without_samples_fails_the_report() {
+        let mut v = variant(Scenario::Drawn(load(0.2, 100.0)));
+        v.find_streaming = Scenario::NotDrawn("no frame measurements".into());
+        assert!(!report(v).passed());
     }
 
     #[test]
