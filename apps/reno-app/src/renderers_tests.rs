@@ -260,6 +260,67 @@ fn a_code_block_has_copy_and_wrap_in_its_frame_and_no_header(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways(cx: &mut TestAppContext) {
+    use crate::transcript::Key;
+    use crate::ui::markdown_view::SelectHost;
+    use crate::ui::markdown_view::select::{Registry, selection_style};
+
+    let line = "let message = hello_world; ".repeat(12);
+    let text = format!("```\n{}\n```", line.trim_end());
+    let mut stream = Streaming::default();
+    stream.set_text(&text);
+    let registry = Registry::default();
+    let host = Host::transcript(None, None, None).selectable(Some(Rc::new(SelectHost {
+        registry: registry.clone(),
+        key: Key(1),
+        atoms: stream.atoms(),
+        selected: None,
+        style: selection_style(&Theme::for_appearance(Appearance::Light)),
+    })));
+    let (_view, vcx) = probe(cx, &text, host, Appearance::Light);
+    let line_bounds = || registry.take().last().expect("painted code line").bounds;
+    let scroll_sideways = |vcx: &mut VisualTestContext| {
+        let at = vcx
+            .debug_bounds("md-card")
+            .expect("painted code block")
+            .center();
+        wheel_by(vcx, at, gpui::point(px(-120.0), px(0.0)), false);
+    };
+
+    let unwrapped = line_bounds();
+    scroll_sideways(vcx);
+    let scrolled = line_bounds();
+    assert!(
+        scrolled.left() < unwrapped.left(),
+        "unwrapped code scrolls sideways: {unwrapped:?} -> {scrolled:?}"
+    );
+
+    click(vcx, "Wrap lines");
+    draw(vcx);
+    let wrapped = line_bounds();
+    assert!(
+        wrapped.size.height > unwrapped.size.height,
+        "the long line wraps onto more rows"
+    );
+    scroll_sideways(vcx);
+    assert_eq!(
+        line_bounds().left(),
+        wrapped.left(),
+        "wrapped code stays in place"
+    );
+
+    click(vcx, "Unwrap lines");
+    draw(vcx);
+    let unwrapped_again = line_bounds();
+    assert_eq!(unwrapped_again.size.height, unwrapped.size.height);
+    scroll_sideways(vcx);
+    assert!(
+        line_bounds().left() < unwrapped_again.left(),
+        "unwrapping restores sideways scrolling"
+    );
+}
+
+#[gpui::test]
 fn math_is_typeset_display_and_inline_or_its_source_when_off(cx: &mut TestAppContext) {
     let text = "Area: $x^2$ here.\n\n$$\\int_0^1 x^2\\,dx = \\tfrac13$$\n\nBroken: $$\\frac{1$$";
     let (_view, vcx) = probe(cx, text, Host::preview(), Appearance::Dark);

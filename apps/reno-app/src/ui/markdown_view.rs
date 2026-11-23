@@ -771,6 +771,7 @@ fn code_body(
         div()
             .id(("md-code-scroll", key as usize))
             .w_full()
+            .flex()
             .overflow_x_scroll()
             .child(area.flex_none().min_w_full().whitespace_nowrap())
             .into_any_element()
