@@ -1,9 +1,10 @@
 //! The frame around a code block or a diagram: its Copy and wrap controls (TRANSCRIPT-7.1, 7.2,
 //! 10.6). They are icon buttons at the top right, shown only while the pointer is over the block
-//! (or a button has keyboard focus).
+//! (or a button has keyboard focus). A diagram also has Preview and Code tabs (TRANSCRIPT-10.1).
 //!
 //! Copy puts only the block's code on the clipboard and says so with a toast. Whether a block
-//! wraps is remembered per block in a bounded store, so it survives the row scrolling away.
+//! wraps, and which tab a diagram is on, are remembered per block in bounded stores, so they
+//! survive the row scrolling away.
 
 use std::hash::{Hash, Hasher};
 
@@ -15,7 +16,7 @@ use crate::ui::kit;
 use crate::ui::theme::Theme;
 use crate::ui::toast;
 
-/// Blocks whose wrap choice is remembered.
+/// Blocks whose wrap choice, and diagrams whose tab, is remembered.
 const WRAP_ENTRIES: usize = 512;
 
 /// What a frame is around.
@@ -48,6 +49,58 @@ impl Default for Wraps {
     fn default() -> Self {
         Self(Lru::new(WRAP_ENTRIES, usize::MAX))
     }
+}
+
+/// Which face of a diagram shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DiagramTab {
+    /// The drawing.
+    #[default]
+    Preview,
+    /// The source.
+    Code,
+}
+
+struct Tabs(Lru<u64, DiagramTab>);
+
+impl gpui::Global for Tabs {}
+
+impl Default for Tabs {
+    fn default() -> Self {
+        Self(Lru::new(WRAP_ENTRIES, usize::MAX))
+    }
+}
+
+/// The tab the diagram `key` is on: its drawing until the owner picks the source.
+pub(crate) fn tab(key: u64, cx: &mut App) -> DiagramTab {
+    cx.default_global::<Tabs>()
+        .0
+        .get(&key)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Puts the diagram `key` on `tab` and redraws.
+pub(crate) fn set_tab(key: u64, tab: DiagramTab, cx: &mut App) {
+    cx.default_global::<Tabs>().0.insert(key, tab, 1);
+    super::settled(cx);
+}
+
+/// The Preview and Code tabs of the diagram `key`, `current` pressed.
+pub(crate) fn tab_bar(key: u64, current: DiagramTab, theme: &Theme) -> AnyElement {
+    let tab = |face, id, label| {
+        kit::segment(theme, id, label, current == face)
+            .on_click(move |_, _, cx| set_tab(key, face, cx))
+    };
+    div()
+        .flex()
+        .px(px(8.0))
+        .pt(px(8.0))
+        .child(kit::segmented(theme).children([
+            tab(DiagramTab::Preview, "diagram-tab-preview", "Preview"),
+            tab(DiagramTab::Code, "diagram-tab-code", "Code"),
+        ]))
+        .into_any_element()
 }
 
 /// A key for a block: its kind, language and text.
@@ -174,6 +227,28 @@ mod tests {
                 toggle_wrap(key_of(None, &n.to_string()), cx);
             }
             assert!(cx.default_global::<Wraps>().0.len() <= WRAP_ENTRIES);
+        });
+    }
+
+    #[gpui::test]
+    fn a_diagram_opens_on_its_drawing_and_remembers_its_tab_per_block(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let key = key_of(Some("mermaid"), "flowchart LR\n A --> B");
+            assert_eq!(tab(key, cx), DiagramTab::Preview);
+            set_tab(key, DiagramTab::Code, cx);
+            assert_eq!(tab(key, cx), DiagramTab::Code);
+            assert_eq!(
+                tab(key_of(Some("mermaid"), "other"), cx),
+                DiagramTab::Preview
+            );
+            set_tab(key, DiagramTab::Preview, cx);
+            assert_eq!(tab(key, cx), DiagramTab::Preview);
+            for n in 0..(WRAP_ENTRIES + 50) {
+                set_tab(key_of(None, &n.to_string()), DiagramTab::Code, cx);
+            }
+            assert!(cx.default_global::<Tabs>().0.len() <= WRAP_ENTRIES);
         });
     }
 

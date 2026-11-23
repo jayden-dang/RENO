@@ -505,3 +505,58 @@ fn two_identical_code_blocks_each_have_their_own_controls(cx: &mut TestAppContex
     let copied = vcx.read_from_clipboard().and_then(|item| item.text());
     assert_eq!(copied.as_deref(), Some("fn a() {}"));
 }
+
+/// The Preview tab shows the drawing and the Code tab the source; Copy gives the source from
+/// either; a failed diagram is a plain code block with no tabs.
+#[gpui::test]
+fn the_code_tab_shows_the_source_and_preview_the_drawing(cx: &mut TestAppContext) {
+    let source = "flowchart LR\n  A[Client] -->|hello| B[Handshake]";
+    let text = format!("```mermaid\n{source}\n```");
+    let (_view, vcx) = probe(cx, &text, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+    assert!(painted(vcx, "diagram-tab-preview") && painted(vcx, "diagram-tab-code"));
+    assert!(
+        !painted(vcx, "md-diagram-source"),
+        "the drawing, not its source"
+    );
+
+    click(vcx, "diagram-tab-code");
+    assert!(painted(vcx, "md-diagram-source"));
+    assert!(!painted(vcx, "md-diagram"), "no drawing on the Code tab");
+    click(vcx, "Copy code");
+    let copied = vcx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some(source), "Copy gives the source");
+
+    click(vcx, "diagram-tab-preview");
+    assert!(painted(vcx, "md-diagram"));
+    assert!(!painted(vcx, "md-diagram-source"));
+
+    let bad = "```mermaid\nnot a diagram\n```";
+    let (_view, vcx) = probe(cx, bad, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| !painted(vcx, "md-diagram-rendering"));
+    assert!(
+        !painted(vcx, "diagram-tab-code"),
+        "a plain code block has no tabs"
+    );
+}
+
+/// A diagram that has to be drawn again in a new theme stays on screen as it was, with the
+/// "Rendering\u{2026}" note, until the new drawing lands.
+#[gpui::test]
+fn a_diagram_drawn_again_keeps_its_picture_and_says_so(cx: &mut TestAppContext) {
+    let text = "```mermaid\nflowchart LR\n  A[Client] --> B[Handshake]\n```";
+    let (view, vcx) = probe(cx, text, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+    assert!(!painted(vcx, "md-diagram-rendering"));
+    view.update(vcx, |probe, cx| {
+        probe.theme = Theme::for_appearance(Appearance::Light);
+        cx.notify();
+    });
+    assert!(painted(vcx, "md-diagram"), "the old picture stays");
+    assert!(
+        painted(vcx, "md-diagram-rendering"),
+        "and says it is drawing"
+    );
+    settle(vcx, |vcx| !painted(vcx, "md-diagram-rendering"));
+    assert!(painted(vcx, "md-diagram"));
+}

@@ -241,6 +241,24 @@ fn the_tick_rail_is_a_minimap_and_a_click_really_scrolls(cx: &mut TestAppContext
     assert!(screen.read_with(vcx, |s, _| s.top_row()) >= users[1]);
 }
 
+/// A tick near the end of the thread cannot bring its message to the top: the list settles at the
+/// tail on its next layout, so the saved place is read again from where it rests.
+#[gpui::test]
+fn a_click_on_the_last_tick_saves_the_place_the_view_settles_at(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = long_thread(cx);
+    let users = user_rows(vcx, &screen);
+    let last = format!("tick-{}", users[1]);
+    wait_drawn(vcx, |vcx| painted(vcx, "tick-rail") && painted(vcx, &last));
+    click(vcx, &format!("tick-{}", users[0]));
+    click(vcx, &last);
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    draw(vcx);
+    screen.read_with(vcx, |s, _| {
+        assert!(s.top_row() >= users[1]);
+        assert_eq!(s.panel_state().place(), s.saved_place(), "a stale place");
+    });
+}
+
 #[gpui::test]
 fn a_transcript_that_fits_has_no_tick_rail(cx: &mut TestAppContext) {
     let (_root, vcx, _screen) = open(cx, "reviewer1");

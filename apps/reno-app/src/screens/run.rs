@@ -1178,7 +1178,7 @@ impl RunScreen {
         .detach();
     }
 
-    /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).
+    /// Brings the row at `ix` to the top of the list.
     fn scroll_to_row(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.list.scroll_to(ListOffset {
             item_ix: self.items.item_of_top(ix),
@@ -1342,7 +1342,9 @@ impl RunScreen {
                                 .when(lit, |d| d.debug_selector(|| "tick-current".to_owned()))
                                 .hover(move |s| s.bg(text)),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.scroll_to_message(ix, window, cx)
+                        }))
                 }))
                 // Where the matches are, beside the prompt ticks.
                 .children(self.find_rail_ticks(theme))

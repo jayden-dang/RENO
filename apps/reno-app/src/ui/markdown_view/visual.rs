@@ -66,7 +66,7 @@ fn body(visual: &Visual, host: &Host, theme: &Theme, window: &Window, cx: &mut A
             }
         }
         VisualKind::Diagram(source) => {
-            match mermaid::drawing(source, theme, window.scale_factor(), cx) {
+            match mermaid::drawing(source, theme, window.scale_factor(), None, cx) {
                 mermaid::Drawing::Ready(diagram) => chrome::card(
                     &Card {
                         kind: chrome::Kind::Diagram,
@@ -79,7 +79,7 @@ fn body(visual: &Visual, host: &Host, theme: &Theme, window: &Window, cx: &mut A
                     theme,
                     super::diagram_picture(&diagram, chrome::key_of(Some("mermaid"), source)),
                 ),
-                mermaid::Drawing::Rendering => {
+                mermaid::Drawing::Rendering { .. } => {
                     image::note(theme, "Drawing\u{2026}").into_any_element()
                 }
                 mermaid::Drawing::Failed => failed(theme),

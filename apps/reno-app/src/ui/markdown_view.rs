@@ -861,59 +861,85 @@ pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElemen
         .into_any_element()
 }
 
-/// A Mermaid block: the drawing in the diagram frame, its source with "Rendering\u{2026}" while it is
-/// drawn, a plain code block when it cannot be (TRANSCRIPT-10.1, 10.3).
+/// The place of the diagram `ordinal` of the reply being drawn, if the reply has a row of its own:
+/// it outlives a change of the diagram's source, so the drawing it had is kept while the new one
+/// draws.
+fn diagram_place(env: &Env, ordinal: usize) -> Option<u64> {
+    let select = env.host.select.as_ref()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (select.key.0, ordinal).hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// A Mermaid block in the diagram frame, with Preview and Code tabs: the drawing (the previous
+/// one while a changed source draws, with "Rendering\u{2026}"), or the source with the note when
+/// there is none; a plain code block when it cannot be drawn (TRANSCRIPT-10.1, 10.2, 10.3).
 fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
     let key = chrome::key_of(Some("mermaid"), source);
     let ordinal = env.next_card();
-    let selected = atom_selected(env, atom);
-    let frame = |body: AnyElement| {
-        let card = chrome::card(
-            &Card {
-                kind: chrome::Kind::Diagram,
-                copy: source,
-                key,
-                wrappable: false,
-                wrapped: false,
-                ordinal,
+    let place = diagram_place(env, ordinal);
+    let drawing = mermaid::drawing(source, env.theme, env.scale, place, cx);
+    if matches!(drawing, mermaid::Drawing::Failed) {
+        return code_block(source, Some("mermaid"), None, env, cx);
+    }
+    let scroll_key = key ^ ordinal as u64;
+    let note = || {
+        div()
+            .px(px(14.0))
+            .pb(px(8.0))
+            .text_size(px(12.0))
+            .text_color(env.theme.faint)
+            .debug_selector(|| "md-diagram-rendering".to_owned())
+            .child("Rendering\u{2026}")
+    };
+    let source_view = || {
+        div()
+            .debug_selector(|| "md-diagram-source".to_owned())
+            .child(code_body(source, (None, None), false, scroll_key, env))
+    };
+    let tab = chrome::tab(key, cx);
+    let face = match (tab, drawing) {
+        (chrome::DiagramTab::Code, _) => source_view().into_any_element(),
+        (chrome::DiagramTab::Preview, mermaid::Drawing::Ready(diagram)) => {
+            diagram_picture(&diagram, scroll_key)
+        }
+        (
+            chrome::DiagramTab::Preview,
+            mermaid::Drawing::Rendering {
+                previous: Some(old),
             },
-            env.theme,
-            body,
-        );
-        // A selected diagram is lifted whole: it has no text to paint over.
-        match (&env.host.select, selected) {
-            (Some(select), true) => div()
-                .rounded(px(10.0))
-                .bg(select.style.background_color.unwrap_or(env.theme.raised))
-                .p(px(3.0))
-                .child(card)
-                .into_any_element(),
-            _ => card,
+        ) => div()
+            .child(diagram_picture(&old, scroll_key))
+            .child(note())
+            .into_any_element(),
+        (chrome::DiagramTab::Preview, _) => {
+            div().child(source_view()).child(note()).into_any_element()
         }
     };
-    match mermaid::drawing(source, env.theme, env.scale, cx) {
-        mermaid::Drawing::Ready(diagram) => frame(diagram_picture(&diagram, key ^ ordinal as u64)),
-        mermaid::Drawing::Rendering => frame(
-            div()
-                .child(code_body(
-                    source,
-                    (None, None),
-                    false,
-                    key ^ ordinal as u64,
-                    env,
-                ))
-                .child(
-                    div()
-                        .px(px(14.0))
-                        .pb(px(8.0))
-                        .text_size(px(12.0))
-                        .text_color(env.theme.faint)
-                        .debug_selector(|| "md-diagram-rendering".to_owned())
-                        .child("Rendering\u{2026}"),
-                )
-                .into_any_element(),
-        ),
-        mermaid::Drawing::Failed => code_block(source, Some("mermaid"), None, env, cx),
+    let card = chrome::card(
+        &Card {
+            kind: chrome::Kind::Diagram,
+            copy: source,
+            key,
+            wrappable: false,
+            wrapped: false,
+            ordinal,
+        },
+        env.theme,
+        div()
+            .child(chrome::tab_bar(key, tab, env.theme))
+            .child(face)
+            .into_any_element(),
+    );
+    // A selected diagram is lifted whole: it has no text to paint over.
+    match (&env.host.select, atom_selected(env, atom)) {
+        (Some(select), true) => div()
+            .rounded(px(10.0))
+            .bg(select.style.background_color.unwrap_or(env.theme.raised))
+            .p(px(3.0))
+            .child(card)
+            .into_any_element(),
+        _ => card,
     }
 }
 

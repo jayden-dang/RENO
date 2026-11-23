@@ -1,4 +1,4 @@
-//! Mermaid diagrams (TRANSCRIPT-10.1, 10.3, 10.5, 16.4, 16.9).
+//! Mermaid diagrams (TRANSCRIPT-10.1, 10.2, 10.3, 10.5, 16.4, 16.9).
 //!
 //! `merman` parses, lays out and writes the diagram as SVG in a form `resvg` draws faithfully; the
 //! app rasterises it. Two pieces are the app's own:
@@ -13,7 +13,9 @@
 //! The work runs off the main thread on a task the cache owns (ARCH-11): a repaint finds the
 //! entry and does not ask again, and an entry the cache drops cancels its task. A source that
 //! does not parse, or whose type is not built in, comes back as [`Drawing::Failed`] and the view
-//! draws it as a plain code block. Only flowchart and sequence diagrams are built in.
+//! draws it as a plain code block. Flowchart, sequence, class, state, ER, gantt and pie diagrams
+//! are built in. A place that is drawn again (a changed source, a new theme) keeps its last
+//! drawing on screen until the new one lands.
 
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
@@ -37,6 +39,9 @@ const MAX_SIDE_PX: f32 = 4096.0;
 /// Diagrams kept, and the pixel bytes they may hold together (ARCH-12).
 const CACHE_ENTRIES: usize = 32;
 const CACHE_BYTES: usize = 48 * 1024 * 1024;
+/// The latest drawing of each place, held to stand in while that place redraws; most of these are
+/// shared with the cache above, so the byte cap only counts what outlives it.
+const PREVIOUS_BYTES: usize = 24 * 1024 * 1024;
 /// The font family name of the app's UI font, as the SVG names it.
 const FAMILY: &str = "Geist";
 
@@ -156,44 +161,78 @@ fn hex(color: gpui::Hsla) -> String {
 /// raised tone, lines muted, labels in the text colour, and the edge-label chips in the card's
 /// own tone so they do not show as grey boxes on a dark card.
 pub(crate) fn init_directive(theme: &Theme) -> String {
-    let vars = serde_json::json!({
-        "fontFamily": FAMILY,
-        "fontSize": "14px",
-        "background": hex(theme.surface),
-        "primaryColor": hex(theme.raised),
-        "primaryTextColor": hex(theme.text),
-        "primaryBorderColor": hex(theme.faint),
-        "secondaryColor": hex(theme.canvas),
-        "secondaryTextColor": hex(theme.text),
-        "secondaryBorderColor": hex(theme.faint),
-        "tertiaryColor": hex(theme.canvas),
-        "tertiaryTextColor": hex(theme.text),
-        "tertiaryBorderColor": hex(theme.faint),
-        "lineColor": hex(theme.muted),
-        "textColor": hex(theme.text),
-        "mainBkg": hex(theme.raised),
-        "nodeBorder": hex(theme.faint),
-        "clusterBkg": hex(theme.canvas),
-        "clusterBorder": hex(theme.faint),
-        "edgeLabelBackground": hex(theme.surface),
-        "titleColor": hex(theme.text),
-        "actorBkg": hex(theme.raised),
-        "actorBorder": hex(theme.faint),
-        "actorTextColor": hex(theme.text),
-        "actorLineColor": hex(theme.faint),
-        "signalColor": hex(theme.muted),
-        "signalTextColor": hex(theme.text),
-        "labelBoxBkgColor": hex(theme.raised),
-        "labelBoxBorderColor": hex(theme.faint),
-        "labelTextColor": hex(theme.text),
-        "loopTextColor": hex(theme.text),
-        "noteBkgColor": hex(theme.raised),
-        "noteBorderColor": hex(theme.faint),
-        "noteTextColor": hex(theme.text),
-        "activationBkgColor": hex(theme.canvas),
-        "activationBorderColor": hex(theme.faint),
-        "sequenceNumberColor": hex(theme.text),
-    });
+    let mut vars: serde_json::Map<String, serde_json::Value> = [
+        ("fontFamily", FAMILY.into()),
+        ("fontSize", "14px".into()),
+        ("background", hex(theme.surface).into()),
+        ("primaryColor", hex(theme.raised).into()),
+        ("primaryTextColor", hex(theme.text).into()),
+        ("primaryBorderColor", hex(theme.faint).into()),
+        ("secondaryColor", hex(theme.canvas).into()),
+        ("secondaryTextColor", hex(theme.text).into()),
+        ("secondaryBorderColor", hex(theme.faint).into()),
+        ("tertiaryColor", hex(theme.canvas).into()),
+        ("tertiaryTextColor", hex(theme.text).into()),
+        ("tertiaryBorderColor", hex(theme.faint).into()),
+        ("lineColor", hex(theme.muted).into()),
+        ("textColor", hex(theme.text).into()),
+        ("mainBkg", hex(theme.raised).into()),
+        ("nodeBorder", hex(theme.faint).into()),
+        ("clusterBkg", hex(theme.canvas).into()),
+        ("clusterBorder", hex(theme.faint).into()),
+        ("edgeLabelBackground", hex(theme.surface).into()),
+        ("titleColor", hex(theme.text).into()),
+        ("actorBkg", hex(theme.raised).into()),
+        ("actorBorder", hex(theme.faint).into()),
+        ("actorTextColor", hex(theme.text).into()),
+        ("actorLineColor", hex(theme.faint).into()),
+        ("signalColor", hex(theme.muted).into()),
+        ("signalTextColor", hex(theme.text).into()),
+        ("labelBoxBkgColor", hex(theme.raised).into()),
+        ("labelBoxBorderColor", hex(theme.faint).into()),
+        ("labelTextColor", hex(theme.text).into()),
+        ("loopTextColor", hex(theme.text).into()),
+        ("noteBkgColor", hex(theme.raised).into()),
+        ("noteBorderColor", hex(theme.faint).into()),
+        ("noteTextColor", hex(theme.text).into()),
+        ("activationBkgColor", hex(theme.canvas).into()),
+        ("activationBorderColor", hex(theme.faint).into()),
+        ("sequenceNumberColor", hex(theme.text).into()),
+        ("pieTitleTextColor", hex(theme.text).into()),
+        ("pieLegendTextColor", hex(theme.text).into()),
+        ("pieSectionTextColor", hex(theme.canvas).into()),
+        ("pieStrokeColor", hex(theme.surface).into()),
+        ("pieOuterStrokeColor", hex(theme.surface).into()),
+        ("pieOpacity", "1".into()),
+        ("gridColor", hex(theme.faint).into()),
+        ("taskBkgColor", hex(theme.raised).into()),
+        ("taskBorderColor", hex(theme.faint).into()),
+        ("taskTextColor", hex(theme.text).into()),
+        ("taskTextOutsideColor", hex(theme.text).into()),
+        ("sectionBkgColor", hex(theme.canvas).into()),
+        ("altSectionBkgColor", hex(theme.surface).into()),
+    ]
+    .into_iter()
+    .map(|(name, value): (&str, serde_json::Value)| (name.to_owned(), value))
+    .collect();
+    // Slices need colours that tell apart: the accent, then hues far from it and from each other.
+    let slices = [
+        theme.accent,
+        theme.warning,
+        theme.ansi[4],
+        theme.danger,
+        theme.ansi[5],
+        theme.success,
+        theme.ansi[6],
+        theme.ansi[12],
+        theme.ansi[13],
+        theme.ansi[14],
+        theme.ansi[10],
+        theme.ansi[11],
+    ];
+    for (n, color) in slices.into_iter().enumerate() {
+        vars.insert(format!("pie{}", n + 1), hex(color).into());
+    }
     // Tight spacing: a chain of five nodes has to fit the transcript's column without shrinking
     // its labels to specks.
     let flowchart = serde_json::json!({
@@ -225,6 +264,15 @@ fn with_directive(source: &str, directive: &str) -> String {
         }
     }
     format!("{directive}{source}")
+}
+
+/// `svg` with `ink` as the colour that `currentColor` strokes (the gantt's grid lines among
+/// them) take: the diagram's own style sheet does not reach them, and unset they are black.
+fn with_ink(svg: &str, ink: gpui::Hsla) -> String {
+    match svg.split_once("<svg") {
+        Some((before, after)) => format!("{before}<svg color=\"{}\"{after}", hex(ink)),
+        None => svg.to_owned(),
+    }
 }
 
 /// The diagram's SVG, with the theme's colours and labels measured in the UI font.
@@ -261,7 +309,7 @@ pub(crate) fn render_svg(source: &str, theme: &Theme) -> Result<String, String> 
             ))
             .map_err(|e| e.to_string())?;
         match output {
-            RenderOutput::Svg(Some(svg)) => Ok(svg.svg().to_string()),
+            RenderOutput::Svg(Some(svg)) => Ok(with_ink(svg.svg(), theme.faint)),
             _ => Err("not a drawable diagram".to_owned()),
         }
     })
@@ -329,8 +377,10 @@ pub(crate) struct Diagram {
 /// Where a diagram is.
 #[derive(Clone, Debug)]
 pub(crate) enum Drawing {
-    /// Being drawn off the main thread.
-    Rendering,
+    /// Being drawn off the main thread; `previous` is what was drawn in its place before.
+    Rendering {
+        previous: Option<Arc<Diagram>>,
+    },
     Ready(Arc<Diagram>),
     /// Did not parse, is not a supported type, or is too large.
     Failed,
@@ -347,6 +397,29 @@ type Key = (String, u64, u32);
 
 struct Diagrams {
     slots: Lru<Key, Slot>,
+    /// The latest drawing per place (see [`drawing`]).
+    latest: Lru<u64, Arc<Diagram>>,
+}
+
+impl Diagrams {
+    fn remember(&mut self, place: u64, diagram: &Arc<Diagram>) {
+        if self
+            .latest
+            .peek(&place)
+            .is_some_and(|held| Arc::ptr_eq(held, diagram))
+        {
+            return;
+        }
+        self.latest.insert(place, diagram.clone(), diagram.cost());
+    }
+}
+
+impl Diagram {
+    /// The bytes of its pixels.
+    fn cost(&self) -> usize {
+        let size = self.image.size(0);
+        usize::try_from(size.width.0).unwrap_or(0) * usize::try_from(size.height.0).unwrap_or(0) * 4
+    }
 }
 
 impl gpui::Global for Diagrams {}
@@ -355,6 +428,7 @@ impl Default for Diagrams {
     fn default() -> Self {
         Self {
             slots: Lru::new(CACHE_ENTRIES, CACHE_BYTES),
+            latest: Lru::new(CACHE_ENTRIES, PREVIOUS_BYTES),
         }
     }
 }
@@ -378,18 +452,42 @@ pub(crate) fn theme_key(theme: &Theme) -> u64 {
 
 /// The drawing of `source` in `theme` at `scale`: asks for it off the main thread when nobody
 /// has, and refreshes the windows when it lands.
-pub(crate) fn drawing(source: &str, theme: &Theme, scale: f32, cx: &mut App) -> Drawing {
+///
+/// `slot` names the place the diagram is drawn in (a card of a row), which outlives a change of
+/// its source: while that place redraws, the drawing it last had comes back as `previous`. With no
+/// `slot` the place is the source itself, so a new theme or scale keeps its picture and an edited
+/// source does not.
+pub(crate) fn drawing(
+    source: &str,
+    theme: &Theme,
+    scale: f32,
+    slot: Option<u64>,
+    cx: &mut App,
+) -> Drawing {
+    let place = slot.unwrap_or_else(|| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        hasher.finish()
+    });
     let key: Key = (
         source.to_owned(),
         theme_key(theme),
         (scale * 100.0).round() as u32,
     );
-    if let Some(slot) = cx.default_global::<Diagrams>().slots.get(&key) {
-        return match slot {
-            Slot::Rendering(_) => Drawing::Rendering,
-            Slot::Ready(diagram) => Drawing::Ready(diagram.clone()),
-            Slot::Failed => Drawing::Failed,
-        };
+    let diagrams = cx.default_global::<Diagrams>();
+    match diagrams.slots.get(&key) {
+        Some(Slot::Ready(diagram)) => {
+            let diagram = diagram.clone();
+            diagrams.remember(place, &diagram);
+            return Drawing::Ready(diagram);
+        }
+        Some(Slot::Rendering(_)) => {
+            return Drawing::Rendering {
+                previous: diagrams.latest.get(&place).cloned(),
+            };
+        }
+        Some(Slot::Failed) => return Drawing::Failed,
+        None => {}
     }
     let (text, theme) = (source.to_owned(), *theme);
     let task = cx.spawn({
@@ -406,11 +504,11 @@ pub(crate) fn drawing(source: &str, theme: &Theme, scale: f32, cx: &mut App) -> 
                     let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, raster.png)
                         .to_image_data(cx.svg_renderer())
                         .ok()?;
-                    Some(Diagram {
+                    Some(Arc::new(Diagram {
                         image,
                         width: raster.width,
                         height: raster.height,
-                    })
+                    }))
                 });
                 let diagrams = cx.default_global::<Diagrams>();
                 // Only while the entry is still ours: a cache that dropped it cancelled this.
@@ -418,13 +516,9 @@ pub(crate) fn drawing(source: &str, theme: &Theme, scale: f32, cx: &mut App) -> 
                     done.detach();
                     match made {
                         Some(diagram) => {
-                            let size = diagram.image.size(0);
-                            let cost = usize::try_from(size.width.0).unwrap_or(0)
-                                * usize::try_from(size.height.0).unwrap_or(0)
-                                * 4;
-                            diagrams
-                                .slots
-                                .insert(key, Slot::Ready(Arc::new(diagram)), cost);
+                            diagrams.remember(place, &diagram);
+                            let cost = diagram.cost();
+                            diagrams.slots.insert(key, Slot::Ready(diagram), cost);
                         }
                         None => diagrams.slots.insert(key, Slot::Failed, 0),
                     }
@@ -433,10 +527,11 @@ pub(crate) fn drawing(source: &str, theme: &Theme, scale: f32, cx: &mut App) -> 
             });
         }
     });
-    cx.default_global::<Diagrams>()
-        .slots
-        .insert(key, Slot::Rendering(task), 0);
-    Drawing::Rendering
+    let diagrams = cx.default_global::<Diagrams>();
+    diagrams.slots.insert(key, Slot::Rendering(task), 0);
+    Drawing::Rendering {
+        previous: diagrams.latest.get(&place).cloned(),
+    }
 }
 
 /// Entries held, for the bound's test.
@@ -499,7 +594,7 @@ mod tests {
             "",
             "flowchart LR\n A -->",
             "not a diagram at all",
-            "pie title Pets\n \"Dogs\" : 3",
+            "journey\n  title A day\n  section Work\n    Code: 5: Me",
         ] {
             assert!(render_svg(bad, &dark()).is_err(), "{bad:?}");
         }
@@ -560,15 +655,18 @@ mod tests {
     #[gpui::test]
     async fn a_diagram_is_drawn_off_the_main_thread_and_then_found(cx: &mut gpui::TestAppContext) {
         let theme = dark();
-        let first = cx.update(|cx| drawing(FLOW, &theme, 2.0, cx));
-        assert!(matches!(first, Drawing::Rendering));
-        let again = cx.update(|cx| drawing(FLOW, &theme, 2.0, cx));
-        assert!(matches!(again, Drawing::Rendering), "no second request");
+        let first = cx.update(|cx| drawing(FLOW, &theme, 2.0, None, cx));
+        assert!(matches!(first, Drawing::Rendering { .. }));
+        let again = cx.update(|cx| drawing(FLOW, &theme, 2.0, None, cx));
+        assert!(
+            matches!(again, Drawing::Rendering { .. }),
+            "no second request"
+        );
         cx.executor().allow_parking();
         for _ in 0..200 {
             cx.run_until_parked();
             if matches!(
-                cx.update(|cx| drawing(FLOW, &theme, 2.0, cx)),
+                cx.update(|cx| drawing(FLOW, &theme, 2.0, None, cx)),
                 Drawing::Ready(_)
             ) {
                 break;
@@ -576,15 +674,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(matches!(
-            cx.update(|cx| drawing(FLOW, &theme, 2.0, cx)),
+            cx.update(|cx| drawing(FLOW, &theme, 2.0, None, cx)),
             Drawing::Ready(_)
         ));
-        let bad = cx.update(|cx| drawing("nonsense", &theme, 2.0, cx));
-        assert!(matches!(bad, Drawing::Rendering));
+        let bad = cx.update(|cx| drawing("nonsense", &theme, 2.0, None, cx));
+        assert!(matches!(bad, Drawing::Rendering { .. }));
         for _ in 0..200 {
             cx.run_until_parked();
             if matches!(
-                cx.update(|cx| drawing("nonsense", &theme, 2.0, cx)),
+                cx.update(|cx| drawing("nonsense", &theme, 2.0, None, cx)),
                 Drawing::Failed
             ) {
                 return;
@@ -594,12 +692,154 @@ mod tests {
         panic!("a bad diagram never settled to Failed");
     }
 
+    /// One row per diagram type: its source and a label that must come out in the drawing.
+    const TYPES: [(&str, &str, &str); 5] = [
+        (
+            "class",
+            "classDiagram\n  class Animal {\n    +String name\n    +eat()\n  }\n  Animal <|-- Dog\n",
+            "Animal",
+        ),
+        (
+            "state",
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy : start\n  Busy --> [*]\n",
+            "Busy",
+        ),
+        (
+            "er",
+            "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE : contains\n",
+            "CUSTOMER",
+        ),
+        (
+            "gantt",
+            "gantt\n  title Plan\n  dateFormat YYYY-MM-DD\n  section Build\n  Write it :a1, 2024-01-01, 3d\n  Test it :after a1, 2d\n",
+            "Write it",
+        ),
+        (
+            "pie",
+            "pie title Pets\n  \"Dogs\" : 3\n  \"Cats\" : 2\n  \"Fish\" : 1\n",
+            "Dogs",
+        ),
+    ];
+
+    #[test]
+    fn class_state_er_gantt_and_pie_each_draw() {
+        let theme = dark();
+        for (name, source, label) in TYPES {
+            let svg = render_svg(source, &theme).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                !svg.contains("foreignObject"),
+                "{name}: resvg cannot draw those"
+            );
+            assert!(svg.contains(label), "{name}: the label {label:?} is drawn");
+            assert!(
+                svg.contains(&format!("color=\"{}\"", hex(theme.faint))),
+                "{name}: strokes that follow the text colour take the theme's"
+            );
+            let raster = rasterize(&svg, 2.0).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(raster.width > 50.0 && raster.height > 30.0, "{name}");
+            let pixmap = tiny_skia::Pixmap::decode_png(&raster.png).unwrap();
+            let inked = pixmap.pixels().iter().filter(|p| p.alpha() > 0).count();
+            assert!(inked > 200, "{name}: something is painted, {inked} pixels");
+        }
+    }
+
+    #[test]
+    fn every_diagram_type_is_painted_from_the_theme_so_dark_and_light_differ() {
+        let light = Theme::for_appearance(Appearance::Light);
+        for (name, source, _) in TYPES {
+            assert_ne!(
+                render_svg(source, &dark()).unwrap(),
+                render_svg(source, &light).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    async fn settled_drawing(
+        cx: &mut gpui::TestAppContext,
+        source: &str,
+        theme: &Theme,
+        slot: Option<u64>,
+    ) -> Drawing {
+        cx.executor().allow_parking();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let now = cx.update(|cx| drawing(source, theme, 2.0, slot, cx));
+            if !matches!(now, Drawing::Rendering { .. }) {
+                return now;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("a diagram never settled");
+    }
+
+    #[gpui::test]
+    async fn a_changed_source_keeps_the_previous_drawing_until_the_new_one_lands(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let theme = dark();
+        let slot = Some(7);
+        let Drawing::Ready(first) = settled_drawing(cx, FLOW, &theme, slot).await else {
+            panic!("the first source draws");
+        };
+        // The source changes in the same place: the old drawing is held while the new draws.
+        let Drawing::Rendering { previous } = cx.update(|cx| drawing(SEQ, &theme, 2.0, slot, cx))
+        else {
+            panic!("a new source is drawn off the main thread");
+        };
+        let held = previous.expect("the previous drawing is kept");
+        assert!(Arc::ptr_eq(&held, &first));
+        let Drawing::Ready(second) = settled_drawing(cx, SEQ, &theme, slot).await else {
+            panic!("the new source draws");
+        };
+        assert!(!Arc::ptr_eq(&second, &first));
+        // A third change holds the second, not the first.
+        let Drawing::Rendering { previous } = cx.update(|cx| {
+            drawing(
+                FLOW,
+                &Theme::for_appearance(Appearance::Light),
+                2.0,
+                slot,
+                cx,
+            )
+        }) else {
+            panic!("a new theme is drawn again");
+        };
+        assert!(Arc::ptr_eq(
+            &previous.expect("kept across a theme change"),
+            &second
+        ));
+        // A diagram in another place has no previous drawing to borrow.
+        let Drawing::Rendering { previous } =
+            cx.update(|cx| drawing("flowchart LR\n  X --> Y\n", &theme, 2.0, Some(8), cx))
+        else {
+            panic!("a new diagram is drawn off the main thread");
+        };
+        assert!(previous.is_none());
+        // With no place named, a new theme of the same source keeps its drawing.
+        let Drawing::Ready(plain) = settled_drawing(cx, SEQ, &theme, None).await else {
+            panic!("it draws");
+        };
+        let Drawing::Rendering { previous } = cx.update(|cx| {
+            drawing(
+                SEQ,
+                &Theme::for_appearance(Appearance::Light),
+                2.0,
+                None,
+                cx,
+            )
+        }) else {
+            panic!("a new theme is drawn again");
+        };
+        assert!(Arc::ptr_eq(&previous.expect("kept"), &plain));
+    }
+
     #[gpui::test]
     fn the_diagram_cache_is_bounded(cx: &mut gpui::TestAppContext) {
         let theme = dark();
         cx.update(|cx| {
             for n in 0..(CACHE_ENTRIES + 10) {
-                drawing(&format!("flowchart LR\n A{n} --> B"), &theme, 2.0, cx);
+                drawing(&format!("flowchart LR\n A{n} --> B"), &theme, 2.0, None, cx);
                 assert!(cached(cx) <= CACHE_ENTRIES);
             }
         });

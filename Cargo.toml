@@ -138,7 +138,16 @@ ratex-parser = "=0.1.16"
 ratex-layout = "=0.1.16"
 ratex-types = "=0.1.16"
 ratex-svg = { version = "=0.1.16", features = ["embed-fonts"] }
-merman = { version = "=0.11.0", default-features = false, features = ["svg", "diagram-flowchart", "diagram-sequence"] }
+merman = { version = "=0.11.0", default-features = false, features = [
+    "svg",
+    "diagram-flowchart",
+    "diagram-sequence",
+    "diagram-class",
+    "diagram-state",
+    "diagram-er",
+    "diagram-gantt",
+    "diagram-pie",
+] }
 # The rasteriser GPUI already links, named here so the app draws SVG into pixels itself.
 usvg = "=0.46.0"
 resvg = "=0.46.0"
