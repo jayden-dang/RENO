@@ -1,7 +1,7 @@
 # ROAD-62 [RENOHARNESS] Bots run on Reno's own harness, with every tool call seen by Reno
 
 Assignee: Jayden Đặng
-Status: enhancement, status:in-review
+Status: closed
 Priority: high
 Estimate: 5
 Blocked by: none
@@ -59,3 +59,5 @@ Roadmap: ROAD-62 (MILE-11)
 **2026-11-22.** Building on `feat/reno-harness` (/go run).
 
 **2026-11-23.** Built and in review: https://github.com/jayden-dang/RENO/pull/2 (feat/reno-harness). The pull request lists what the owner must decide.
+
+**2026-11-23.** Merged in f9c5aaf (PR 2) on main. Closed. The decisions listed in the PR description stay open for the owner.
