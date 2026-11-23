@@ -43,6 +43,7 @@ pub(crate) enum Kind {
 pub(crate) enum ToolInputPart {
     File,
     Body,
+    Raw,
 }
 
 /// One of an entry's texts: the `n`th of its kind (a tool group has a step line, output and cut
@@ -233,7 +234,16 @@ pub(crate) type ToolInputs = Vec<Option<ToolInput>>;
 
 pub(crate) struct ToolInput {
     pub(crate) body: Option<String>,
-    pub(crate) diff: bool,
+    pub(crate) raw: Option<String>,
+    pub(crate) card: ToolCard,
+}
+
+pub(crate) enum ToolCard {
+    Command(reno_proto::Seq),
+    Edit(Option<String>),
+    Patch(Vec<Range<usize>>),
+    Read,
+    Other,
 }
 
 impl ToolInput {
@@ -337,6 +347,12 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
                         out.push(Text::plain(
                             Slot::tool_input(n, at, ToolInputPart::Body),
                             body,
+                        ));
+                    }
+                    if let Some(raw) = &input.raw {
+                        out.push(Text::plain(
+                            Slot::tool_input(n, at, ToolInputPart::Raw),
+                            raw,
                         ));
                     }
                 }

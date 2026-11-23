@@ -1139,3 +1139,192 @@ fn selecting_tool_details_copies_the_unicode_file_labels_and_bodies_in_order(
         "the input anchor survives the command result"
     );
 }
+
+fn render_tool_cards(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Store>,
+    Entity<RootView>,
+    &mut VisualTestContext,
+    Entity<RunScreen>,
+) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            transcript_threads: true,
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, reno_client::fake::transcript::RENDER2_RUN);
+    wait_drawn(vcx, |vcx| {
+        screen.read_with(vcx, |screen, _| {
+            matches!(screen.rows().last(), Some(Row::Done { .. }))
+        })
+    });
+    (store, root, vcx, screen)
+}
+
+fn show_render_tool(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>, id: &str) {
+    let fold = crate::transcript::Key(fold_key(vcx, screen, id));
+    screen.update(vcx, |screen, cx| {
+        screen.toggle(fold, cx);
+        let top = screen
+            .rows()
+            .iter()
+            .position(|row| row.key() == fold)
+            .unwrap();
+        screen.scroll_to_row(top, cx);
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("step-{id}")));
+    click(vcx, &format!("step-{id}"));
+}
+
+#[gpui::test]
+fn a_one_file_edit_shows_its_badge_go_to_file_and_inline_diff(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = render_tool_cards(cx);
+    show_render_tool(vcx, &screen, "e1");
+    assert!(painted(vcx, "edit-badge-e1"));
+    assert!(painted(vcx, "edit-diff-e1"));
+    click(vcx, "edit-file-e1");
+    wait_drawn(vcx, |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.files_model()
+                .and_then(|files| files.doc())
+                .is_some_and(|doc| doc.path == "src/supervisor.rs")
+        })
+    });
+}
+
+#[gpui::test]
+fn a_patch_shows_one_hunk_block_per_file(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = render_tool_cards(cx);
+    show_render_tool(vcx, &screen, "p1");
+    assert!(painted(vcx, "patch-file-p1-0"));
+    assert!(painted(vcx, "patch-file-p1-1"));
+    assert!(!painted(vcx, "patch-file-p1-2"));
+}
+
+#[gpui::test]
+fn a_restored_call_shows_no_elapsed_time(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = render_tool_cards(cx);
+    show_render_tool(vcx, &screen, "b1");
+    assert!(painted(vcx, "command-status-b1"));
+    assert!(!painted(vcx, "command-elapsed-b1"));
+}
+
+#[gpui::test]
+fn a_numbered_read_shows_as_a_code_block_and_raw_input_opens(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = render_tool_cards(cx);
+    show_render_tool(vcx, &screen, "r1");
+    assert!(painted(vcx, "read-numbered-r1"));
+    click(vcx, "output-copy-r1");
+    assert!(clipboard(vcx).starts_with("    38\t"));
+    click(vcx, "raw-input-r1");
+    assert!(painted(vcx, "raw-input-body-r1"));
+}
+
+fn show_watched_command(
+    store: &Entity<Store>,
+    vcx: &mut VisualTestContext,
+    run: &reno_proto::RunId,
+) {
+    use reno_proto::{ActionClass, ExecEvent, SessionRef};
+    use std::time::Duration;
+
+    tool_run_summary(vcx, store, run, 4, RunStatus::Queued);
+    push_events(
+        vcx,
+        store,
+        run,
+        [ExecEvent::Resumed {
+            from_attempt: 3,
+            session: SessionRef("watched-session".into()),
+        }],
+    );
+    tool_run_summary(vcx, store, run, 4, RunStatus::Running);
+    push_events(
+        vcx,
+        store,
+        run,
+        [tool(
+            "watched-command",
+            "bash",
+            ActionClass::Command,
+            serde_json::json!({"command":"pwd"}),
+        )],
+    );
+    vcx.executor().advance_clock(Duration::from_millis(1200));
+    push_events(
+        vcx,
+        store,
+        run,
+        [tool_result("watched-command", "/home/fake/workspace")],
+    );
+}
+
+#[gpui::test]
+fn a_command_shows_copy_and_status_and_a_watched_call_its_elapsed_time(cx: &mut TestAppContext) {
+    let (store, _root, vcx, _screen) = render_tool_cards(cx);
+    let run = run_id(reno_client::fake::transcript::RENDER2_RUN);
+    show_watched_command(&store, vcx, &run);
+    assert!(painted(vcx, "command-status-watched-command"));
+    assert!(painted(vcx, "command-elapsed-watched-command"));
+    click(vcx, "command-copy-watched-command");
+    assert_eq!(clipboard(vcx), "pwd");
+}
+
+#[gpui::test]
+fn the_elapsed_time_survives_leaving_and_reopening_the_thread(cx: &mut TestAppContext) {
+    let (store, root, vcx, _screen) = render_tool_cards(cx);
+    let run = reno_client::fake::transcript::RENDER2_RUN;
+    show_watched_command(&store, vcx, &run_id(run));
+    open(vcx, &root, "builder1");
+    open(vcx, &root, run);
+    wait_drawn(vcx, |vcx| painted(vcx, "step-watched-command"));
+    click(vcx, "step-watched-command");
+    assert!(painted(vcx, "command-elapsed-watched-command"));
+}
+
+#[gpui::test]
+fn a_run_seen_queueing_with_no_open_journal_does_not_time_cold_replay(cx: &mut TestAppContext) {
+    use reno_proto::{ActionClass, ExecEvent, SessionRef, StopReason};
+
+    let (store, root, vcx, _screen) = render_tool_cards(cx);
+    let run_name = reno_client::fake::transcript::RENDER2_RUN;
+    let run = run_id(run_name);
+    open(vcx, &root, "builder1");
+    tool_run_summary(vcx, &store, &run, 4, RunStatus::Queued);
+    tool_run_summary(vcx, &store, &run, 4, RunStatus::Running);
+    // The restored event feed can arrive after the runs feed has already confirmed completion.
+    tool_run_summary(vcx, &store, &run, 4, RunStatus::Succeeded);
+    open(vcx, &root, run_name);
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [
+            ExecEvent::Resumed {
+                from_attempt: 3,
+                session: SessionRef("cold".into()),
+            },
+            tool(
+                "cold-command",
+                "bash",
+                ActionClass::Command,
+                serde_json::json!({"command":"pwd"}),
+            ),
+            tool_result("cold-command", "/home/fake/workspace"),
+            ExecEvent::Done {
+                stop: StopReason::Completed,
+                result: None,
+                diagnostic: None,
+                reason: None,
+            },
+        ],
+    );
+    assert!(store.read_with(vcx, |store, _| {
+        store.watched(&run, "cold-command").is_none()
+    }));
+}

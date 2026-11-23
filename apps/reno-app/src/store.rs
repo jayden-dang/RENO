@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use gpui::{AppContext as _, Context, EventEmitter, Task};
@@ -47,15 +47,16 @@ use reno_client::{
 };
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ApprovalDecision, ApprovalId, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
-    FiringOutcome, JobFailure, JobKind, JobPhase, RoutingDecision, RunId, RunStatus, SignedIn,
-    TaskRunParams, ThreadId, WorkspaceDiffResult, WorkspaceInfo,
+    ApprovalDecision, ApprovalId, ExecEvent, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
+    FiringOutcome, JobFailure, JobKind, JobPhase, RoutingDecision, RunId, RunStatus, RunSummary,
+    Seq, SignedIn, TaskRunParams, ThreadId, WorkspaceDiffResult, WorkspaceInfo,
 };
 
 mod signin;
 pub(crate) use signin::{SigninPhase, SigninView};
 
 use crate::summary;
+use crate::ui::markdown_view::lru::Lru;
 use crate::vm;
 use crate::vm::capabilities::Capabilities;
 use crate::vm::changes::{Loaded, Patch, ReviewScope};
@@ -197,8 +198,138 @@ struct RoutingEntry {
     routing: RunRouting,
 }
 
+const WATCHED_CALLS: usize = 1024;
+const WATCHED_ATTEMPTS: usize = 128;
+
+#[derive(Clone, Copy)]
+struct WatchedAttempt {
+    number: u32,
+    begun: bool,
+    finished: bool,
+}
+
+struct WatchedCall {
+    attempt: u32,
+    seq: Seq,
+    start: Instant,
+    end: Option<Instant>,
+}
+
+struct ToolWatch {
+    attempts: Lru<RunId, WatchedAttempt>,
+    calls: Lru<(RunId, String), WatchedCall>,
+    probe: Option<(RunId, u32)>,
+}
+
+impl ToolWatch {
+    fn new() -> Self {
+        Self {
+            attempts: Lru::new(WATCHED_ATTEMPTS, usize::MAX),
+            calls: Lru::new(WATCHED_CALLS, usize::MAX),
+            probe: None,
+        }
+    }
+
+    fn summary(&mut self, summary: &RunSummary, following: bool) {
+        let number = summary.attempt.max(1);
+        if matches!(summary.status, RunStatus::Queued | RunStatus::Leased) {
+            if following
+                && self
+                    .attempts
+                    .peek(&summary.run_id)
+                    .is_none_or(|known| known.number < number)
+            {
+                self.attempts.insert(
+                    summary.run_id.clone(),
+                    WatchedAttempt {
+                        number,
+                        begun: false,
+                        finished: false,
+                    },
+                    0,
+                );
+            }
+        } else if self
+            .attempts
+            .peek(&summary.run_id)
+            .is_some_and(|attempt| attempt.number <= number)
+            && (summary.status.is_terminal()
+                || matches!(
+                    summary.status,
+                    RunStatus::Evaluating | RunStatus::Interrupted
+                ))
+            && let Some(attempt) = self.attempts.remove(&summary.run_id)
+            && attempt.number == number
+            && attempt.begun
+        {
+            // An already observed tool start can still receive its result from the separate
+            // journal feed. The summary closes admission for any new tool starts.
+            self.attempts.insert(
+                summary.run_id.clone(),
+                WatchedAttempt {
+                    finished: true,
+                    ..attempt
+                },
+                0,
+            );
+        }
+    }
+
+    fn event(&mut self, run: &RunId, seq: Seq, event: &ExecEvent, now: Instant) {
+        let Some(attempt) = self.attempts.get(run).copied() else {
+            return;
+        };
+        let attempt_number = match event {
+            ExecEvent::Started { .. } if attempt.number == 1 => Some(1),
+            ExecEvent::Resumed { from_attempt, .. } => Some(from_attempt.saturating_add(1)),
+            _ => None,
+        };
+        if !attempt.finished && attempt_number == Some(attempt.number) {
+            self.attempts.insert(
+                run.clone(),
+                WatchedAttempt {
+                    begun: true,
+                    ..attempt
+                },
+                0,
+            );
+        } else if !attempt.begun {
+            return;
+        } else {
+            match event {
+                ExecEvent::Done { .. } => {
+                    self.attempts.remove(run);
+                }
+                ExecEvent::Tool { id, .. } if !attempt.finished => {
+                    self.calls.insert(
+                        (run.clone(), id.clone()),
+                        WatchedCall {
+                            attempt: attempt.number,
+                            seq,
+                            start: now,
+                            end: None,
+                        },
+                        0,
+                    );
+                }
+                ExecEvent::ToolResult { id, .. } => {
+                    let key = (run.clone(), id.clone());
+                    if let Some(mut watched) = self.calls.remove(&key) {
+                        if watched.attempt == attempt.number && watched.end.is_none() {
+                            watched.end = Some(now);
+                        }
+                        self.calls.insert(key, watched, 0);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 pub(crate) struct Store {
     state: State,
+    tool_watch: ToolWatch,
     /// Keeps the mirror's tasks alive; dropping it cancels them.
     mirror: Option<Mirror>,
     /// The fake daemon of `--fake`, kept alive for as long as the store.
@@ -322,6 +453,7 @@ impl Store {
     pub(crate) fn connecting() -> Self {
         Self {
             state: State::new(),
+            tool_watch: ToolWatch::new(),
             mirror: None,
             fake: None,
             capabilities: Capabilities::REAL,
@@ -885,11 +1017,87 @@ impl Store {
         self.status_seen_at_ms
     }
 
+    /// The local observations of a tool start and result in this app session.
+    pub(crate) fn watched(&self, run: &RunId, call: &str) -> Option<(Instant, Option<Instant>)> {
+        let watched = self
+            .tool_watch
+            .calls
+            .peek(&(run.clone(), call.to_owned()))?;
+        Some((watched.start, watched.end))
+    }
+
+    pub(crate) fn watched_at(
+        &self,
+        run: &RunId,
+        call: &str,
+        seq: Seq,
+    ) -> Option<(Instant, Option<Instant>)> {
+        let watched = self
+            .tool_watch
+            .calls
+            .peek(&(run.clone(), call.to_owned()))?;
+        (watched.seq == seq)
+            .then(|| self.watched(run, call))
+            .flatten()
+    }
+
+    fn watch_tool_updates(&mut self, update: &Update, cx: &mut Context<Self>) {
+        // The frozen event stream has no replay marker. Only record an attempt that the app
+        // observed queue and begin on this connection. An already running attempt can replay
+        // its journal on open, and those Tool/ToolResult receipt times do not measure execution.
+        match update {
+            Update::Runs(runs) => {
+                for run in runs {
+                    self.tool_watch.summary(run, false);
+                }
+                let queued = runs.iter().find(|run| {
+                    self.open.as_ref() == Some(&run.run_id)
+                        && matches!(run.status, RunStatus::Queued | RunStatus::Leased)
+                });
+                if let Some(run) = queued {
+                    self.confirm_tool_watch(run.run_id.clone(), run.attempt, cx);
+                }
+            }
+            Update::RunUpserted(run) => {
+                let following = self.open.as_ref() == Some(&run.run_id);
+                self.tool_watch.summary(run, following);
+            }
+            Update::RunEvent { run, seq, event } => {
+                let next = self
+                    .state
+                    .transcript(run)
+                    .map_or(Seq(1), Transcript::resume_from);
+                if *seq == next {
+                    self.tool_watch
+                        .event(run, *seq, event, cx.background_executor().now());
+                } else if *seq > next {
+                    self.tool_watch.attempts.remove(run);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A fresh run.get taken after following starts can establish that this attempt was still
+    /// queued. A delayed runs.watch snapshot alone cannot establish that.
+    fn confirm_tool_watch(&mut self, run: RunId, attempt: u32, cx: &mut Context<Self>) {
+        let probe = (run.clone(), attempt.max(1));
+        if self.client().is_some() && self.tool_watch.probe.as_ref() != Some(&probe) {
+            self.tool_watch.probe = Some(probe);
+            self.fetch_run(&run, cx);
+        }
+    }
+
     /// Applies one update and notifies only for what changed on screen.
     pub(crate) fn apply(&mut self, update: Update, cx: &mut Context<Self>) -> Changed {
         let before =
             matches!(update, Update::Executors(_)).then(|| self.state.executors().to_vec());
+        self.watch_tool_updates(&update, cx);
         let changed = self.state.apply(update);
+        if changed.connection && self.state.connection() != ConnectionStatus::Connected {
+            self.tool_watch.attempts = Lru::new(WATCHED_ATTEMPTS, usize::MAX);
+            self.tool_watch.probe = None;
+        }
         if let Some(before) = before {
             let events = job_events(
                 &before,
@@ -1511,6 +1719,14 @@ impl Store {
         if let Some(mirror) = &self.mirror {
             let _entered = Tokio::handle(cx).enter();
             mirror.follow_run(run.clone(), from);
+        }
+        if let Some(attempt) = self
+            .state
+            .run(&run)
+            .filter(|summary| matches!(summary.status, RunStatus::Queued | RunStatus::Leased))
+            .map(|summary| summary.attempt)
+        {
+            self.confirm_tool_watch(run.clone(), attempt, cx);
         }
         self.ensure_run(&run, cx);
         self.follow_thread_siblings(&run, cx);
@@ -2558,7 +2774,13 @@ impl Store {
 
     /// `run.get` for a run the window does not hold (opened from a trigger or Home).
     pub(crate) fn ensure_run(&mut self, run: &RunId, cx: &mut Context<Self>) {
-        if self.state.run(run).is_some() || !self.fetching_runs.insert(run.clone()) {
+        if self.state.run(run).is_none() {
+            self.fetch_run(run, cx);
+        }
+    }
+
+    fn fetch_run(&mut self, run: &RunId, cx: &mut Context<Self>) {
+        if !self.fetching_runs.insert(run.clone()) {
             return;
         }
         let id = run.clone();

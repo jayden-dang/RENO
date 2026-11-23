@@ -684,6 +684,7 @@ pub(crate) enum Change {
 #[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
 pub(crate) struct CallInfo<'a> {
     pub(crate) input: &'a reno_proto::ToolCall,
+    pub(crate) call_seq: Seq,
     /// The seq of the event that gave the call its result; none while it has none.
     pub(crate) result_seq: Option<Seq>,
 }
@@ -705,7 +706,7 @@ pub(crate) struct TurnBuilder {
     /// Calls of such groups that were left behind, waiting for their result.
     hidden_calls: std::collections::HashSet<String>,
     input_calls: std::collections::HashSet<String>,
-    calls: std::collections::HashMap<String, (reno_proto::ToolCall, Option<Seq>)>,
+    calls: std::collections::HashMap<String, (reno_proto::ToolCall, Seq, Option<Seq>)>,
     /// The `Done` ended the run's attempt; only a resume goes on.
     ended: bool,
     /// Where the turn that is not finished begins.
@@ -785,9 +786,10 @@ impl TurnBuilder {
     /// The tool call `id` as the events gave it, and where its result came.
     #[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
     pub(crate) fn call(&self, id: &str) -> Option<CallInfo<'_>> {
-        let (input, result_seq) = self.calls.get(id)?;
+        let (input, call_seq, result_seq) = self.calls.get(id)?;
         Some(CallInfo {
             input,
+            call_seq: *call_seq,
             result_seq: *result_seq,
         })
     }
@@ -972,7 +974,7 @@ impl TurnBuilder {
                 if is_input_tool(&call.name) {
                     self.input_calls.insert(id.clone());
                 }
-                self.calls.insert(id.clone(), (call.clone(), None));
+                self.calls.insert(id.clone(), (call.clone(), seq, None));
                 let entry = ToolEntry {
                     id: id.clone(),
                     kind: tool_kind(&call.name),
@@ -988,7 +990,7 @@ impl TurnBuilder {
                 summary,
                 output,
             } => {
-                if let Some((_, result_seq)) = self.calls.get_mut(id)
+                if let Some((_, _, result_seq)) = self.calls.get_mut(id)
                     && result_seq.is_none()
                 {
                     *result_seq = Some(seq);

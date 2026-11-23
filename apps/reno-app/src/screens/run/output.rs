@@ -4,7 +4,6 @@
 //! "Show N more lines" and Copy. A call that failed is drawn in the
 //! danger tone; an output the daemon cut says how big the whole was.
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -15,7 +14,6 @@ use gpui::{
 };
 use reno_client::{Transcript, visuals::VisualImage};
 use reno_proto::{ActionClass, ExecEvent, RunId, RunStatus, RunSummary, Seq, ToolCall, ToolOutput};
-use serde_json::Value;
 
 use super::RunScreen;
 use super::select::Spot;
@@ -31,7 +29,7 @@ use crate::ui::toast;
 use crate::vm::changes as facts;
 use crate::vm::convo;
 use crate::vm::find;
-use crate::vm::selection::{Kind, Slot, ToolInput, ToolInputPart, ToolInputs};
+use crate::vm::selection::{Kind, Slot, ToolCard, ToolInput, ToolInputPart, ToolInputs};
 
 pub(super) type ToolKey = (RunId, u64, String);
 
@@ -42,6 +40,7 @@ pub(super) struct ToolEvents {
     attempt: Option<u32>,
     waiting: Vec<ToolBatch>,
     closed: HashSet<ToolKey>,
+    raw: HashSet<ToolKey>,
 }
 
 struct ToolBatch {
@@ -57,6 +56,7 @@ impl ToolEvents {
             attempt: Some(1),
             waiting: Vec::new(),
             closed: HashSet::new(),
+            raw: HashSet::new(),
         };
         if let Some(transcript) = transcript {
             cursor.advance(transcript);
@@ -133,58 +133,50 @@ impl ToolEvents {
     }
 }
 
-enum ToolDetail<'a> {
-    Command(&'a Value),
-    Patch(&'a str),
-    Edit(Vec<(&'a str, &'a str)>),
-}
-
-impl<'a> ToolDetail<'a> {
-    fn of(call: &'a ToolCall) -> Option<Self> {
-        match call.class {
-            ActionClass::Command => Some(Self::Command(&call.input)),
-            ActionClass::Edit => {
-                if let Some(patch) = ["patch", "diff"]
-                    .iter()
-                    .filter_map(|key| call.input.get(key)?.as_str())
-                    .find(|patch| !patch.trim().is_empty())
-                {
-                    return Some(Self::Patch(patch));
-                }
-
-                let edit = |input: &'a Value| {
-                    let (old, new) = ["old_string", "oldText", "old_text"]
-                        .into_iter()
-                        .zip(["new_string", "newText", "new_text"])
-                        .find_map(|(old, new)| {
-                            Some((input.get(old)?.as_str()?, input.get(new)?.as_str()?))
-                        })?;
-                    (old != new).then_some((old, new))
-                };
-                let edits: Vec<_> = std::iter::once(&call.input)
-                    .chain(
-                        call.input
-                            .get("edits")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .filter_map(edit)
-                    .collect();
-                (!edits.is_empty()).then_some(Self::Edit(edits))
-            }
-            _ => None,
-        }
+fn tool_card(call: &ToolCall, seq: Seq, opened: bool) -> (ToolCard, Option<String>) {
+    if let Some(command) = convo::command_of(call) {
+        return (ToolCard::Command(seq), opened.then_some(command));
     }
-
-    fn body(&self) -> Cow<'_, str> {
-        match self {
-            Self::Command(input) => ["command", "cmd"]
-                .iter()
-                .find_map(|key| input.get(key)?.as_str())
-                .map_or_else(|| Cow::Owned(input.to_string()), Cow::Borrowed),
-            Self::Patch(patch) => Cow::Borrowed(patch),
-            Self::Edit(edits) => Cow::Owned(
+    if let Some(files) = convo::patch_of(call) {
+        if !opened {
+            return (ToolCard::Patch(Vec::new()), None);
+        }
+        let mut text = String::new();
+        let mut ranges = Vec::with_capacity(files.len());
+        for file in files {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let start = text.len();
+            text.push_str(file.path);
+            if !file.hunk.is_empty() {
+                text.push('\n');
+                text.push_str(file.hunk);
+            }
+            ranges.push(start..text.len());
+        }
+        return (ToolCard::Patch(ranges), Some(text));
+    }
+    if call.class == ActionClass::Edit {
+        let edit = convo::edit_of(call);
+        let path = edit
+            .as_ref()
+            .map(|edit| edit.path)
+            .or_else(|| convo::input_path(&call.input))
+            .map(str::to_owned);
+        let edits: Vec<_> = if let Some(edit) = edit {
+            vec![(edit.old, edit.new)]
+        } else {
+            call.input
+                .get("edits")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(convo::edit_pair)
+                .collect()
+        };
+        if !edits.is_empty() {
+            let body = opened.then(|| {
                 edits
                     .iter()
                     .flat_map(|(old, new)| {
@@ -193,9 +185,15 @@ impl<'a> ToolDetail<'a> {
                             .chain(new.lines().map(|line| format!("+ {line}")))
                     })
                     .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+                    .join("\n")
+            });
+            return (ToolCard::Edit(path), body);
         }
+    }
+    if call.class == ActionClass::Read {
+        (ToolCard::Read, None)
+    } else {
+        (ToolCard::Other, None)
     }
 }
 
@@ -237,7 +235,9 @@ impl RunScreen {
                 };
                 let eligible = match call.class {
                     ActionClass::Command => commands,
-                    ActionClass::Edit => edits && ToolDetail::of(call).is_some(),
+                    ActionClass::Edit => {
+                        edits && !matches!(tool_card(call, *seq, false).0, ToolCard::Other)
+                    }
                     _ => false,
                 };
                 if !eligible {
@@ -291,24 +291,46 @@ impl RunScreen {
         let last = next.map_or(events.len(), |next| {
             events.partition_point(|(seq, _)| seq.0.saturating_add(1) < next)
         });
-        let inputs: HashMap<_, _> = events
-            .get(first..last)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|(_, event)| match event {
-                ExecEvent::Tool { id, call } => Some((id.as_str(), call)),
-                _ => None,
-            })
-            .collect();
+        let mut scoped_calls = None;
+        let builder = self
+            .latest
+            .as_ref()
+            .filter(|_| run == self.run)
+            .map(|latest| &latest.builder);
         calls
             .iter()
             .map(|entry| {
-                let detail = ToolDetail::of(inputs.get(entry.id.as_str())?)?;
-                let opened = self.outputs_open.contains(&self.tool_key(key, &entry.id));
-                Some(ToolInput {
-                    diff: !matches!(detail, ToolDetail::Command(_)),
-                    body: opened.then(|| detail.body().into_owned()),
-                })
+                let id = entry.id.as_str();
+                let indexed = builder.and_then(|builder| builder.call(id)).filter(|info| {
+                    info.call_seq.0.saturating_add(1) >= start
+                        && next.is_none_or(|next| info.call_seq.0.saturating_add(1) < next)
+                });
+                let (seq, call) = if let Some(info) = indexed {
+                    (info.call_seq, info.input)
+                } else {
+                    let inputs = scoped_calls.get_or_insert_with(|| {
+                        events
+                            .get(first..last)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|(seq, event)| match event {
+                                ExecEvent::Tool { id, call } => Some((id.as_str(), (*seq, call))),
+                                _ => None,
+                            })
+                            .collect::<HashMap<_, _>>()
+                    });
+                    *inputs.get(id)?
+                };
+                let tool = self.tool_key(key, &entry.id);
+                let opened = self.outputs_open.contains(&tool);
+                let (card, body) = tool_card(call, seq, opened);
+                let raw = (opened
+                    && (self.tool_events.raw.contains(&tool) || matches!(card, ToolCard::Other)))
+                .then(|| {
+                    serde_json::to_string_pretty(&call.input)
+                        .unwrap_or_else(|_| call.input.to_string())
+                });
+                Some(ToolInput { body, raw, card })
             })
             .collect()
     }
@@ -466,9 +488,24 @@ impl RunScreen {
                 ))
             });
         let block = output.filter(|_| shown).and_then(|c| {
-            c.output
-                .as_ref()
-                .map(|out| self.output_block(theme, (key, ln), (at.unwrap_or(0), c), out, cx))
+            let out = c.output.as_ref()?;
+            let numbered = detail.is_some_and(|input| matches!(input.card, ToolCard::Read))
+                && out.text.lines().any(convo::numbered_read_line)
+                && out
+                    .text
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .all(convo::numbered_read_line);
+            let block = self.output_block(theme, (key, ln), (at.unwrap_or(0), c), out, cx);
+            Some(if numbered {
+                let id = c.id.clone();
+                div()
+                    .debug_selector(move || format!("read-numbered-{id}"))
+                    .child(block)
+                    .into_any_element()
+            } else {
+                block
+            })
         });
         let edits = (line.icon == convo::StepIcon::Edit && call.is_none())
             .then(|| range.clone())
@@ -493,17 +530,16 @@ impl RunScreen {
             .flex_col()
             .gap(px(6.0))
             .child(row)
+            .children(
+                detail
+                    .zip(call)
+                    .and_then(|(input, call)| self.edit_badge(theme, key, call, input, cx)),
+            )
             .children(edits)
             .children(images)
             .children(block)
             .children(detail.zip(call.zip(at)).and_then(|(input, (call, n))| {
-                self.tool_detail_block(
-                    theme,
-                    key,
-                    Slot::tool_input(ln, n, ToolInputPart::Body),
-                    &call.id,
-                    input,
-                )
+                shown.then(|| self.tool_card_view(theme, (key, ln, n), call, input, cx))
             }))
             .into_any_element()
     }
@@ -518,13 +554,8 @@ impl RunScreen {
     ) -> AnyElement {
         let id = call.id.clone();
         let label = ToolInput::file_label(call);
-        let body = self.tool_detail_block(
-            theme,
-            key,
-            Slot::tool_input(ln, at, ToolInputPart::Body),
-            &id,
-            input,
-        );
+        let opened = self.outputs_open.contains(&self.tool_key(key, &id));
+        let body = opened.then(|| self.tool_card_view(theme, (key, ln, at), call, input, cx));
         let label_piece = self.text_piece(
             theme,
             Spot {
@@ -566,6 +597,7 @@ impl RunScreen {
                     cx.listener(move |this, _, _, cx| this.toggle_output(key, &id, false, cx)),
                 ),
             )
+            .children(self.edit_badge(theme, key, call, input, cx))
             .children(body)
             .into_any_element()
     }
@@ -792,51 +824,235 @@ impl RunScreen {
             )
             .into_any_element()
     }
-    fn tool_detail_block(
+    fn edit_badge(
         &self,
         theme: &Theme,
         key: Key,
-        slot: Slot,
-        id: &str,
+        call: &ToolEntry,
         input: &ToolInput,
+        cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let text = input.body.as_deref()?;
-        let selector = format!("tool-detail-{id}");
-        let mut base = 0;
+        let ToolCard::Edit(Some(path)) = &input.card else {
+            return None;
+        };
+        let badge = format!("edit-badge-{}", call.id);
+        let file = clean_path(path).or_else(|| {
+            let store = self.store.read(cx);
+            let thread = store.thread_of(&self.run_of(key))?;
+            let root = store.state().thread(&thread)?.worktree.as_deref()?;
+            clean_path(
+                std::path::Path::new(path)
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_str()?,
+            )
+        });
         Some(
             div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .mx(px(12.0))
-                .mb(px(10.0))
-                .px(px(14.0))
-                .py(px(9.0))
-                .rounded(px(10.0))
-                .bg(theme.shell)
-                .font_family(MONO)
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .children(text.split('\n').map(|line| {
-                    let tone = match (input.diff, line.as_bytes().first()) {
-                        (true, Some(b'+')) => theme.success,
-                        (true, Some(b'-')) => theme.danger,
-                        _ => theme.text,
-                    };
-                    let spot = Spot {
-                        key,
-                        slot,
-                        base,
-                        len: line.len(),
-                        total: Some(text.len()),
-                    };
-                    base += line.len() + 1;
+                .debug_selector(move || badge.clone())
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
                     div()
-                        .min_h(px(18.0))
-                        .text_color(tone)
-                        .child(self.text_piece(theme, spot, line, &[]))
+                        .font_family(MONO)
+                        .text_size(px(12.0))
+                        .text_color(theme.muted)
+                        .child(path.clone()),
+                )
+                .children(file.map(|path| {
+                    kit::line_button(
+                        theme,
+                        format!("edit-file-{}", call.id),
+                        None,
+                        "Go to file",
+                        kit::Tone::Quiet,
+                        true,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_file_at(&path, None, window, cx)
+                    }))
                 }))
                 .into_any_element(),
         )
+    }
+
+    fn tool_card_view(
+        &self,
+        theme: &Theme,
+        (key, ln, at): (Key, usize, usize),
+        call: &ToolEntry,
+        input: &ToolInput,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = &call.id;
+        let body_slot = Slot::tool_input(ln, at, ToolInputPart::Body);
+        let body = input.body.as_deref();
+        let details = match (body, &input.card) {
+            (Some(command), ToolCard::Command(seq)) => {
+                let (status, tint) = match &call.outcome {
+                    Outcome::Pending => ("Running".to_owned(), theme.muted),
+                    Outcome::Ok(summary) => (command_status("Succeeded", summary), theme.success),
+                    Outcome::Failed(summary) => (command_status("Failed", summary), theme.danger),
+                };
+                let elapsed = self
+                    .store
+                    .read(cx)
+                    .watched_at(&self.run_of(key), id, *seq)
+                    .and_then(|(start, end)| Some(end?.saturating_duration_since(start)));
+                let status_id = format!("command-status-{id}");
+                let elapsed_id = format!("command-elapsed-{id}");
+                let copied = command.to_owned();
+                div()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .debug_selector(move || status_id.clone())
+                                    .text_color(tint)
+                                    .child(status),
+                            )
+                            .children(elapsed.map(|elapsed| {
+                                div()
+                                    .debug_selector(move || elapsed_id.clone())
+                                    .text_color(theme.muted)
+                                    .child(format!("{:.1}s", elapsed.as_secs_f32()))
+                            }))
+                            .child(
+                                kit::line_button(
+                                    theme,
+                                    format!("command-copy-{id}"),
+                                    None,
+                                    "Copy command",
+                                    kit::Tone::Quiet,
+                                    true,
+                                )
+                                .on_click(move |_, _, cx| {
+                                    copy(cx, copied.clone(), "Command copied")
+                                }),
+                            ),
+                    )
+                    .child(self.tool_detail_block(
+                        theme,
+                        (key, body_slot),
+                        (command, 0..command.len()),
+                        &format!("tool-detail-{id}"),
+                        false,
+                    ))
+                    .into_any_element()
+            }
+            (Some(text), ToolCard::Edit(_)) => {
+                let diff_id = format!("edit-diff-{id}");
+                div()
+                    .debug_selector(move || diff_id.clone())
+                    .child(self.tool_detail_block(
+                        theme,
+                        (key, body_slot),
+                        (text, 0..text.len()),
+                        &format!("tool-detail-{id}"),
+                        true,
+                    ))
+                    .into_any_element()
+            }
+            (Some(text), ToolCard::Patch(files)) => {
+                let detail_id = format!("tool-detail-{id}");
+                div()
+                    .debug_selector(move || detail_id.clone())
+                    .children(files.iter().enumerate().map(|(n, range)| {
+                        self.tool_detail_block(
+                            theme,
+                            (key, body_slot),
+                            (text, range.clone()),
+                            &format!("patch-file-{id}-{n}"),
+                            true,
+                        )
+                    }))
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        };
+        let unknown = matches!(input.card, ToolCard::Other);
+        let open = input.raw.is_some();
+        div()
+            .text_size(px(12.0))
+            .child(details)
+            .when(!unknown, |d| {
+                let id = id.clone();
+                d.child(
+                    kit::line_button(
+                        theme,
+                        format!("raw-input-{id}"),
+                        None,
+                        if open { "Hide raw input" } else { "Raw input" },
+                        kit::Tone::Quiet,
+                        true,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let tool = this.tool_key(key, &id);
+                        if !this.tool_events.raw.remove(&tool) {
+                            this.tool_events.raw.insert(tool);
+                        }
+                        this.reflow(key, cx);
+                    })),
+                )
+            })
+            .children(input.raw.as_deref().map(|raw| {
+                self.tool_detail_block(
+                    theme,
+                    (key, Slot::tool_input(ln, at, ToolInputPart::Raw)),
+                    (raw, 0..raw.len()),
+                    &format!("raw-input-body-{id}"),
+                    false,
+                )
+            }))
+            .into_any_element()
+    }
+
+    fn tool_detail_block(
+        &self,
+        theme: &Theme,
+        (key, slot): (Key, Slot),
+        (text, range): (&str, Range<usize>),
+        selector: &str,
+        diff: bool,
+    ) -> AnyElement {
+        let selector = selector.to_owned();
+        let mut base = range.start;
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .mx(px(12.0))
+            .mb(px(10.0))
+            .px(px(14.0))
+            .py(px(9.0))
+            .rounded(px(10.0))
+            .bg(theme.shell)
+            .font_family(MONO)
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .children(text[range].split('\n').map(|line| {
+                let tone = match (diff, line.as_bytes().first()) {
+                    (true, Some(b'+')) => theme.success,
+                    (true, Some(b'-')) => theme.danger,
+                    _ => theme.text,
+                };
+                let spot = Spot {
+                    key,
+                    slot,
+                    base,
+                    len: line.len(),
+                    total: Some(text.len()),
+                };
+                base += line.len() + 1;
+                div()
+                    .min_h(px(18.0))
+                    .text_color(tone)
+                    .child(self.text_piece(theme, spot, line, &[]))
+            }))
+            .into_any_element()
     }
 }
 
@@ -904,6 +1120,13 @@ impl RenderOnce for ToolImage {
 type Marks = Vec<(std::ops::Range<usize>, bool)>;
 
 /// The lines of `body`, each with the matches that fall in it, as byte ranges of the line.
+fn command_status(status: &str, summary: &Option<String>) -> String {
+    match summary.as_deref().filter(|summary| !summary.is_empty()) {
+        Some(summary) => format!("{status}: {summary}"),
+        None => status.to_owned(),
+    }
+}
+
 fn lines_with<'a>(body: &'a str, hits: &[(std::ops::Range<usize>, bool)]) -> Vec<(&'a str, Marks)> {
     let mut start = 0;
     body.split('\n')
