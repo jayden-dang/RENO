@@ -1250,7 +1250,7 @@ fn panned_nested_table_margins_pick_visible_text_and_keep_existing_endpoints(
     screen.update(vcx, |s, cx| s.copy_markdown(cx));
     let source = clipboard(vcx).unwrap();
     assert!(source.starts_with("nearword ") && source.contains("visibleword"));
-    let saved = screen.read_with(vcx, |s, _| s.selection_anchors());
+    let saved = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
     assert!(!saved.is_empty());
 
     let click_margin = point(table.left() - px(32.0), margin.y);
@@ -1261,7 +1261,10 @@ fn panned_nested_table_margins_pick_visible_text_and_keep_existing_endpoints(
     assert!(
         (glyph(vcx, "visibleword", "visibleword".len() - 1).x - click_margin.x).abs() < px(2.0)
     );
-    assert_eq!(screen.read_with(vcx, |s, _| s.selection_anchors()), saved);
+    assert_eq!(
+        screen.read_with(vcx, |s, cx| s.selection_anchors(cx)),
+        saved
+    );
     assert_eq!(copy_with_the_keyboard(vcx), copied);
     screen.update(vcx, |s, cx| s.copy_markdown(cx));
     assert_eq!(clipboard(vcx).as_deref(), Some(source.as_str()));
@@ -1269,7 +1272,7 @@ fn panned_nested_table_margins_pick_visible_text_and_keep_existing_endpoints(
     press(vcx, click_margin, 1, Modifiers::none());
     assert!(
         screen
-            .read_with(vcx, |s, _| s.selection_anchors())
+            .read_with(vcx, |s, cx| s.selection_anchors(cx))
             .is_empty(),
         "a single click cannot keep the selection hidden underneath the margin"
     );
