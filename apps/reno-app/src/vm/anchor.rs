@@ -415,6 +415,19 @@ impl Builder<'_> {
 
     fn run(&mut self, run: &InlineRun) -> Atom {
         let style = &run.style;
+        if let Some(marker) = &style.task {
+            let src = marker.range.clone();
+            self.cursor = self.cursor.max(src.end);
+            let text = task_box_text(marker.checked).to_owned();
+            return Atom {
+                src,
+                copy: text.clone(),
+                text,
+                gap: Gap::Joined,
+                shape: Shape::Whole,
+                block: None,
+            };
+        }
         if let Some(label) = &style.footnote_ref {
             let src = style
                 .footnote_range
@@ -622,6 +635,10 @@ impl Builder<'_> {
         self.cursor = b;
         Some(a..b)
     }
+}
+
+pub(crate) fn task_box_text(checked: bool) -> &'static str {
+    if checked { "☑ " } else { "☐ " }
 }
 
 pub(crate) fn footnote_marker(label: &str) -> String {

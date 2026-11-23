@@ -17,7 +17,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use reno_client::fake::FakeConfig;
-use reno_client::fake::transcript::{RENDER_REPLY, RENDER_RUN};
+use reno_client::fake::transcript::{RENDER_REPLY, RENDER_RUN, RENDER2_REPLY};
 use reno_client::visuals::{Visual, VisualImage, VisualKind};
 use reno_markdown::BlockTree;
 
@@ -935,4 +935,256 @@ fn a_hoisted_note_only_list_item_leaves_no_marker_in_the_reply(cx: &mut TestAppC
     });
     draw(vcx);
     assert_eq!(note_top(vcx), before);
+}
+
+#[gpui::test]
+fn a_callout_draws_with_its_kind_label(cx: &mut TestAppContext) {
+    let source = format!(
+        "{RENDER2_REPLY}\n> [!TIP]\n> A tip.\n\n> [!WARNING]\n> A warning.\n\n> [!CAUTION]\n> A caution.\n\n> [!IMPORTANT]\n> An important detail.",
+    );
+    let (view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    vcx.simulate_resize(gpui::size(px(800.0), px(1400.0)));
+    for appearance in [Appearance::Dark, Appearance::Light] {
+        view.update(vcx, |probe, cx| {
+            probe.theme = Theme::for_appearance(appearance);
+            cx.notify();
+        });
+        draw(vcx);
+        let theme = Theme::for_appearance(appearance);
+        for (frame, label, color) in [
+            ("md-callout-note", "Note", theme.accent),
+            ("md-callout-tip", "Tip", theme.success),
+            ("md-callout-warning", "Warning", theme.warning),
+            ("md-callout-caution", "Caution", theme.danger),
+            ("md-callout-important", "Important", theme.accent),
+        ] {
+            let frame = vcx.debug_bounds(frame).expect("drawn callout");
+            let label = vcx.debug_bounds(label).expect("drawn kind label");
+            assert!(frame.contains(&label.center()));
+            assert!(
+                label.bottom() < frame.bottom(),
+                "the label precedes the body"
+            );
+            let ink = vcx.update(|window, _| {
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == window.pixel_snap_bounds(frame).scale(window.scale_factor())
+                        && quad.border_color == color
+                        && quad.border_widths.left.0 > 0.0
+                })
+            });
+            assert!(ink, "the {label:?} callout frame uses the role color");
+        }
+    }
+}
+
+#[gpui::test]
+fn a_wide_table_scrolls_sideways(cx: &mut TestAppContext) {
+    let theme = Theme::for_appearance(Appearance::Dark);
+    let (host, registry) = selectable_reply(RENDER2_REPLY);
+    let (_view, vcx) = probe(cx, RENDER2_REPLY, host, Appearance::Dark);
+    let table = vcx
+        .debug_bounds("md-table-scroll")
+        .expect("wide table viewport");
+    let track = vcx
+        .debug_bounds("md-table-scrollbar")
+        .expect("table scrollbar");
+    let thumb = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, _| {
+            let track = track.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| {
+                    quad.background.as_solid() == Some(theme.faint)
+                        && track.contains(&quad.bounds.center())
+                        && quad.bounds.size.width < track.size.width
+                })
+                .expect("visible scrollbar thumb")
+                .bounds
+                .map(|n| px(n.0 / window.scale_factor()))
+        })
+    };
+    let last_cell = || {
+        registry
+            .take()
+            .into_iter()
+            .rfind(|p| p.layout.text().starts_with("Who owns the follow-up"))
+            .expect("rightmost table header")
+    };
+
+    let initial = last_cell().bounds;
+    let left_thumb = thumb(vcx);
+    assert!(
+        initial.right() > table.right(),
+        "keep the column's natural width"
+    );
+    wheel_by(vcx, table.center(), gpui::point(px(0.0), px(-120.0)), false);
+    assert_eq!(last_cell().bounds.left(), initial.left());
+    assert_eq!(thumb(vcx), left_thumb);
+
+    wheel_by(vcx, table.center(), gpui::point(px(-160.0), px(0.0)), false);
+    let wheel_position = last_cell().bounds.left();
+    assert!(wheel_position < initial.left());
+    let moved_thumb = thumb(vcx);
+    assert!(moved_thumb.left() > left_thumb.left());
+
+    let button = gpui::MouseButton::Left;
+    let modifiers = gpui::Modifiers::none();
+    let end = gpui::point(track.right() + px(8.0), moved_thumb.center().y);
+    vcx.simulate_mouse_down(moved_thumb.center(), button, modifiers);
+    vcx.simulate_mouse_move(end, button, modifiers);
+    vcx.simulate_mouse_up(end, button, modifiers);
+    draw(vcx);
+    let last = last_cell();
+    let visible = last.bounds;
+    let text = last.layout.text();
+    assert!(visible.left() < wheel_position, "dragging moves the table");
+    assert!(visible.left() >= table.left() && visible.right() <= table.right());
+    assert!(text.ends_with("past the grace period"));
+    assert_eq!(&RENDER2_REPLY[last.map.source_range(0..text.len())], text);
+    assert_eq!(thumb(vcx).right(), track.right());
+}
+
+fn selectable_reply(source: &str) -> (Host, markdown_view::select::Registry) {
+    let mut stream = Streaming::default();
+    stream.set_text(source);
+    let registry = markdown_view::select::Registry::default();
+    let host =
+        Host::transcript(None, None, None).selectable(Some(Rc::new(markdown_view::SelectHost {
+            registry: registry.clone(),
+            key: crate::transcript::Key(0),
+            anchors: stream.anchors(),
+            selected: None,
+            style: Default::default(),
+        })));
+    (host, registry)
+}
+
+#[gpui::test]
+fn front_matter_draws_as_pairs_and_comments_are_hidden(cx: &mut TestAppContext) {
+    use crate::ui::markdown_view::Marks;
+    use crate::vm::find::Query;
+
+    let source = RENDER2_REPLY.replacen(
+        "title: Bounded shutdown",
+        "title :   \"Böunded: shutdown\"  ",
+        1,
+    );
+    let query = ":   \"Böunded";
+    let match_start = source.find(query).unwrap();
+    let (host, registry) = selectable_reply(&source);
+    let host = host.marked(Some(Rc::new(Marks {
+        matcher: Rc::new(
+            Query {
+                text: query.to_owned(),
+                ..Default::default()
+            }
+            .compile()
+            .unwrap(),
+        ),
+        current: Some(0),
+        current_source: Some(match_start..match_start + query.len()),
+    })));
+    let (_view, vcx) = probe(cx, &source, host, Appearance::Dark);
+    let card = vcx.debug_bounds("md-front-matter").expect("metadata table");
+    let pieces = registry.take();
+    let part = |text: &str| {
+        let piece = pieces.iter().find(|p| p.layout.text() == text).unwrap();
+        assert_eq!(&source[piece.map.source_range(0..text.len())], text);
+        assert!(card.contains(&piece.bounds.center()));
+        piece.bounds
+    };
+    let title = part("title :   ");
+    let value = part("\"Böunded: shutdown\"  ");
+    let status = part("status: ");
+    let draft = part("draft");
+    assert_eq!(title.top(), value.top());
+    assert_eq!(status.top(), draft.top());
+    assert!(title.top() < status.top());
+    assert_eq!(value.left(), draft.left());
+    assert!(title.right() < value.left());
+    assert!(
+        pieces
+            .iter()
+            .all(|p| { !p.layout.text().contains("wider than the column on purpose") })
+    );
+
+    let current = Theme::for_appearance(Appearance::Dark).accent;
+    let highlighted = vcx.update(|window, _| {
+        let frame = card.scale(window.scale_factor());
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                frame.contains(&quad.bounds.center()) && quad.background.as_solid() == Some(current)
+            })
+            .count()
+    });
+    assert_eq!(highlighted, 2, "one current match paints across both cells");
+}
+
+#[gpui::test]
+fn task_items_draw_a_box_that_does_not_toggle(cx: &mut TestAppContext) {
+    let source = RENDER2_REPLY.replacen("[x] Bound", "[X] Bound", 1);
+    let (host, registry) = selectable_reply(&source);
+    let (view, vcx) = probe(cx, &source, host, Appearance::Dark);
+    assert!(painted(vcx, "md-task-box"));
+    let _ = registry.take();
+    draw(vcx);
+
+    let boxes = || {
+        registry
+            .take()
+            .into_iter()
+            .filter_map(|piece| {
+                let text = piece.layout.text();
+                matches!(text.trim_end(), "☑" | "☐").then(|| {
+                    let range = piece.map.source_range(0..text.trim_end().len());
+                    (text, &source[range], piece.bounds)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = boxes();
+    assert_eq!(
+        before
+            .iter()
+            .map(|(text, raw, _)| (text.trim_end(), *raw))
+            .collect::<Vec<_>>(),
+        [("☑", "[X]"), ("☑", "[x]"), ("☐", "[ ]")]
+    );
+    for (_, _, bounds) in &before {
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    }
+    let _ = registry.take();
+    draw(vcx);
+    assert_eq!(
+        boxes(),
+        before,
+        "clicking the checked and unchecked boxes leaves their state unchanged"
+    );
+    assert_eq!(
+        view.read_with(vcx, |probe, _| probe.tree.clone()),
+        tree_of(&source)
+    );
+}
+
+#[test]
+fn an_uppercase_task_marker_copies_the_drawn_state_and_keeps_its_markdown_bytes() {
+    let source = RENDER2_REPLY.replacen("[x] Bound", "[X] Bound", 1);
+    let start = source.find("[X]").unwrap();
+    let range = start..start + "[X]".len();
+    let atoms = crate::vm::anchor::atoms(&source, &tree_of(&source));
+    let marker = atoms
+        .iter()
+        .find(|atom| atom.src == range)
+        .expect("exact checkbox source");
+    assert_eq!(&source[marker.src.clone()], "[X]");
+    assert_eq!(marker.search_source(&(0.."☑".len())), Some(range.clone()));
+    assert_eq!(crate::vm::anchor::copy(&atoms, range), "☑ ");
 }

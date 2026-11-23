@@ -9,20 +9,21 @@
 //! only `http`, `https` and `mailto` URLs open, and a link whose URL is still streaming never
 //! does.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText,
-    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, RenderOnce, SharedString,
-    StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, CursorStyle, FontStyle, FontWeight, HighlightStyle, HitboxBehavior,
+    Hsla, InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, RenderOnce, Role, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+    TextRun, Toggled, UnderlineStyle, Window, canvas, div, point, prelude::*, px, size,
 };
 use reno_client::Client;
 use reno_markdown::mend::PENDING_LINK_URL;
-use reno_markdown::parser::TableAlign;
+use reno_markdown::parser::{Callout, TableAlign};
 use reno_markdown::{Block, BlockTree, IncrementalParser, InlineRun};
 use reno_proto::RunId;
 use reno_syntax::{HighlightKind, HighlightRequest, HighlightSpan, HighlightedDocument};
@@ -36,7 +37,7 @@ use self::select::{Map, Registry, Seg, Track, highlight_runs};
 use super::kit::MONO;
 use super::theme::Theme;
 use crate::transcript::Key;
-use crate::vm::anchor::{Prose, footnote_marker};
+use crate::vm::anchor::{Prose, footnote_marker, task_box_text};
 use crate::vm::selection::{Selection, Slot};
 
 pub(crate) mod chrome;
@@ -327,6 +328,7 @@ struct Env<'a> {
     math: Option<f32>,
     /// How many framed blocks this draw has made so far (their element ids differ by it).
     cards: std::cell::Cell<usize>,
+    tables: Cell<usize>,
     /// How many runs and lines this draw has taken from the reply's atoms, and how many find
     /// hits it has numbered: both in drawing order.
     atom_at: std::cell::Cell<usize>,
@@ -373,6 +375,7 @@ impl RenderOnce for Markdown {
             scale: window.scale_factor(),
             math: typeset.then(|| f32::from(size) * f32::from(percent) / 100.0),
             cards: std::cell::Cell::new(0),
+            tables: Cell::new(0),
             atom_at: std::cell::Cell::new(0),
             hit_at: std::cell::Cell::new(0),
             base,
@@ -546,16 +549,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
             let at = env.take_atoms(1);
             display_math(tex, at, env, cx)
         }
-        Block::BlockQuote { children, .. } => div()
-            .pl(px(12.0))
-            .border_l_2()
-            .border_color(theme.hairline)
-            .text_color(theme.muted)
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .children(body_blocks(children, env, cx))
-            .into_any_element(),
+        Block::BlockQuote { kind, children } => quote(*kind, children, env, cx),
         Block::List {
             ordered_start,
             items,
@@ -569,29 +563,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
                     .enumerate()
                     .filter(|(_, item)| !only_hoisted(item))
                     .map(|(i, item)| {
-                        let marker = match ordered_start {
-                            Some(start) => format!("{}.", start + i as u64),
-                            None => "\u{2022}".to_owned(),
-                        };
-                        div()
-                            .flex()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(px(20.0))
-                                    .text_color(theme.muted)
-                                    .child(marker),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .children(body_blocks(item, env, cx)),
-                            )
+                        list_item(item, ordered_start.map(|start| start + i as u64), env, cx)
                     })
                     .collect::<Vec<_>>(),
             )
@@ -602,31 +574,177 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
             align,
         } => table(header, rows, align, env, cx),
         Block::Footnote { .. } => div().into_any_element(),
-        Block::FrontMatter { lines, .. } => div()
-            .flex()
-            .flex_col()
-            .children(
-                lines
-                    .iter()
-                    .map(|(text, _)| {
-                        inline(
-                            &[InlineRun {
-                                text: text.clone(),
-                                style: Default::default(),
-                            }],
-                            env,
-                            cx,
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .into_any_element(),
+        Block::FrontMatter { lines, .. } => front_matter(lines, env),
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
             .bg(theme.hairline)
             .into_any_element(),
     }
+}
+
+fn list_item(item: &[Block], number: Option<u64>, env: &Env, cx: &mut App) -> AnyElement {
+    let mut body = Vec::new();
+    let (marker, rest) = if let [Block::Paragraph { runs }, rest @ ..] = item
+        && let [first, text @ ..] = runs.as_slice()
+        && let Some(task) = &first.style.task
+    {
+        let marker = task_box(first, task.checked, env, cx);
+        if !text.is_empty() {
+            body.push(paragraph(text, env, cx));
+        }
+        (marker, rest)
+    } else {
+        let marker = number.map_or_else(|| "•".to_owned(), |n| format!("{n}."));
+        (
+            div()
+                .text_color(env.theme.muted)
+                .child(marker)
+                .into_any_element(),
+            item,
+        )
+    };
+    body.extend(body_blocks(rest, env, cx));
+    div()
+        .flex()
+        .gap(px(8.0))
+        .child(div().flex_none().w(px(20.0)).child(marker))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .children(body),
+        )
+        .into_any_element()
+}
+
+fn task_box(run: &InlineRun, checked: bool, env: &Env, cx: &mut App) -> AnyElement {
+    let atom = env.take_atoms(1);
+    let reply = env.host.select.as_ref().map_or(0, |host| host.key.0);
+    div()
+        .id(SharedString::from(format!("md-task-box-{reply}-{atom}")))
+        .debug_selector(|| "md-task-box".to_owned())
+        .role(Role::CheckBox)
+        .aria_label("Task status")
+        .aria_description("Read only")
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .child(inline_at(std::slice::from_ref(run), atom, env, cx))
+        .into_any_element()
+}
+
+fn front_matter(lines: &[(String, Range<usize>)], env: &Env) -> AnyElement {
+    let cells = lines.iter().flat_map(|(line, source)| {
+        let value = line
+            .split_once(':')
+            .map_or("", |(_, value)| value.trim_start());
+        let split = line.len() - value.len();
+        let atom = env.take_atoms(1);
+        let seg = Seg {
+            layout: 0..line.len(),
+            atom,
+        };
+        let finds = find_hits(env, line, 0, Some(atom));
+        let styles = layers(env, &[seg], line.len(), &finds);
+        [0..split, split..line.len()]
+            .into_iter()
+            .enumerate()
+            .map(move |(column, cell)| {
+                let text = &line[cell.clone()];
+                let mut run = env.base.to_run(text.len());
+                if column == 0 {
+                    run.font.weight = FontWeight::SEMIBOLD;
+                    run.color = env.theme.muted;
+                }
+                let marks = styles
+                    .iter()
+                    .filter_map(|(range, style)| {
+                        let start = range.start.max(cell.start);
+                        let end = range.end.min(cell.end);
+                        (start < end).then(|| (start - cell.start..end - cell.start, *style))
+                    })
+                    .collect::<Vec<_>>();
+                let styled = StyledText::new(SharedString::from(text.to_owned()))
+                    .with_runs(highlight_runs(vec![run], &marks));
+                let layout = styled.layout().clone();
+                let element = styled.into_any_element();
+                let element = match &env.host.select {
+                    Some(select) if !text.is_empty() => Track::new(
+                        element,
+                        layout,
+                        (
+                            select.key,
+                            Slot::prose(select.anchors.section_at(atom)),
+                            Map::Linear {
+                                base: source.start + cell.start,
+                                len: text.len(),
+                            },
+                        ),
+                        select.registry.clone(),
+                    )
+                    .into_any_element(),
+                    _ => element,
+                };
+                div().min_w_0().px(px(10.0)).py(px(2.0)).child(element)
+            })
+    });
+    div()
+        .debug_selector(|| "md-front-matter".to_owned())
+        .grid()
+        .grid_cols_max_content(2)
+        .self_start()
+        .max_w_full()
+        .py(px(3.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(env.theme.hairline)
+        .bg(env.theme.surface)
+        .children(cells)
+        .into_any_element()
+}
+
+fn quote(kind: Option<Callout>, children: &[Block], env: &Env, cx: &mut App) -> AnyElement {
+    let theme = env.theme;
+    let quote = div()
+        .pl(px(12.0))
+        .border_l_2()
+        .flex()
+        .flex_col()
+        .gap(px(8.0));
+    let quote = if let Some(kind) = kind {
+        let (selector, label, color) = match kind {
+            Callout::Note => ("md-callout-note", "Note", theme.accent),
+            Callout::Tip => ("md-callout-tip", "Tip", theme.success),
+            Callout::Warning => ("md-callout-warning", "Warning", theme.warning),
+            Callout::Caution => ("md-callout-caution", "Caution", theme.danger),
+            Callout::Important => ("md-callout-important", "Important", theme.accent),
+        };
+        quote
+            .debug_selector(|| selector.to_owned())
+            .border_color(color)
+            .bg(color.opacity(0.07))
+            .rounded(px(6.0))
+            .py(px(8.0))
+            .pr(px(12.0))
+            .child(
+                div()
+                    .debug_selector(|| label.to_owned())
+                    .text_color(color)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label),
+            )
+    } else {
+        quote.border_color(theme.hairline).text_color(theme.muted)
+    };
+    quote
+        .children(body_blocks(children, env, cx))
+        .into_any_element()
 }
 
 /// A paragraph. Where the host draws images, an image splits it: the text before, the picture,
@@ -1251,41 +1369,177 @@ fn table(
     env: &Env,
     cx: &mut App,
 ) -> AnyElement {
-    let theme = env.theme;
-    let mut row = |cells: &[Vec<InlineRun>], head: bool| {
+    let theme = *env.theme;
+    let cells = std::iter::once(header)
+        .chain(rows.iter().map(Vec::as_slice))
+        .enumerate()
+        .flat_map(|(row, cells)| {
+            cells
+                .iter()
+                .enumerate()
+                .map(move |(column, cell)| (row, column, cell))
+        })
+        .map(|(row, column, cell)| {
+            let cell_box = div()
+                .border_b_1()
+                .border_color(theme.hairline)
+                .px(px(10.0))
+                .py(px(6.0))
+                .when(row == 0, |d| d.font_weight(FontWeight::MEDIUM));
+            let cell_box = match align.get(column) {
+                Some(TableAlign::Center) => cell_box.text_center(),
+                Some(TableAlign::Right) => cell_box.text_right(),
+                _ => cell_box,
+            };
+            cell_box.child(inline(cell, env, cx))
+        })
+        .collect::<Vec<_>>();
+    let grid = div()
+        .grid()
+        .grid_cols_max_content(u16::try_from(header.len()).unwrap_or(u16::MAX))
+        .flex_none()
+        .min_w_full()
+        .whitespace_nowrap()
+        .children(cells);
+    let ordinal = env.tables.replace(env.tables.get() + 1);
+    let reply = env.host.select.as_ref().map_or(0, |host| host.key.0);
+    TableViewport {
+        id: format!("md-table-{reply}-{ordinal}").into(),
+        content: grid.into_any_element(),
+        theme,
+    }
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct TableViewport {
+    id: SharedString,
+    content: AnyElement,
+    theme: Theme,
+}
+
+#[derive(Clone, Default)]
+struct TableScroll {
+    handle: ScrollHandle,
+    grab: Rc<Cell<Option<Pixels>>>,
+}
+
+impl RenderOnce for TableViewport {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let scroll = window.with_global_id(self.id.clone().into(), |id, window| {
+            window.with_element_state(id, |state: Option<TableScroll>, _| {
+                let state = state.unwrap_or_default();
+                (state.clone(), state)
+            })
+        });
         div()
-            .flex()
-            .border_b_1()
-            .border_color(theme.hairline)
-            .when(head, |r| r.font_weight(FontWeight::MEDIUM))
-            .children(
-                cells
-                    .iter()
-                    .enumerate()
-                    .map(|(i, cell)| {
-                        let cell_box = div().flex_1().min_w_0().px(px(10.0)).py(px(6.0));
-                        let cell_box = match align.get(i) {
-                            Some(TableAlign::Center) => cell_box.text_center(),
-                            Some(TableAlign::Right) => cell_box.text_right(),
-                            _ => cell_box,
-                        };
-                        cell_box.child(inline(cell, env, cx))
-                    })
-                    .collect::<Vec<_>>(),
+            .w_full()
+            .min_w_0()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(self.theme.hairline)
+            .bg(self.theme.surface)
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(self.id)
+                    .debug_selector(|| "md-table-scroll".to_owned())
+                    .w_full()
+                    .flex()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&scroll.handle)
+                    .child(self.content),
             )
-    };
-    let head = row(header, true);
-    let body: Vec<_> = rows.iter().map(|r| row(r, false)).collect();
+            .child(table_scrollbar(scroll, self.theme))
+    }
+}
+
+fn table_scrollbar(scroll: TableScroll, theme: Theme) -> impl IntoElement {
+    let handle = scroll.handle.clone();
     div()
-        .w_full()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(theme.hairline)
-        .bg(theme.surface)
-        .overflow_hidden()
-        .child(head)
-        .children(body)
-        .into_any_element()
+        .h(px(10.0))
+        .debug_selector(|| "md-table-scrollbar".to_owned())
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    let reach = handle.max_offset().x;
+                    let viewport = f32::from(bounds.size.width);
+                    (reach > px(0.0) && viewport > 0.0).then(|| {
+                        let content = viewport + f32::from(reach);
+                        let (left, width) = super::scrollbar::thumb_geometry(
+                            viewport,
+                            content,
+                            -f32::from(handle.offset().x),
+                        );
+                        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                        (hitbox, left, width, viewport, content)
+                    })
+                },
+                move |bounds, geometry, window, _| {
+                    let Some((hitbox, left, width, viewport, content)) = geometry else {
+                        return;
+                    };
+                    let height = px(3.0);
+                    let track = Bounds {
+                        origin: point(bounds.left(), bounds.center().y - height / 2.0),
+                        size: size(bounds.size.width, height),
+                    };
+                    let thumb = Bounds {
+                        origin: point(track.left() + px(left), track.top()),
+                        size: size(px(width), height),
+                    };
+                    window.paint_quad(gpui::fill(track, theme.hairline));
+                    window.paint_quad(gpui::fill(thumb, theme.faint));
+                    window.set_cursor_style(CursorStyle::ResizeLeftRight, &hitbox);
+
+                    let down = scroll.clone();
+                    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                        if phase.capture()
+                            && event.button == MouseButton::Left
+                            && hitbox.is_hovered(window)
+                        {
+                            let at = event.position.x - bounds.left();
+                            let grab = if (px(left)..=px(left + width)).contains(&at) {
+                                at - px(left)
+                            } else {
+                                px(width / 2.0)
+                            };
+                            down.grab.set(Some(grab));
+                            scroll_table_to_thumb(&down.handle, viewport, content, at - grab);
+                            window.refresh();
+                            cx.stop_propagation();
+                        }
+                    });
+                    let moved = scroll.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase.capture()
+                            && event.pressed_button == Some(MouseButton::Left)
+                            && let Some(grab) = moved.grab.get()
+                        {
+                            let at = event.position.x - bounds.left() - grab;
+                            scroll_table_to_thumb(&moved.handle, viewport, content, at);
+                            window.refresh();
+                            cx.stop_propagation();
+                        }
+                    });
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase.capture()
+                            && event.button == MouseButton::Left
+                            && scroll.grab.take().is_some()
+                        {
+                            cx.stop_propagation();
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+}
+
+fn scroll_table_to_thumb(handle: &ScrollHandle, viewport: f32, content: f32, left: Pixels) {
+    let offset = super::scrollbar::offset_for_thumb_top(viewport, content, f32::from(left));
+    handle.set_offset(point(px(-offset), px(0.0)));
 }
 
 /// The advance of a no-break space in `font`: the unit inline math reserves its width in.
@@ -1375,7 +1629,8 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
             continue;
         }
         let marker = style.footnote_ref.as_deref().map(footnote_marker);
-        let shown = marker.as_deref().unwrap_or(&run.text);
+        let task = style.task.as_ref().map(|task| task_box_text(task.checked));
+        let shown = marker.as_deref().or(task).unwrap_or(&run.text);
         let mut action = style
             .link
             .as_deref()
@@ -1423,7 +1678,12 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
         spans.push(TextRun {
             len: shown.len(),
             font,
-            color: if link { theme.accent } else { base.color },
+            color: match &style.task {
+                Some(task) if task.checked => theme.accent,
+                Some(_) => theme.faint,
+                None if link => theme.accent,
+                None => base.color,
+            },
             background_color: (style.code || style.math).then(|| theme.raised.opacity(0.55)),
             underline: link.then(|| UnderlineStyle {
                 thickness: px(1.0),
@@ -1714,6 +1974,7 @@ mod tests {
                 scale: 1.0,
                 math: None,
                 cards: std::cell::Cell::new(0),
+                tables: Cell::new(0),
                 atom_at: std::cell::Cell::new(0),
                 hit_at: std::cell::Cell::new(0),
             };
@@ -1778,6 +2039,7 @@ mod tests {
                 scale: 1.0,
                 math: None,
                 cards: Default::default(),
+                tables: Default::default(),
                 atom_at: Default::default(),
                 hit_at: Default::default(),
             };
@@ -1838,6 +2100,7 @@ mod tests {
                 scale: 1.0,
                 math: None,
                 cards: Default::default(),
+                tables: Default::default(),
                 atom_at: Default::default(),
                 hit_at: Default::default(),
             };
