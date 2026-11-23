@@ -707,15 +707,15 @@ enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, str
 
 **Depends-on:** Task 16
 
-- [ ] **Step 1:** Add failing tests on the `render2` reply:
+- [x] **Step 1:** Add failing tests on the `render2` reply:
   - `a_callout_draws_with_its_kind_label`;
   - `a_wide_table_scrolls_sideways`;
   - `front_matter_draws_as_pairs_and_comments_are_hidden`;
   - `task_items_draw_a_box_that_does_not_toggle`.
   Run: `cargo test -p reno-app renderers` — expect: fails.
-- [ ] **Step 2:** Implement them with theme tokens: note `accent`, tip `success`, warning `warning`, caution `danger`. Run:
+- [x] **Step 2:** Implement them with theme tokens: note `accent`, tip `success`, warning `warning`, caution `danger`. Run:
   `cargo test -p reno-app` — expect: pass, with the Files tab preview tests unchanged.
-- [ ] **Step 3:** Commit `markdown: callouts, wide tables, front matter and task boxes`.
+- [x] **Step 3:** Commit `markdown: callouts, wide tables, front matter and task boxes`.
 
 _Requirements: TRANSCRIPT-14.1, TRANSCRIPT-14.2, TRANSCRIPT-14.3, TRANSCRIPT-14.4_
 
