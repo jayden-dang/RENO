@@ -254,15 +254,17 @@ impl RunScreen {
                     && calls.iter().any(|entry| &entry.id == id)
                 {
                     let tool = self.tool_key(*key, id);
-                    if !closed.contains(&tool) && !self.outputs_open.contains(&tool) {
-                        self.outputs_open.owner_open(tool);
-                        if Some(*seq) <= previously_seen
-                            && remeasure != Some(*key)
-                            && let Some(ix) = self.items.item_of(*key)
-                        {
-                            self.measure_again(ix);
-                            remeasure = Some(*key);
-                        }
+                    if closed.contains(&tool) {
+                        continue;
+                    }
+                    let became_visible = self.outputs_open.keep_open(tool);
+                    if became_visible
+                        && Some(*seq) <= previously_seen
+                        && remeasure != Some(*key)
+                        && let Some(ix) = self.items.item_of(*key)
+                    {
+                        self.measure_again(ix);
+                        remeasure = Some(*key);
                     }
                 }
             }

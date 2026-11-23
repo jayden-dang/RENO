@@ -818,6 +818,81 @@ fn tool_run_summary(
 }
 
 #[gpui::test]
+fn closing_find_after_running_keeps_only_eligible_deferred_output_open(cx: &mut TestAppContext) {
+    use reno_proto::ActionClass;
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, "architect1");
+    let run = run_id("architect1");
+    let cases = [
+        ("find-before-running", true, "needle eligible"),
+        ("find-while-disabled", false, "needle disabled"),
+        ("find-manual-close", true, "needle closed"),
+    ];
+    for (id, expands, result) in cases {
+        vcx.update(|_, cx| crate::prefs::update(cx, |p| p.expand_new_commands = expands));
+        push_events(
+            vcx,
+            &store,
+            &run,
+            [
+                tool(id, "bash", ActionClass::Command, json!({"command": "pwd"})),
+                tool_result(id, result),
+            ],
+        );
+        assert!(!painted(vcx, &format!("tool-output-{id}")));
+    }
+
+    screen.update_in(vcx, |s, window, cx| s.open_find(window, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("n e e d l e");
+    draw(vcx);
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.find_count_label()),
+        Some("1 of 3".to_owned())
+    );
+    for (id, _, _) in cases {
+        screen.update(vcx, |s, cx| s.find_step(true, cx));
+        draw(vcx);
+        assert!(painted(vcx, &format!("tool-output-{id}")));
+    }
+    click(vcx, "step-find-manual-close");
+    assert!(!painted(vcx, "tool-output-find-manual-close"));
+
+    tool_run_summary(vcx, &store, &run, 1, RunStatus::Running);
+    assert!(painted(vcx, "tool-output-find-before-running"));
+    assert!(painted(vcx, "tool-output-find-while-disabled"));
+    assert!(!painted(vcx, "tool-output-find-manual-close"));
+
+    screen.update_in(vcx, |s, window, cx| s.close_find(window, cx));
+    draw(vcx);
+    assert!(
+        painted(vcx, "tool-output-find-before-running"),
+        "confirmed automatic disclosure survives closing Find"
+    );
+    assert!(!painted(vcx, "tool-output-find-while-disabled"));
+    assert!(!painted(vcx, "tool-output-find-manual-close"));
+
+    screen.update_in(vcx, |s, window, cx| s.open_find(window, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("space e l i g i b l e");
+    draw(vcx);
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.find_count_label()),
+        Some("1 of 1".to_owned())
+    );
+    screen.update(vcx, |s, cx| s.find_step(true, cx));
+    screen.update_in(vcx, |s, window, cx| s.close_find(window, cx));
+    draw(vcx);
+    assert!(painted(vcx, "tool-output-find-before-running"));
+    assert!(!painted(vcx, "tool-output-find-while-disabled"));
+    assert!(!painted(vcx, "tool-output-find-manual-close"));
+}
+
+#[gpui::test]
 fn a_new_command_waits_for_its_running_summary(cx: &mut TestAppContext) {
     use reno_proto::ActionClass;
     use serde_json::json;
