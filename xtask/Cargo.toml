@@ -13,3 +13,4 @@ workspace = true
 reno-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }

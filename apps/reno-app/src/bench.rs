@@ -111,15 +111,14 @@ pub(crate) fn report_scroll(rows: usize, intervals: &[Duration]) {
 
 /// Starts measuring as soon as an on-screen Find strip has opened. The bench daemon waits for
 /// its mock steer so that the burst cannot finish before the window starts drawing it.
+#[allow(clippy::print_stdout)]
 pub(crate) fn find_streaming(
     store: gpui::Entity<crate::store::Store>,
     run: reno_proto::RunId,
     window: &mut gpui::Window,
 ) {
-    window.on_next_frame(move |window, cx| {
-        store.update(cx, |store, cx| {
-            store.steer(run.clone(), "Start the benchmark burst".into(), 0, cx)
-        });
+    window.on_next_frame(move |window, _| {
+        println!("find-ready");
         let started = Instant::now();
         capture_find_frames(store, run, window, started, started, Vec::new());
     });
@@ -136,8 +135,17 @@ fn capture_find_frames(
 ) {
     window.on_next_frame(move |window, cx| {
         let now = Instant::now();
-        intervals.push(now.saturating_duration_since(last));
         let transcript = store.read(cx).state().transcript(&run);
+        if !intervals.is_empty()
+            || transcript.is_some_and(|journal| {
+                journal
+                    .events
+                    .iter()
+                    .any(|(_, event)| matches!(event, reno_proto::ExecEvent::Text { .. }))
+            })
+        {
+            intervals.push(now.saturating_duration_since(last));
+        }
         if let Some(journal) = transcript
             && matches!(
                 journal.events.last(),

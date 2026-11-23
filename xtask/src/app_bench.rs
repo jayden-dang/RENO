@@ -251,6 +251,7 @@ struct AppLog {
     first_frame_ms: Option<f64>,
     first_frame_at: Option<Instant>,
     frames: u64,
+    find_ready: bool,
     scroll_rows: Option<usize>,
     scroll_frames: Option<Vec<f64>>,
 }
@@ -303,6 +304,8 @@ impl App {
                     log.first_frame_at.get_or_insert_with(Instant::now);
                 } else if let Some(n) = app_stats::parse_frames(&line) {
                     log.frames = n;
+                } else if line == "find-ready" {
+                    log.find_ready = true;
                 } else if let Some(n) = app_stats::parse_scroll_rows(&line) {
                     log.scroll_rows = Some(n);
                 } else if let Some(frames) = app_stats::parse_scroll_frames(&line) {
@@ -670,6 +673,31 @@ impl TranscriptScenario {
     }
 }
 
+fn release_find_burst(dir: &Path, run: &str) -> Result<()> {
+    let run = run.parse().map_err(|e| format!("find burst run ID: {e}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let client = reno_client::Client::connect_unix(socket(dir))
+                .await
+                .map_err(|e| e.to_string())?;
+            let summary = client.get_run(&run).await.map_err(|e| e.to_string())?;
+            if summary.executor.as_str() != "mock" {
+                return Err("Find benchmark can only release the isolated mock run".to_owned());
+            }
+            client
+                .steer(&run, "Start the benchmark burst".to_owned())
+                .await
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|_| "timed out releasing the Find benchmark burst".to_owned())?
+    })
+}
+
 fn transcript_scenario(
     app: &Path,
     bins: &Bins,
@@ -694,7 +722,7 @@ fn transcript_scenario(
             ("RENO_BENCH_FIND", "looked at"),
             ("RENO_BENCH_FIND_CAPTURE", "1"),
         ]);
-        // The app opens the strip, then sends the steer that releases FindBurst.
+        // Keep the mock run on its isolated daemon until the app has drawn Find.
         Some(follower)
     } else {
         follower.wait()?;
@@ -704,6 +732,19 @@ fn transcript_scenario(
     let mut started = App::start(app, dir, &options)?;
     if started.first_frame()?.is_none() {
         return Ok(not_drawn(name));
+    }
+    if running.is_some() {
+        let ready = Instant::now();
+        while !started.with_log(|log| log.find_ready) {
+            if let Some(status) = started.child.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!("reno-app exited before opening Find: {status}"));
+            }
+            if ready.elapsed() > FIRST_FRAME_TIMEOUT {
+                return Ok(Scenario::NotDrawn("the Find strip did not draw".into()));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        release_find_burst(dir, &run)?;
     }
     let mut before = None;
     let mut peak = 0.0_f64;
