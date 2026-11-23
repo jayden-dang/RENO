@@ -677,3 +677,129 @@ fn every_key_that_moves_the_view_keeps_the_reading_place(cx: &mut TestAppContext
     in_step(vcx, "shift-pageup", false);
     in_step(vcx, "shift-pagedown", true);
 }
+
+fn bounds_of(vcx: &mut VisualTestContext, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    vcx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("`{selector}` was not painted"))
+}
+
+/// Presses on `from`, moves a little (a drag starts after a few points), then to `to`, and lets go.
+fn drag_thumb(
+    vcx: &mut VisualTestContext,
+    from: gpui::Point<gpui::Pixels>,
+    to: gpui::Point<gpui::Pixels>,
+) {
+    use gpui::{Modifiers, MouseButton, point, px};
+    vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(
+        point(from.x, from.y - px(3.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    draw(vcx);
+    vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    draw(vcx);
+    vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    draw(vcx);
+}
+
+#[gpui::test]
+fn a_tall_transcript_shows_a_scrollbar_beside_the_rail_and_a_drag_scrolls_it(
+    cx: &mut TestAppContext,
+) {
+    use gpui::{point, px};
+    let (_root, vcx, screen) = long_thread(cx);
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "tick-rail") && painted(vcx, "transcript-scrollbar-thumb")
+    });
+    let rail = bounds_of(vcx, "tick-rail");
+    let bar = bounds_of(vcx, "transcript-scrollbar");
+    assert!(bar.left() >= rail.right(), "{bar:?} beside {rail:?}");
+    assert_eq!(bar.top(), rail.top());
+    assert_eq!(bar.bottom(), rail.bottom());
+
+    // The view follows the tail, so the thumb rests at the bottom of its track, and its length is
+    // the share of the transcript in view.
+    let (viewport, end) = viewport_and_longest(vcx, &screen);
+    let thumb = bounds_of(vcx, "transcript-scrollbar-thumb");
+    near(
+        f32::from(thumb.bottom()),
+        f32::from(bar.bottom()),
+        "the thumb at the tail",
+    );
+    near(
+        f32::from(thumb.size.height),
+        (viewport * viewport / (viewport + end)).max(24.0),
+        "the thumb's length",
+    );
+
+    // Dragging the thumb up by half its travel scrolls the transcript by half its length.
+    let travel = f32::from(bar.size.height - thumb.size.height);
+    let from = thumb.center();
+    let to = point(from.x, from.y - px(travel / 2.0));
+    let grabbed_at = f32::from(from.y) - 3.0 - f32::from(thumb.top());
+    let top = f32::from(to.y) - f32::from(bar.top()) - grabbed_at;
+    drag_thumb(vcx, from, to);
+    // One point of the thumb is `end / travel` points of the transcript.
+    let want = top / travel * end;
+    let got = scrolled(vcx, &screen);
+    assert!(
+        (got - want).abs() <= end / travel,
+        "the drag's offset: {got} is not {want}"
+    );
+    near(
+        f32::from(bounds_of(vcx, "transcript-scrollbar-thumb").top() - bar.top()),
+        top,
+        "the thumb under the pointer",
+    );
+    assert!(
+        !following(vcx, &screen),
+        "a drag off the tail stops following"
+    );
+    screen.read_with(vcx, |s, _| {
+        assert!(
+            !s.list.is_scrollbar_dragging(),
+            "the drag ended with the button"
+        );
+        let place = s.saved_place();
+        assert!(place.is_some(), "the view rests off the tail");
+        assert_eq!(
+            s.panel_state().place(),
+            place,
+            "the drag kept the reading place"
+        );
+    });
+
+    // Far past the top of the track is the top of the transcript; far past the bottom, the tail.
+    let thumb = bounds_of(vcx, "transcript-scrollbar-thumb");
+    drag_thumb(
+        vcx,
+        thumb.center(),
+        point(thumb.center().x, bar.top() - px(200.0)),
+    );
+    near(scrolled(vcx, &screen), 0.0, "dragged past the top");
+    let thumb = bounds_of(vcx, "transcript-scrollbar-thumb");
+    drag_thumb(
+        vcx,
+        thumb.center(),
+        point(thumb.center().x, bar.bottom() + px(200.0)),
+    );
+    // Scrolling up measured rows the first layout had only estimated, so the end has moved.
+    let (_, end) = viewport_and_longest(vcx, &screen);
+    near(scrolled(vcx, &screen), end, "dragged past the bottom");
+    assert!(following(vcx, &screen), "the end of the track is the tail");
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.saved_place(), None);
+        assert_eq!(s.panel_state().place(), None, "the tail is no place");
+    });
+}
+
+#[gpui::test]
+fn a_transcript_that_fits_has_no_scrollbar(cx: &mut TestAppContext) {
+    let (_root, vcx, _screen) = open(cx, "reviewer1");
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "message-copy-0") || painted(vcx, "composer")
+    });
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-scrollbar"));
+}

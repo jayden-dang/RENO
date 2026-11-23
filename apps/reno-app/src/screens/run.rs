@@ -36,6 +36,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::lru::Lru;
 use crate::ui::markdown_view::{self, Streaming};
+use crate::ui::scrollbar::{self, scrollbar};
 use crate::ui::theme::{self, Theme};
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
 use crate::vm::convo;
@@ -70,7 +71,7 @@ const CHANGES_EVERY: Duration = Duration::from_secs(1);
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
-/// Width of the tick rail at the column's left edge.
+/// Width of the gutter at the column's left edge: the tick rail, and the scrollbar on its right.
 const RAIL: f32 = 16.0;
 /// A page of the keyboard is this much of the viewport.
 const PAGE_OF_VIEWPORT: f32 = 0.9;
@@ -1310,7 +1311,7 @@ impl RunScreen {
                 .left_0()
                 .top_0()
                 .bottom_0()
-                .w(px(RAIL))
+                .w(px(RAIL - scrollbar::WIDTH))
                 .children(marks.iter().enumerate().map(|(n, mark)| {
                     let ix = mark.row;
                     let lit = current == Some(n);
@@ -1321,7 +1322,7 @@ impl RunScreen {
                         .absolute()
                         .top(gpui::relative(mark.at))
                         .left_0()
-                        .w(px(RAIL))
+                        .w(px(RAIL - scrollbar::WIDTH))
                         .h(px(12.0))
                         .flex()
                         .items_center()
@@ -1633,6 +1634,25 @@ impl Render for RunScreen {
             // After the list, so it is on top of it and takes the clicks.
             .children(self.select_nodes(cx))
             .children(rail)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(RAIL - scrollbar::WIDTH))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(scrollbar::WIDTH))
+                    .child(scrollbar(&self.list, &theme).on_moved({
+                        let screen = cx.weak_entity();
+                        move |_, cx| {
+                            screen
+                                .update(cx, |this, cx| {
+                                    this.note_place(cx);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    })),
+            )
             .children(self.jump_control(&theme, cx));
         let chat = div()
             .id("chat-canvas")

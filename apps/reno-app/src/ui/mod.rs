@@ -17,6 +17,7 @@ pub(crate) mod palette;
 pub(crate) mod restart;
 pub(crate) mod ring;
 pub(crate) mod running_pill;
+pub(crate) mod scrollbar;
 pub(crate) mod setup;
 pub(crate) mod sidebar;
 pub(crate) mod terminal_view;
