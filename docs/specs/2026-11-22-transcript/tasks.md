@@ -606,10 +606,10 @@ enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, str
 
 **Depends-on:** none
 
-- [ ] **Step 1:** Add the test `wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways` beside the kept
+- [x] **Step 1:** Add the test `wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways` beside the kept
   `a_code_block_has_copy_and_wrap_in_its_frame_and_no_header`. Watch it fail once by breaking `toggle_wrap`, then restore.
   Run: `cargo test -p reno-app code_block` — expect: pass after restoring.
-- [ ] **Step 2:** Commit `renderer: wrap is locked by a test`.
+- [x] **Step 2:** Commit `renderer: wrap is locked by a test`.
 
 _Requirements: TRANSCRIPT-7.1, TRANSCRIPT-7.2_
 
