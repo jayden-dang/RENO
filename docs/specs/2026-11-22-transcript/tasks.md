@@ -549,13 +549,13 @@ _Requirements: TRANSCRIPT-10.1, TRANSCRIPT-10.2, TRANSCRIPT-10.3, TRANSCRIPT-10.
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `cmd_scroll_zooms_between_fit_and_two_hundred_percent_and_reset_returns`;
   - `the_re_raster_fires_once_after_the_last_zoom_step`, on the test clock.
   Run: `cargo test -p reno-app zoom` — expect: fails.
-- [ ] **Step 2:** Implement zoom, the readout, the reset, sideways scroll and the re-raster. Run: `cargo test -p reno-app`
+- [x] **Step 2:** Implement zoom, the readout, the reset, sideways scroll and the re-raster. Run: `cargo test -p reno-app`
   — expect: pass.
-- [ ] **Step 3:** Commit `diagrams: cmd-scroll zoom with a readout and reset`.
+- [x] **Step 3:** Commit `diagrams: cmd-scroll zoom with a readout and reset`.
 
 _Requirements: TRANSCRIPT-10.4_
 
