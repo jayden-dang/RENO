@@ -795,14 +795,14 @@ _Requirements: TRANSCRIPT-11.1, TRANSCRIPT-11.2, TRANSCRIPT-11.3, TRANSCRIPT-11.
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_tool_results_image_shows_under_its_call_at_most_384_square_with_go_to_file`;
   - `on_the_real_capabilities_no_tool_image_or_placeholder_shows`.
   Run: `cargo test -p reno-app tool_image` — expect: fails.
-- [ ] **Step 2:** Implement the desk method, its fake seed, the capability and the drawing. Run: `cargo test -p reno-app`
+- [x] **Step 2:** Implement the desk method, its fake seed, the capability and the drawing. Run: `cargo test -p reno-app`
   and `cargo test -p reno-client --features fake` — expect: pass, including the kept 12.1 and 12.3–12.5 tests and
   `protocol_schema_matches_snapshot`.
-- [ ] **Step 3:** Commit `visuals: tool-result images on the mocked desk`.
+- [x] **Step 3:** Commit `visuals: tool-result images on the mocked desk`.
 
 _Requirements: TRANSCRIPT-12.1, TRANSCRIPT-12.2, TRANSCRIPT-12.3, TRANSCRIPT-12.4, TRANSCRIPT-12.5_
 
