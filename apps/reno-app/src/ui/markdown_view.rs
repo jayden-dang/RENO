@@ -1315,6 +1315,7 @@ impl RenderOnce for DiagramViewport {
         } else {
             "Scroll diagram horizontally"
         };
+        let seen = self.column.clone();
         keyboard_horizontal(
             div()
                 .id(id)
@@ -1345,6 +1346,14 @@ impl RenderOnce for DiagramViewport {
                 cx.stop_propagation();
             })
         })
+        .child(
+            gpui::canvas(move |bounds, _, _| seen.set(Some(bounds)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h(px(0.0)),
+        )
         .child(self.content)
     }
 }
@@ -1386,42 +1395,28 @@ fn diagram_in_scroller(
     let natural = diagram.width;
     let keyboard_zoom = zooming.clone();
     let content = div()
+        .debug_selector(|| "md-diagram-zoom".to_owned())
         .w_full()
-        .min_w_0()
-        .child({
-            let seen = column.clone();
-            gpui::canvas(move |bounds, _, _| seen.set(Some(bounds)), |_, _, _, _| {})
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h(px(0.0))
+        .min_w(px(width * min_scale + 2.0 * DIAGRAM_PAD))
+        .flex()
+        .p(px(DIAGRAM_PAD))
+        .child(Picture {
+            image: diagram.image.clone(),
+            width,
+            height,
+            min_scale,
         })
-        .child(
-            div()
-                .debug_selector(|| "md-diagram-zoom".to_owned())
-                .w_full()
-                .min_w(px(width * min_scale + 2.0 * DIAGRAM_PAD))
-                .flex()
-                .p(px(DIAGRAM_PAD))
-                .child(Picture {
-                    image: diagram.image.clone(),
-                    width,
-                    height,
-                    min_scale,
-                })
-                .when_some(zooming, |d, zooming| {
-                    let column = column.clone();
-                    d.on_scroll(move |event, window, cx| {
-                        if !event.modifiers.platform {
-                            return;
-                        }
-                        cx.stop_propagation();
-                        let delta = event.delta.pixel_delta(window.line_height());
-                        zoom_drawing(&zooming, column.get(), natural, f32::from(delta.y), cx);
-                    })
-                }),
-        )
+        .when_some(zooming, |d, zooming| {
+            let column = column.clone();
+            d.on_scroll(move |event, window, cx| {
+                if !event.modifiers.platform {
+                    return;
+                }
+                cx.stop_propagation();
+                let delta = event.delta.pixel_delta(window.line_height());
+                zoom_drawing(&zooming, column.get(), natural, f32::from(delta.y), cx);
+            })
+        })
         .into_any_element();
     DiagramViewport {
         scroll_key: scroll_key as usize,

@@ -1498,6 +1498,20 @@ fn diagram_zoom_can_be_changed_and_reset_with_the_keyboard(cx: &mut TestAppConte
         }
     }
     assert!(painted(vcx, "diagram-zoom-level"));
+    for _ in 0..24 {
+        vcx.simulate_keystrokes("=");
+        draw(vcx);
+    }
+    let before = vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x;
+    vcx.simulate_keystrokes("right");
+    draw(vcx);
+    assert!(vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x < before);
+    vcx.simulate_keystrokes("left");
+    draw(vcx);
+    assert_eq!(
+        vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x,
+        before
+    );
     vcx.simulate_keystrokes("0");
     draw(vcx);
     assert!(!painted(vcx, "diagram-zoom-level"));
