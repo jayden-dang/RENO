@@ -24,6 +24,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO};
 use crate::ui::markdown_view::image::{self, ImageHost, ImageSource, Shown};
 use crate::ui::markdown_view::link::clean_path;
+use crate::ui::markdown_view::lru::Lru;
 use crate::ui::theme::Theme;
 use crate::ui::toast;
 use crate::vm::changes as facts;
@@ -40,7 +41,7 @@ pub(super) struct ToolEvents {
     attempt: Option<u32>,
     waiting: Vec<ToolBatch>,
     closed: HashSet<ToolKey>,
-    raw: HashSet<ToolKey>,
+    raw: Lru<ToolKey, ()>,
 }
 
 struct ToolBatch {
@@ -56,7 +57,7 @@ impl ToolEvents {
             attempt: Some(1),
             waiting: Vec::new(),
             closed: HashSet::new(),
-            raw: HashSet::new(),
+            raw: Lru::new(512, usize::MAX),
         };
         if let Some(transcript) = transcript {
             cursor.advance(transcript);
@@ -325,7 +326,8 @@ impl RunScreen {
                 let opened = self.outputs_open.contains(&tool);
                 let (card, body) = tool_card(call, seq, opened);
                 let raw = (opened
-                    && (self.tool_events.raw.contains(&tool) || matches!(card, ToolCard::Other)))
+                    && (self.tool_events.raw.contains_key(&tool)
+                        || matches!(card, ToolCard::Other)))
                 .then(|| {
                     serde_json::to_string_pretty(&call.input)
                         .unwrap_or_else(|_| call.input.to_string())
@@ -1033,8 +1035,8 @@ impl RunScreen {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let tool = this.tool_key(key, &id);
-                        if !this.tool_events.raw.remove(&tool) {
-                            this.tool_events.raw.insert(tool);
+                        if this.tool_events.raw.remove(&tool).is_none() {
+                            this.tool_events.raw.insert(tool, (), 0);
                         }
                         this.reflow(key, cx);
                     })),
