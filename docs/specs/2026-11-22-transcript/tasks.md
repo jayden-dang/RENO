@@ -578,11 +578,11 @@ and its scrollbar hooks (`set_offset_from_scrollbar`, `max_offset_for_scrollbar`
 
 **Depends-on:** Task 11, Task 13, Task 25
 
-- [ ] **Step 1:** Add the failing test `zooming_a_diagram_or_opening_an_output_while_following_stops_following`.
+- [x] **Step 1:** Add the failing test `zooming_a_diagram_or_opening_an_output_while_following_stops_following`.
   Run: `cargo test -p reno-app stops_following` — expect: fails.
-- [ ] **Step 2:** Route fold, reasoning, output and zoom growth through `pause_following`. Run: `cargo test -p reno-app` —
+- [x] **Step 2:** Route fold, reasoning, output and zoom growth through `pause_following`. Run: `cargo test -p reno-app` —
   expect: pass, including the kept jump-to-latest tests.
-- [ ] **Step 3:** Commit `transcript: any content the owner grows stops following the tail`.
+- [x] **Step 3:** Commit `transcript: any content the owner grows stops following the tail`.
 
 _Requirements: TRANSCRIPT-6.1, TRANSCRIPT-6.2_
 
