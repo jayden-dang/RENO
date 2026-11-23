@@ -295,9 +295,7 @@ impl ToolWatch {
                 },
                 0,
             );
-        } else if !attempt.begun {
-            return;
-        } else {
+        } else if attempt.begun {
             match event {
                 ExecEvent::Done { .. } => {
                     self.attempts.remove(run);

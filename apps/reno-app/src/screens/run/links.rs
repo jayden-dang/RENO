@@ -34,7 +34,7 @@ pub(super) fn result_paths(output: &str) -> Vec<FileTarget> {
         if !token.contains("](")
             && link::looks_like_path(token)
             && let Some(target) = link::file_target(token)
-            && !unique.iter().any(|known: &FileTarget| *known == target)
+            && !unique.contains(&target)
         {
             unique.push(target);
             if unique.len() == RESOURCE_LIMIT {
