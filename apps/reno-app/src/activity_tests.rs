@@ -312,3 +312,89 @@ fn with_the_real_capabilities_none_of_it_shows(cx: &mut TestAppContext) {
     let stopped = store.update(vcx, |s, cx| s.stop_task(&run_id("plan1"), "dev", cx));
     assert!(stopped.is_err(), "nothing to stop without the contract");
 }
+
+fn tool_image_run(
+    cx: &mut TestAppContext,
+) -> (Entity<RootView>, &mut VisualTestContext, Entity<Store>) {
+    crate::tests::one_window_test_at_a_time();
+    cx.update(gpui_tokio::init);
+    let store = cx.new(|cx| {
+        let mut store = Store::connecting();
+        store.start_fake_with(
+            reno_client::fake::FakeConfig {
+                transcript_threads: true,
+                ..crate::tests::instant_script()
+            },
+            cx,
+        );
+        store
+    });
+    let run = run_id("render2");
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| s.state().run(&run).is_some())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    vcx.simulate_resize(gpui::size(gpui::px(1800.0), gpui::px(1500.0)));
+    root.update_in(vcx, |r, window, cx| r.open_run(run.clone(), window, cx));
+    let last = reno_client::fake::transcript::seeded_run_events("render2")
+        .last()
+        .map(|(seq, _)| *seq);
+    wait_drawn(vcx, |vcx| {
+        store.read_with(vcx, |s, _| {
+            s.state()
+                .transcript(&run)
+                .is_some_and(|t| t.highest == last)
+        })
+    });
+    screen(&root, vcx).update(vcx, |s, cx| s.open_all_folds(cx));
+    wait_drawn(vcx, |vcx| painted(vcx, "step-r1"));
+    (root, vcx, store)
+}
+
+#[gpui::test]
+fn a_tool_results_image_shows_under_its_call_at_most_384_square_with_go_to_file(
+    cx: &mut TestAppContext,
+) {
+    let (root, vcx, _store) = tool_image_run(cx);
+    let call = vcx.debug_bounds("step-r1").expect("the read call");
+    assert!(painted(vcx, "tool-image-r1"), "the read call's image");
+    wait_drawn(vcx, |vcx| {
+        vcx.debug_bounds("tool-image-r1")
+            .is_some_and(|image| image.size.height > gpui::px(0.0))
+    });
+    let image = vcx.debug_bounds("tool-image-r1").unwrap();
+    assert!(image.top() >= call.bottom());
+    assert_eq!(image.size, gpui::size(gpui::px(384.0), gpui::px(192.0)));
+    assert!(!painted(vcx, "tool-image-w1"), "only the read has an image");
+
+    click(vcx, "tool-image-file-r1");
+    let run_screen = screen(&root, vcx);
+    assert_eq!(
+        run_screen.read_with(vcx, |s, _| s.panel_state().active().clone()),
+        Surface::Files
+    );
+    assert!(run_screen.read_with(vcx, |s, _| {
+        s.files_model()
+            .and_then(|model| model.doc())
+            .is_some_and(|doc| doc.path == "src/supervisor.rs")
+    }));
+}
+
+#[gpui::test]
+fn on_the_real_capabilities_no_tool_image_or_placeholder_shows(cx: &mut TestAppContext) {
+    let (_root, vcx, store) = tool_image_run(cx);
+    assert!(painted(vcx, "tool-image-r1"), "the fake offers the image");
+    store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
+    draw(vcx);
+    assert!(store.read_with(vcx, |s, _| {
+        s.tool_images(&run_id("render2"), "r1").is_empty()
+    }));
+    assert!(painted(vcx, "step-r1"), "the call stays visible");
+    for selector in [
+        "tool-image-r1",
+        "tool-image-status-r1",
+        "tool-image-file-r1",
+    ] {
+        assert!(!painted(vcx, selector), "{selector} would pretend");
+    }
+}

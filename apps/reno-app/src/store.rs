@@ -40,7 +40,7 @@ use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::places::{AddProjectError, Place, PlaceDesk, Project, ProjectFacts};
 use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
 use reno_client::thread_desk::{ThreadDesk, ThreadEditError, ThreadMarks};
-use reno_client::visuals::{Visual, VisualDesk};
+use reno_client::visuals::{Visual, VisualDesk, VisualImage};
 use reno_client::{
     Changed, Client, ClientError, ConnectionStatus, Connector, Feed, FeedState, Mirror,
     MirrorConfig, Offline, OfflineKind, State, Transcript, Update, Updates,
@@ -528,22 +528,27 @@ impl Store {
         self.fake.as_deref().map(|fake| fake as &dyn ActivityDesk)
     }
 
-    /// The mocked agent-posted visuals (ROAD-33): only where [`Capabilities::agent_visuals`] is
-    /// on. The real daemon has no such contract, so this is `None` there and the transcript
-    /// shows no visuals and no placeholder.
-    #[allow(dead_code)] // The transcript reads visuals through `run_visuals` (ROAD-33 wiring).
     fn visual_desk(&self) -> Option<&dyn VisualDesk> {
-        if !self.capabilities.agent_visuals {
-            return None;
-        }
         self.fake.as_deref().map(|fake| fake as &dyn VisualDesk)
     }
 
     /// The visuals `run` posted, in order; empty when this connection offers none.
     #[allow(dead_code)] // The transcript inserts them after their entry (ROAD-33 wiring).
     pub(crate) fn run_visuals(&self, run: &RunId) -> Vec<Visual> {
+        if !self.capabilities.agent_visuals {
+            return Vec::new();
+        }
         self.visual_desk()
             .map(|desk| desk.visuals(run))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn tool_images(&self, run: &RunId, call: &str) -> Vec<VisualImage> {
+        if !self.capabilities.tool_images {
+            return Vec::new();
+        }
+        self.visual_desk()
+            .map(|desk| desk.tool_images(run, call))
             .unwrap_or_default()
     }
 

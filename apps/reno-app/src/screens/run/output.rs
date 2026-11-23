@@ -4,15 +4,23 @@
 //! block with its first lines, "Show N more lines" and Copy. A call that failed is drawn in the
 //! danger tone; an output the daemon cut says how big the whole was.
 
-use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, prelude::*, px};
-use reno_proto::ToolOutput;
+use std::sync::Arc;
+
+use gpui::{
+    AnyElement, App, ClipboardItem, Context, FontWeight, IntoElement, RenderOnce, SharedString,
+    Window, div, img, prelude::*, px,
+};
+use reno_client::visuals::VisualImage;
+use reno_proto::{ExecEvent, RunId, ToolOutput};
 
 use super::RunScreen;
 use super::select::Spot;
 use crate::transcript::{Key, Outcome, ToolEntry};
 use crate::ui::find as find_look;
 use crate::ui::icon::{Icon, icon};
-use crate::ui::kit::MONO;
+use crate::ui::kit::{self, MONO};
+use crate::ui::markdown_view::image::{self, ImageHost, ImageSource, Shown};
+use crate::ui::markdown_view::link::clean_path;
 use crate::ui::theme::Theme;
 use crate::ui::toast;
 use crate::vm::changes as facts;
@@ -85,15 +93,15 @@ impl RunScreen {
         };
         // A run of edits says only "Edited 2 files": where a match is in a file's path, the line
         // names that file, with the match painted.
-        let edits = (line.icon == convo::StepIcon::Edit)
+        let edit_calls = (line.icon == convo::StepIcon::Edit)
             .then(|| convo::line_calls(calls).get(ln).cloned())
-            .flatten()
-            .and_then(|run| {
-                let verb = line.text.split(' ').next().unwrap_or("Edited");
-                convo::edit_line_with_hits(calls, run, verb, &|n| {
-                    self.find_highlights(key, find::Part::Label(n))
-                })
-            });
+            .flatten();
+        let edits = edit_calls.clone().and_then(|run| {
+            let verb = line.text.split(' ').next().unwrap_or("Edited");
+            convo::edit_line_with_hits(calls, run, verb, &|n| {
+                self.find_highlights(key, find::Part::Label(n))
+            })
+        });
         let (line_text, painted, unpainted) = match edits {
             Some((text, shown)) => (text, shown, Vec::new()),
             None => (line.text.clone(), painted, unpainted),
@@ -182,13 +190,89 @@ impl RunScreen {
                 .as_ref()
                 .map(|out| self.output_block(theme, (key, ln), (at.unwrap_or(0), c), out, cx))
         });
+        let images = if self.store.read(cx).capabilities().tool_images {
+            let run = self.run_of(key);
+            at.map(|n| n..n + 1)
+                .or(edit_calls)
+                .and_then(|range| calls.get(range))
+                .into_iter()
+                .flatten()
+                .filter_map(|call| self.tool_result_images(theme, &run, call, cx))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(6.0))
             .child(row)
+            .children(images)
             .children(block)
             .into_any_element()
+    }
+
+    fn tool_result_images(
+        &self,
+        theme: &Theme,
+        run: &RunId,
+        call: &ToolEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !call.finished() {
+            return None;
+        }
+        let store = self.store.read(cx);
+        let images = store.tool_images(run, &call.id);
+        if images.is_empty() {
+            return None;
+        }
+        let host = ImageHost {
+            run: Some(run.clone()),
+            client: store.client(),
+        };
+        let file = store.state().transcript(run).and_then(|transcript| {
+            let input = transcript
+                .events
+                .iter()
+                .rev()
+                .find_map(|(_, event)| match event {
+                    ExecEvent::Tool { id, call: request } if id == &call.id => Some(&request.input),
+                    _ => None,
+                })?;
+            ["file_path", "path"]
+                .into_iter()
+                .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+                .and_then(clean_path)
+        });
+        Some(
+            div()
+                .ml(px(22.0))
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(6.0))
+                .children(images.into_iter().map(|image| ToolImage {
+                    call: call.id.clone(),
+                    image,
+                    host: host.clone(),
+                    theme: *theme,
+                }))
+                .children(file.map(|path| {
+                    kit::line_button(
+                        theme,
+                        format!("tool-image-file-{}", call.id),
+                        None,
+                        "Go to file",
+                        kit::Tone::Quiet,
+                        true,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_file_at(&path, None, window, cx);
+                    }))
+                }))
+                .into_any_element(),
+        )
     }
 
     fn output_block(
@@ -349,6 +433,66 @@ impl RunScreen {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[derive(IntoElement)]
+struct ToolImage {
+    call: String,
+    image: VisualImage,
+    host: ImageHost,
+    theme: Theme,
+}
+
+impl RenderOnce for ToolImage {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let source = match self.image {
+            VisualImage::Worktree(path) => clean_path(&path).map(ImageSource::Worktree),
+            VisualImage::Data { mime, bytes } => image::raster_format(&mime)
+                .map(|format| ImageSource::Data(Arc::new(gpui::Image::from_bytes(format, bytes)))),
+        };
+        let frame = div().debug_selector({
+            let selector = format!("tool-image-{}", self.call);
+            move || selector.clone()
+        });
+        match source.map_or(Shown::Failed, |source| {
+            image::resolve(&source, &self.host, cx)
+        }) {
+            Shown::Ready(image) => {
+                let Some(picture) = image.use_render_image(window, cx) else {
+                    return frame;
+                };
+                let size = picture.size(0).map(|dimension| dimension.0 as f32);
+                if size.width <= 0.0 || size.height <= 0.0 {
+                    return frame;
+                }
+                let scale = (384.0 / size.width.max(size.height)).min(1.0);
+                frame
+                    .relative()
+                    .w(px(size.width * scale))
+                    .max_w_full()
+                    .aspect_ratio(size.width / size.height)
+                    .child(
+                        img(picture)
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .rounded(px(6.0)),
+                    )
+            }
+            state => frame.child(
+                image::note(
+                    &self.theme,
+                    if matches!(state, Shown::Loading) {
+                        "Loading image\u{2026}"
+                    } else {
+                        "Image not loaded"
+                    },
+                )
+                .debug_selector(move || format!("tool-image-status-{}", self.call)),
+            ),
+        }
     }
 }
 
