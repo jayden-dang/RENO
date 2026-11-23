@@ -82,11 +82,10 @@ const LINE_STEP: f32 = 3.0 * 24.0;
 const PROMPT_AT_TOP: f32 = 48.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
-/// How many items from the top of the view are measured again when the renderers settle.
 /// How far above the end of the transcript the view is held when it stops following there: the
 /// list takes a view within a pixel of the end for the tail.
 const HOLD_ABOVE_END: f32 = 2.0;
-
+/// How many items from the top of the view are measured again when the renderers settle.
 const SETTLED_ITEMS: usize = 40;
 /// Replies whose parsed tree is kept, and replies whose files were looked up, before the least
 /// recently drawn go. A long thread has more replies than that; drawing one again parses it again.
@@ -657,16 +656,19 @@ impl RunScreen {
         }
     }
 
-    /// Stops following the tail, with the item of `key` at the top of the view.
+    /// Stops following the tail, with the item of `key` at the top of the view. Putting an item at
+    /// the top stops following on its own (and the recheck holds the view off the tail when the
+    /// item sits too near the end to reach the top); with no such item the view is held above the
+    /// end where it rests.
     pub(super) fn keep_in_view(&mut self, key: Key, cx: &mut Context<Self>) {
-        self.pause_following(cx);
-        if let Some(ix) = self.items.item_of(key) {
-            self.list.scroll_to(ListOffset {
+        match self.items.item_of(key) {
+            Some(ix) => self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.0),
-            });
-            self.view_moved(cx);
+            }),
+            None => self.hold_above_end(),
         }
+        self.view_moved(cx);
     }
 
     /// What `key` shows changed: a fold's rows come into the list or leave it; anything else is

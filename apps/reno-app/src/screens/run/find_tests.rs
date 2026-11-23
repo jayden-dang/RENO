@@ -694,6 +694,142 @@ fn zooming_a_diagram_or_opening_an_output_while_following_stops_following(cx: &m
     assert!(painted(vcx, "tool-output-z1"), "the step opened its output");
     stops_following_and_keeps_its_place(vcx, &screen, "opening an output");
 }
+
+/// What the stream put near the end of the transcript: a reasoning row that ended, and a closing
+/// line, in one view. The view follows the tail.
+fn reasoning_near_the_tail(
+    vcx: &mut VisualTestContext,
+    store: &Entity<Store>,
+    screen: &Entity<RunScreen>,
+) -> Key {
+    let run = run_id("acp8");
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    stream(
+        vcx,
+        store,
+        &run,
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 0,
+                session: SessionRef("s".into()),
+            },
+            ExecEvent::Reasoning {
+                text: "weighing the mirror".into(),
+            },
+            text("Going with the mirror."),
+        ],
+    );
+    let key = screen.read_with(vcx, |s, _| {
+        s.rows()
+            .iter()
+            .rev()
+            .find_map(|row| match row {
+                Row::Reasoning { key, .. } => Some(*key),
+                _ => None,
+            })
+            .expect("a reasoning row")
+    });
+    wait_for(vcx, "the reasoning row is drawn", |vcx| {
+        painted(vcx, &format!("reasoning-{}", key.0))
+    });
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    key
+}
+
+#[gpui::test]
+fn opening_a_reasoning_row_while_following_stops_following(cx: &mut TestAppContext) {
+    let (store, _root, vcx, screen) = open(cx);
+    let key = reasoning_near_the_tail(vcx, &store, &screen);
+    assert!(!painted(vcx, &format!("reasoning-body-{}", key.0)));
+    click(vcx, &format!("reasoning-{}", key.0));
+    draw(vcx);
+    assert!(
+        painted(vcx, &format!("reasoning-body-{}", key.0)),
+        "the row opened"
+    );
+    stops_following_and_keeps_its_place(vcx, &screen, "opening a reasoning row");
+}
+
+/// A step that printed something, and a closing line: the end of the transcript, in one view,
+/// with the view following the tail.
+fn a_step_near_the_tail(
+    vcx: &mut VisualTestContext,
+    store: &Entity<Store>,
+    screen: &Entity<RunScreen>,
+) {
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    stream(
+        vcx,
+        store,
+        &run_id("acp8"),
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 0,
+                session: SessionRef("s".into()),
+            },
+            ExecEvent::Tool {
+                id: "z1".into(),
+                call: ToolCall::new(
+                    "bash",
+                    serde_json::json!({ "command": "ls" }),
+                    ActionClass::Command,
+                ),
+            },
+            ExecEvent::ToolResult {
+                id: "z1".into(),
+                ok: true,
+                summary: Some("3 files".into()),
+                output: Some(reno_proto::ToolOutput {
+                    text: "a\nb\nc\n".into(),
+                    bytes: 6,
+                    truncated: false,
+                }),
+            },
+            text("That is all."),
+        ],
+    );
+    wait_for(vcx, "the step is drawn", |vcx| painted(vcx, "step-z1"));
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+}
+
+/// What opened sat too near the end to reach the top of the view, so the list took the view back
+/// to the tail on the layout that followed: it is held above the end again, and stays there.
+#[gpui::test]
+fn a_view_the_list_took_back_to_the_tail_is_held_above_the_end_again(cx: &mut TestAppContext) {
+    let (store, _root, vcx, screen) = open(cx);
+    a_step_near_the_tail(vcx, &store, &screen);
+    click(vcx, "step-z1");
+    assert!(
+        screen.read_with(vcx, |s, _| s.is_following_tail()),
+        "the list took the view back to the tail"
+    );
+    for _ in 0..5 {
+        draw(vcx);
+    }
+    assert!(painted(vcx, "tool-output-z1"), "the step opened its output");
+    stops_following_and_keeps_its_place(vcx, &screen, "a view the list took back");
+}
+
+/// Something the owner opened that has no item of its own (a row inside a fold that closed, say):
+/// the view stops following where it rests, at once, and keeps that place.
+#[gpui::test]
+fn keeping_in_view_what_has_no_item_holds_the_view_above_the_end(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    screen.update(vcx, |s, cx| s.keep_in_view(Key(u64::MAX), cx));
+    assert!(
+        !screen.read_with(vcx, |s, _| s.is_following_tail()),
+        "the view stopped following before the list laid out again"
+    );
+    screen.read_with(vcx, |s, _| {
+        let place = s.saved_place();
+        assert!(place.is_some(), "the view rests off the tail");
+        assert_eq!(s.panel_state().place(), place, "the place was kept");
+    });
+}
+
 /// What the owner grew and then left for the tail before the list had laid out is not taken back
 /// off the tail afterwards.
 #[gpui::test]
