@@ -36,7 +36,7 @@ use self::select::{Map, Registry, Seg, Track, highlight_runs};
 use super::kit::MONO;
 use super::theme::Theme;
 use crate::transcript::Key;
-use crate::vm::anchor::{Prose, footnote_marker, front_matter_run};
+use crate::vm::anchor::{Prose, footnote_marker};
 use crate::vm::selection::{Selection, Slot};
 
 pub(crate) mod chrome;
@@ -334,7 +334,7 @@ impl RenderOnce for Markdown {
             .blocks
             .iter()
             .enumerate()
-            .filter(|(_, top)| !matches!(top.block, Block::Footnote { .. }))
+            .filter(|(_, top)| !is_hoisted(&top.block))
             .map(|(at, top)| match &top.block {
                 Block::CodeBlock { code, language }
                     if self.host.streaming && at == last && is_mermaid(language) =>
@@ -442,10 +442,25 @@ fn draw_footnotes(notes: &[Footnote<'_>], env: &Env, cx: &mut App) -> AnyElement
         .into_any_element()
 }
 
+fn is_hoisted(block: &Block) -> bool {
+    match block {
+        Block::Footnote { .. } => true,
+        Block::BlockQuote { children, .. } => only_hoisted(children),
+        Block::List { items, .. } => {
+            !items.is_empty() && items.iter().all(|item| only_hoisted(item))
+        }
+        _ => false,
+    }
+}
+
+fn only_hoisted(blocks: &[Block]) -> bool {
+    !blocks.is_empty() && blocks.iter().all(is_hoisted)
+}
+
 fn body_blocks(nodes: &[Block], env: &Env, cx: &mut App) -> Vec<AnyElement> {
     nodes
         .iter()
-        .filter(|block| !matches!(block, Block::Footnote { .. }))
+        .filter(|block| !is_hoisted(block))
         .map(|node| block(node, env, cx))
         .collect()
 }
@@ -503,6 +518,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
                 items
                     .iter()
                     .enumerate()
+                    .filter(|(_, item)| !only_hoisted(item))
                     .map(|(i, item)| {
                         let marker = match ordered_start {
                             Some(start) => format!("{}.", start + i as u64),
@@ -537,13 +553,22 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
             align,
         } => table(header, rows, align, env, cx),
         Block::Footnote { .. } => div().into_any_element(),
-        Block::FrontMatter { pairs } => div()
+        Block::FrontMatter { lines, .. } => div()
             .flex()
             .flex_col()
             .children(
-                pairs
+                lines
                     .iter()
-                    .map(|(key, value)| inline(&[front_matter_run(key, value)], env, cx))
+                    .map(|(text, _)| {
+                        inline(
+                            &[InlineRun {
+                                text: text.clone(),
+                                style: Default::default(),
+                            }],
+                            env,
+                            cx,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
             .into_any_element(),
@@ -779,12 +804,8 @@ fn find_hits(env: &Env, text: &str, base: usize, atom: Option<usize>) -> Vec<(Ra
             let n = env.hit_at.replace(env.hit_at.get() + 1);
             let current = match source {
                 Some(atom) => marks.current_source.as_ref().is_some_and(|current| {
-                    let src = if atom.is_atomic() {
-                        atom.src.clone()
-                    } else {
-                        atom.src_at(range.start)..atom.src_at(range.end)
-                    };
-                    src.start < current.end && current.start < src.end
+                    atom.search_source(&range)
+                        .is_some_and(|src| src.start < current.end && current.start < src.end)
                 }),
                 None => marks.current == Some(n),
             };
@@ -1626,6 +1647,63 @@ mod tests {
             };
             assert_eq!(match_in("Search in the tail."), [(0..6, false)]);
             assert_eq!(match_in("Search in the note."), [(0..6, true)]);
+        });
+    }
+
+    #[gpui::test]
+    fn only_the_current_occurrence_in_a_footnote_marker_is_highlighted_as_current(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, vcx) = cx.add_window_view(|_, _| gpui::Empty);
+        let theme = Theme::for_appearance(crate::ui::theme::Appearance::Dark);
+        let source = "Read [^banana].\n\n[^banana]: Note.";
+        let start = source.find("banana").unwrap() + 3;
+        let mut stream = Streaming::default();
+        stream.set_text(source);
+        let anchors = stream.anchors();
+        let at = anchors
+            .atoms
+            .iter()
+            .position(|atom| atom.text == "[banana]")
+            .unwrap();
+        let host = Host::transcript(None, None, None)
+            .marked(Some(Rc::new(Marks {
+                matcher: Rc::new(
+                    crate::vm::find::Query {
+                        text: "a".into(),
+                        ..Default::default()
+                    }
+                    .compile()
+                    .unwrap(),
+                ),
+                current: Some(1),
+                current_source: Some(start..start + 1),
+            })))
+            .selectable(Some(Rc::new(SelectHost {
+                registry: Registry::default(),
+                key: Key(0),
+                anchors,
+                selected: None,
+                style: HighlightStyle::default(),
+            })));
+        vcx.update(|window, _| {
+            let env = Env {
+                theme: &theme,
+                host: &host,
+                footnotes: HashMap::new(),
+                footnote_bounds: Rc::default(),
+                window,
+                base: window.text_style(),
+                scale: 1.0,
+                math: None,
+                cards: Default::default(),
+                atom_at: Default::default(),
+                hit_at: Default::default(),
+            };
+            assert_eq!(
+                find_hits(&env, "[banana]", 0, Some(at)),
+                [(2..3, false), (4..5, true), (6..7, false)]
+            );
         });
     }
 

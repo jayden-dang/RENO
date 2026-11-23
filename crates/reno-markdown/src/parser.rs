@@ -41,6 +41,8 @@ pub struct InlineStyle {
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,
     pub footnote_ref: Option<String>,
+    /// Absolute source bytes of the reference, including its Markdown markers.
+    pub footnote_range: Option<Range<usize>>,
     /// Inline TeX math (`$…$`, `\(…\)`): `text` is the TeX source without delimiters.
     pub math: bool,
 }
@@ -93,6 +95,8 @@ pub enum Block {
     },
     FrontMatter {
         pairs: Vec<(String, String)>,
+        /// Original spellings and byte ranges, in pair order.
+        lines: Vec<(String, Range<usize>)>,
     },
     List {
         ordered_start: Option<u64>,
@@ -251,20 +255,31 @@ fn leading_front_matter(source: &str, options: Options) -> Option<TopBlock> {
     if range.start != source.len() - source.trim_start_matches('\u{feff}').len() {
         return None;
     }
-    let mut lines = source[range.clone()].lines();
-    lines.next();
+    let mut lines = source[range.clone()].split_inclusive('\n');
+    let mut at = range.start + lines.next()?.len();
     lines.next_back();
-    let pairs: Vec<_> = lines
-        .filter(|line| !line.starts_with(char::is_whitespace) && !line.starts_with('#'))
-        .filter_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            let key = key.trim();
-            (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
-        })
-        .collect();
+    let mut pairs = Vec::new();
+    let mut spellings = Vec::new();
+    for line in lines {
+        let start = at;
+        at += line.len();
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.starts_with(char::is_whitespace) || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':')
+            && !key.trim().is_empty()
+        {
+            pairs.push((key.trim().to_owned(), value.trim().to_owned()));
+            spellings.push((line.to_owned(), start..start + line.len()));
+        }
+    }
     (!pairs.is_empty()).then_some(TopBlock {
         range,
-        block: Block::FrontMatter { pairs },
+        block: Block::FrontMatter {
+            pairs,
+            lines: spellings,
+        },
     })
 }
 
@@ -481,20 +496,22 @@ fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -
     // A subtree past `MAX_NESTING` collapses to its text: (open starts in it,
     // its range, the text so far).
     let mut collapsing: Option<(usize, Range<usize>, String)> = None;
-    let mut in_html_comment = false;
-    for (event, range) in events {
+    let mut events = events.into_iter().peekable();
+    while let Some((event, range)) = events.next() {
         let event = match event {
             Event::InlineHtml(ref text) if text.starts_with("<!--") => continue,
-            Event::Html(text) if in_html_comment || text.contains("<!--") => {
-                let visible = html_without_comments(&text, &mut in_html_comment);
+            Event::Html(text) => {
+                let mut html = text.into_string();
+                while let Some((Event::Html(text), _)) =
+                    events.next_if(|(e, _)| matches!(e, Event::Html(_)))
+                {
+                    html.push_str(&text);
+                }
+                let visible = html_without_comments(html);
                 if visible.is_empty() {
                     continue;
                 }
                 Event::Html(visible.into())
-            }
-            Event::End(TagEnd::HtmlBlock) => {
-                in_html_comment = false;
-                event
             }
             _ => event,
         };
@@ -626,25 +643,107 @@ fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -
     BlockTree { blocks }
 }
 
-fn html_without_comments(mut text: &str, inside: &mut bool) -> String {
-    let mut visible = String::new();
-    loop {
-        if *inside {
-            let Some((_, rest)) = text.split_once("-->") else {
-                break;
-            };
-            *inside = false;
-            text = rest;
-        }
-        let Some((before, rest)) = text.split_once("<!--") else {
-            visible.push_str(text);
-            break;
-        };
-        visible.push_str(before);
-        *inside = true;
-        text = rest;
+fn html_without_comments(html: String) -> String {
+    if !html.contains("<!--") {
+        return html;
     }
-    visible
+    let mut visible = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    let mut raw_tag: Option<&str> = None;
+    while let Some(next) = html[at..].find('<') {
+        let start = at + next;
+        let tail = &html[start + 1..];
+        at = start + 1;
+
+        if raw_tag.is_none() {
+            if let Some(comment) = tail.strip_prefix("!--") {
+                visible.push_str(&html[copied..start]);
+                copied = start + 4 + comment_end(comment);
+                at = copied;
+                continue;
+            }
+            if let Some(cdata) = tail.strip_prefix("![CDATA[") {
+                at = cdata.find("]]>").map_or(html.len(), |end| start + 12 + end);
+                continue;
+            }
+        }
+
+        let closing = tail.starts_with('/');
+        let tag = tail.strip_prefix('/').unwrap_or(tail);
+        let name = if let Some(raw) = raw_tag {
+            let Some((name, rest)) = tag.split_at_checked(raw.len()) else {
+                continue;
+            };
+            if !closing
+                || !name.eq_ignore_ascii_case(raw)
+                || !rest.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>'))
+            {
+                continue;
+            }
+            name
+        } else {
+            if !tag.starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '!' | '?')) {
+                continue;
+            }
+            let name_end = tag
+                .find(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '<' | '>'))
+                .unwrap_or(tag.len());
+            &tag[..name_end]
+        };
+
+        at = tag_end(&html[at..]).map_or(html.len(), |len| at + len);
+        if closing {
+            raw_tag = None;
+        } else if name.eq_ignore_ascii_case("plaintext") {
+            break;
+        } else if [
+            "script", "style", "textarea", "title", "iframe", "xmp", "noembed", "noframes",
+        ]
+        .iter()
+        .any(|raw| name.eq_ignore_ascii_case(raw))
+        {
+            raw_tag = Some(name);
+        }
+    }
+    if copied == 0 {
+        html
+    } else {
+        visible.push_str(&html[copied..]);
+        visible
+    }
+}
+
+fn comment_end(comment: &str) -> usize {
+    if comment.starts_with('>') {
+        return 1;
+    }
+    if comment.starts_with("->") {
+        return 2;
+    }
+    let bytes = comment.as_bytes();
+    bytes
+        .windows(3)
+        .enumerate()
+        .find_map(|(at, triple)| match triple {
+            b"-->" => Some(at + 3),
+            b"--!" if bytes.get(at + 3) == Some(&b'>') => Some(at + 4),
+            _ => None,
+        })
+        .unwrap_or(bytes.len())
+}
+
+fn tag_end(tag: &str) -> Option<usize> {
+    let mut quote = None;
+    for (at, byte) in tag.bytes().enumerate() {
+        match (quote, byte) {
+            (Some(open), byte) if open == byte => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(at + 1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Insert a backslash before the `$` at each (ascending) offset, so it reads
@@ -1871,6 +1970,7 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             style.footnote_ref = Some(label.into_string());
             let range = range.unwrap();
             let (spelling, _) = cur.spelling(&range);
+            style.footnote_range = Some(range);
             push(runs, spelling.to_owned(), style);
         }
         Event::Start(tag) => {
@@ -2405,8 +2505,12 @@ impl IncrementalParser {
                 }
                 at
             };
-            let start = clamp(top.range.start);
-            top.range = start..clamp(top.range.end).max(start);
+            let clamp_range = |range: &mut Range<usize>| {
+                let start = clamp(range.start);
+                *range = start..clamp(range.end).max(start);
+            };
+            clamp_range(&mut top.range);
+            clamp_footnote_ranges(&mut top.block, &clamp_range);
         }
         self.display_from = self
             .tree
@@ -2415,6 +2519,44 @@ impl IncrementalParser {
             .rposition(|b| b.range.start != start)
             .map_or(0, |i| i + 1);
         self.display_tail = Some(tail);
+    }
+}
+
+fn clamp_footnote_ranges(block: &mut Block, clamp: &impl Fn(&mut Range<usize>)) {
+    let clamp_run = |run: &mut InlineRun| {
+        if let Some(range) = &mut run.style.footnote_range {
+            clamp(range);
+        }
+    };
+    match block {
+        Block::Footnote { range, blocks, .. } => {
+            clamp(range);
+            blocks
+                .iter_mut()
+                .for_each(|child| clamp_footnote_ranges(child, clamp));
+        }
+        Block::BlockQuote { children, .. } => {
+            children
+                .iter_mut()
+                .for_each(|child| clamp_footnote_ranges(child, clamp));
+        }
+        Block::List { items, .. } => {
+            items
+                .iter_mut()
+                .flatten()
+                .for_each(|child| clamp_footnote_ranges(child, clamp));
+        }
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+            runs.iter_mut().for_each(clamp_run)
+        }
+        Block::Table { header, rows, .. } => {
+            header
+                .iter_mut()
+                .flatten()
+                .chain(rows.iter_mut().flatten().flatten())
+                .for_each(clamp_run);
+        }
+        _ => {}
     }
 }
 
@@ -2560,7 +2702,7 @@ mod tests {
     fn yaml_front_matter_parses_as_pairs() {
         let source = "---\r\ntitle: Bounded shutdown\r\n# internal comment\r\nstatus: draft: ready\r\n---\r\n\r\nReply.\r\n";
         let tree = parse_full(source);
-        let Block::FrontMatter { pairs } = &tree.blocks[0].block else {
+        let Block::FrontMatter { pairs, .. } = &tree.blocks[0].block else {
             panic!("expected leading metadata");
         };
         assert_eq!(
@@ -2626,6 +2768,50 @@ mod tests {
             })
             .collect();
         assert_eq!(text, ["Before  after", "<span>kept</span>"]);
+    }
+
+    #[test]
+    fn actual_html_comments_are_hidden_without_changing_raw_tag_literals() {
+        let source = "<div title=\"<!--\">Visible<!-- drop --> text</div>\n\n<script>const marker = '<!--';</script>\n\n<div title=\"first\n<!-- still an attribute\">There</div>\n\n<script>\n<!-- still script text -->\n</script>\n";
+        let tree = parse_full(source);
+        let text: Vec<String> = tree
+            .blocks
+            .iter()
+            .map(|top| match &top.block {
+                Block::Paragraph { runs } => runs.iter().map(|run| run.text.as_str()).collect(),
+                other => panic!("expected raw HTML as text, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "<div title=\"<!--\">Visible text</div>",
+                "<script>const marker = '<!--';</script>",
+                "<div title=\"first\n<!-- still an attribute\">There</div>",
+                "<script>\n<!-- still script text -->\n</script>",
+            ]
+        );
+    }
+
+    #[test]
+    fn mended_note_ranges_stop_at_the_real_source_end() {
+        for source in [
+            "See [^end].\n\n[^end]: Read **more",
+            "> [^end]: Read **more",
+        ] {
+            let tree = stream(1, source).display_tree();
+            let last = &tree.blocks.last().unwrap().block;
+            let note = match last {
+                Block::BlockQuote { children, .. } => &children[0],
+                other => other,
+            };
+            let Block::Footnote { range, blocks, .. } = note else {
+                panic!("expected a note, got {note:?}");
+            };
+            assert!(matches!(blocks.as_slice(), [Block::Paragraph { runs }]
+                if runs.iter().any(|run| run.text == "more" && run.style.bold)));
+            assert_eq!(&source[range.clone()], "[^end]: Read **more");
+        }
     }
 
     #[test]

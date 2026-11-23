@@ -918,3 +918,21 @@ fn hiding_an_inline_comment_preserves_the_visible_texts_source_anchors(cx: &mut 
     assert_eq!(range.start, source.rfind("after").unwrap());
     assert_eq!(&source[range], "after");
 }
+
+#[gpui::test]
+fn a_hoisted_note_only_list_item_leaves_no_marker_in_the_reply(cx: &mut TestAppContext) {
+    let (view, vcx) = probe(
+        cx,
+        "Use [^a].\n\n[^a]: Note.",
+        Host::preview(),
+        Appearance::Dark,
+    );
+    let note_top = |vcx: &mut VisualTestContext| vcx.debug_bounds("md-footnotes").unwrap().top();
+    let before = note_top(vcx);
+    view.update(vcx, |probe, cx| {
+        probe.tree = tree_of("Use [^a].\n\n- [^a]: Note.");
+        cx.notify();
+    });
+    draw(vcx);
+    assert_eq!(note_top(vcx), before);
+}

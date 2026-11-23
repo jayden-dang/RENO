@@ -12,7 +12,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 
-use reno_markdown::{Block, BlockTree, InlineRun, InlineStyle};
+use reno_markdown::{Block, BlockTree, InlineRun};
 
 use crate::links;
 use crate::ui::markdown_view::link::file_target;
@@ -50,6 +50,8 @@ enum Shape {
     /// Drawn text with source bytes skipped or changed (a soft break, an escape): pairs of
     /// `(source offset, text offset)` at each character.
     Walk(Vec<(usize, usize)>),
+    /// A reference selects as a unit, but find maps each displayed character.
+    Footnote(Vec<(usize, usize)>),
     /// Not text: a formula, an image, a diagram. Selected whole.
     Whole,
 }
@@ -90,9 +92,9 @@ impl Atom {
         self.shape == Shape::Exact
     }
 
-    /// A formula, an image or a diagram: selected whole.
+    /// Whether selection takes the atom as a whole.
     pub(crate) fn is_atomic(&self) -> bool {
-        self.shape == Shape::Whole
+        matches!(self.shape, Shape::Whole | Shape::Footnote(_))
     }
 
     /// The source byte for the drawn byte `at` of this run. On an atomic run, the nearer edge.
@@ -103,13 +105,29 @@ impl Atom {
                 .iter()
                 .find(|(_, t)| *t >= at)
                 .map_or(self.src.end, |(s, _)| *s),
-            Shape::Whole => {
+            Shape::Whole | Shape::Footnote(_) => {
                 if at * 2 < self.text.len().max(1) {
                     self.src.start
                 } else {
                     self.src.end
                 }
             }
+        }
+    }
+
+    pub(crate) fn search_source(&self, drawn: &Range<usize>) -> Option<Range<usize>> {
+        match &self.shape {
+            Shape::Footnote(offsets) if !offsets.is_empty() => {
+                let source_at = |at| {
+                    offsets
+                        .get(offsets.partition_point(|(_, text)| *text < at))
+                        .map_or(self.src.end, |(source, _)| *source)
+                };
+                Some(source_at(drawn.start)..source_at(drawn.end))
+            }
+            Shape::Footnote(_) => None,
+            Shape::Whole => Some(self.src.clone()),
+            _ => Some(self.src_at(drawn.start)..self.src_at(drawn.end)),
         }
     }
 
@@ -121,7 +139,7 @@ impl Atom {
                 .iter()
                 .find(|(s, _)| *s >= at)
                 .map_or(self.text.len(), |(_, t)| *t),
-            Shape::Whole => {
+            Shape::Whole | Shape::Footnote(_) => {
                 if at * 2 < self.src.start + self.src.end {
                     0
                 } else {
@@ -141,7 +159,7 @@ impl Atom {
         if from >= to {
             return None;
         }
-        if self.shape == Shape::Whole || self.copy != self.text {
+        if self.is_atomic() || self.copy != self.text {
             // A formula, an image, a diagram, a link drawn with a label: all of it or none.
             return Some(self.copy.clone());
         }
@@ -375,10 +393,10 @@ impl Builder<'_> {
                 }
             }
             Block::Footnote { blocks, range, .. } => self.footnote(blocks, range),
-            Block::FrontMatter { pairs } => {
-                for (ix, (key, value)) in pairs.iter().enumerate() {
+            Block::FrontMatter { lines, .. } => {
+                for (ix, (text, range)) in lines.iter().enumerate() {
                     self.lead = if ix == 0 { lead } else { Gap::Line };
-                    self.runs(&[front_matter_run(key, value)]);
+                    self.push(Atom::plain(range.clone(), text));
                 }
             }
             Block::Rule => {}
@@ -398,14 +416,22 @@ impl Builder<'_> {
     fn run(&mut self, run: &InlineRun) -> Atom {
         let style = &run.style;
         if let Some(label) = &style.footnote_ref {
-            let src = self.find_exact(&run.text);
+            let src = style
+                .footnote_range
+                .clone()
+                .unwrap_or(self.cursor..self.cursor);
+            self.cursor = self.cursor.max(src.end);
             let text = footnote_marker(label);
+            let offsets = self
+                .source
+                .get(src.clone())
+                .map_or_else(Vec::new, |spelling| footnote_offsets(spelling, label, &src));
             return Atom {
                 src,
                 copy: text.clone(),
                 text,
                 gap: Gap::Joined,
-                shape: Shape::Whole,
+                shape: Shape::Footnote(offsets),
                 block: None,
             };
         }
@@ -601,16 +627,29 @@ pub(crate) fn footnote_marker(label: &str) -> String {
     format!("[{label}]")
 }
 
-pub(crate) fn front_matter_run(key: &str, value: &str) -> InlineRun {
-    let text = if value.is_empty() {
-        format!("{key}:")
-    } else {
-        format!("{key}: {value}")
+fn footnote_offsets(spelling: &str, label: &str, src: &Range<usize>) -> Vec<(usize, usize)> {
+    let Some(body) = spelling
+        .strip_prefix("[^")
+        .and_then(|text| text.strip_suffix(']'))
+    else {
+        return Vec::new();
     };
-    InlineRun {
-        text,
-        style: InlineStyle::default(),
-    }
+    let inside = body.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let Some((_, label_offsets)) = walk(inside, label, false) else {
+        return Vec::new();
+    };
+    let label_start = src.start + 2 + body.len() - inside.len();
+    std::iter::once((src.start, 0))
+        .chain(
+            label_offsets
+                .into_iter()
+                .map(|(source, text)| (label_start + source, 1 + text)),
+        )
+        .chain(std::iter::once((
+            src.end.saturating_sub(1),
+            1 + label.len(),
+        )))
+        .collect()
 }
 
 /// Reads `text` off the front of `source`: a run of whitespace in the text matches a run of
@@ -670,6 +709,31 @@ fn html_comment_len(source: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_visible_reference_uses_its_own_source_bytes_after_a_hidden_duplicate() {
+        for source in [
+            "Before <!-- [^n] -->[^n].\n\n[^n]: Note.",
+            "Before<!-- [^n] -->[^n].\n\n[^n]: Note.",
+        ] {
+            let anchored = atoms(source, &reno_markdown::parse_full(source));
+            let footnote = anchored.iter().find(|atom| atom.text == "[n]").unwrap();
+            let visible = source.find("-->").unwrap() + 3;
+            assert_eq!(footnote.src, visible..visible + "[^n]".len());
+            assert!(footnote.is_atomic());
+        }
+    }
+
+    #[test]
+    fn metadata_pairs_with_extra_spacing_stay_selectable_from_source() {
+        let source = "---\r\n# key: hidden\r\nkey :  ready\r\n---\r\n\r\nTail.";
+        let anchored = atoms(source, &reno_markdown::parse_full(source));
+        let row = &anchored[0];
+        let expected = source.find("key :  ready").unwrap();
+        assert_eq!(row.src, expected..expected + "key :  ready".len());
+        assert_eq!(row.text, "key :  ready");
+        assert_eq!(copy(&anchored, row.src.clone()), "key :  ready");
+    }
     use crate::transcript::{Key, Row};
     use crate::vm::selection::{self, Pos, Selection, Shown, Slot};
     use reno_markdown::parse_full;
