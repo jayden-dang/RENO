@@ -1870,7 +1870,9 @@ fn footnotes_draw_at_the_reply_end_and_a_reference_click_scrolls_to_its_note(
         s.select_source(key, start..start + target.len())
     });
     assert_eq!(
-        screen.read_with(vcx, |s, _| s.selected_text()).as_deref(),
+        screen
+            .read_with(vcx, |s, cx| s.selected_text(cx))
+            .as_deref(),
         Some(target)
     );
     vcx.simulate_keystrokes("cmd-f");
@@ -1941,7 +1943,7 @@ fn dragging_in_either_direction_across_a_hoisted_note_copies_the_visible_ranges(
             vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
             Some("the painted tail.\n\nCafé")
         );
-        let anchors = screen.read_with(vcx, |s, _| s.selection_anchors());
+        let anchors = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
         assert_eq!(anchors.len(), 2);
         assert_eq!(anchors[0].key, anchors[1].key);
         assert_eq!(anchors[0].range.as_ref(), Some(&(from..REPLY.len())));

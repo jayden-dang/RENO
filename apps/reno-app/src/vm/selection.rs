@@ -14,7 +14,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 
-use crate::transcript::{Key, Row};
+use crate::transcript::{Key, Row, ToolEntry};
 use crate::vm::anchor::{self, Atom};
 use crate::vm::changes as facts;
 use crate::vm::convo;
@@ -33,6 +33,14 @@ pub(crate) enum Kind {
     Output,
     /// "Output was cut: 482 KB total": no source.
     Cut,
+    /// A tool's input stays in its own slot when the result arrives.
+    ToolInput(usize, ToolInputPart),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum ToolInputPart {
+    File,
+    Body,
 }
 
 /// One of an entry's texts: the `n`th of its kind (a tool group has a step line, output and cut
@@ -46,6 +54,10 @@ pub(crate) struct Slot {
 impl Slot {
     pub(crate) const fn new(n: usize, kind: Kind) -> Self {
         Self { n, kind }
+    }
+
+    pub(crate) const fn tool_input(step: usize, call: usize, part: ToolInputPart) -> Self {
+        Self::new(step, Kind::ToolInput(call, part))
     }
 
     pub(crate) const WHOLE: Self = Self::new(0, Kind::Whole);
@@ -209,12 +221,28 @@ impl Text {
     }
 }
 
+pub(crate) type ToolInputs = Vec<Option<ToolInput>>;
+
+pub(crate) struct ToolInput {
+    pub(crate) body: Option<String>,
+    pub(crate) diff: bool,
+}
+
+impl ToolInput {
+    pub(crate) fn file_label(call: &ToolEntry) -> &str {
+        call.label
+            .split_once(' ')
+            .map_or(call.label.as_str(), |(_, path)| path)
+    }
+}
+
 /// What of the transcript is open, and the parsed reply of a prose row: what decides which
 /// texts a row shows.
 pub(crate) struct Shown<'a> {
     pub(crate) open: &'a dyn Fn(Key) -> bool,
     pub(crate) output_open: &'a dyn Fn(Key, &str) -> bool,
     pub(crate) output_full: &'a dyn Fn(Key, &str) -> bool,
+    pub(crate) tool_inputs: &'a dyn Fn(Key, &[ToolEntry]) -> ToolInputs,
     pub(crate) tree: &'a dyn Fn(Key, &str) -> BlockTree,
 }
 
@@ -266,26 +294,44 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
         }
         Row::Tools { key, calls } => {
             let mut out = Vec::new();
-            for (n, line) in convo::step_lines(calls).iter().enumerate() {
+            let inputs = (shown.tool_inputs)(*key, calls);
+            for (n, (line, range)) in convo::step_lines(calls)
+                .into_iter()
+                .zip(convo::line_calls(calls))
+                .enumerate()
+            {
                 out.push(Text::sourceless(Slot::new(n, Kind::Step), &line.text));
-                let call = line
-                    .call
-                    .as_ref()
-                    .and_then(|id| calls.iter().find(|c| &c.id == id));
-                let Some((call, output)) = call.and_then(|c| Some((c, c.output.as_ref()?))) else {
-                    continue;
-                };
-                if !(shown.output_open)(*key, &call.id) {
-                    continue;
+                if line.call.is_some()
+                    && let Some(call) = calls.get(range.start)
+                    && let Some(output) = &call.output
+                    && (shown.output_open)(*key, &call.id)
+                {
+                    let body = if (shown.output_full)(*key, &call.id) {
+                        output.text.strip_suffix('\n').unwrap_or(&output.text)
+                    } else {
+                        facts::fold(&output.text, facts::OUTPUT_LINES).shown
+                    };
+                    out.push(Text::plain(Slot::new(n, Kind::Output), body));
+                    if let Some(note) = facts::cut_note(output) {
+                        out.push(Text::sourceless(Slot::new(n, Kind::Cut), &note));
+                    }
                 }
-                let body = if (shown.output_full)(*key, &call.id) {
-                    output.text.strip_suffix('\n').unwrap_or(&output.text)
-                } else {
-                    facts::fold(&output.text, facts::OUTPUT_LINES).shown
-                };
-                out.push(Text::plain(Slot::new(n, Kind::Output), body));
-                if let Some(note) = facts::cut_note(output) {
-                    out.push(Text::sourceless(Slot::new(n, Kind::Cut), &note));
+                for at in range {
+                    let Some(input) = inputs.get(at).and_then(Option::as_ref) else {
+                        continue;
+                    };
+                    if line.call.is_none() {
+                        out.push(Text::plain(
+                            Slot::tool_input(n, at, ToolInputPart::File),
+                            ToolInput::file_label(&calls[at]),
+                        ));
+                    }
+                    if let Some(body) = &input.body {
+                        out.push(Text::plain(
+                            Slot::tool_input(n, at, ToolInputPart::Body),
+                            body,
+                        ));
+                    }
                 }
             }
             out
@@ -533,6 +579,7 @@ mod tests {
                 open: &open,
                 output_open: &out_open,
                 output_full: &never,
+                tool_inputs: &|_, _| Vec::new(),
                 tree: &tree,
             };
             f(&entries, &shown)

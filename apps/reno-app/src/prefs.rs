@@ -260,7 +260,7 @@ impl Pref {
 }
 
 impl Prefs {
-    /// How reasoning blocks show, in the preferences in force.
+    /// Whether newly arriving edits and commands open.
     pub(crate) fn tool_expansion(cx: &gpui::App) -> (bool, bool) {
         cx.try_global::<PrefStore>().map_or((true, true), |store| {
             (
@@ -270,6 +270,7 @@ impl Prefs {
         })
     }
 
+    /// How reasoning blocks show, in the preferences in force.
     pub(crate) fn thinking(cx: &gpui::App) -> ThinkingMode {
         cx.try_global::<PrefStore>()
             .map_or_else(ThinkingMode::default, |store| store.prefs.thinking)

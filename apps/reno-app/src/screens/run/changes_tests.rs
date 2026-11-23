@@ -800,3 +800,267 @@ fn closing_find_leaves_an_automatically_opened_command_open(cx: &mut TestAppCont
     assert!(!painted(vcx, "tool-output-find-result"));
     assert!(painted(vcx, "tool-output-kept"));
 }
+
+fn tool_run_summary(
+    vcx: &mut VisualTestContext,
+    store: &Entity<Store>,
+    run: &reno_proto::RunId,
+    attempt: u32,
+    status: RunStatus,
+) {
+    store.update(vcx, |s, cx| {
+        let mut summary = s.state().run(run).unwrap().clone();
+        summary.attempt = attempt;
+        summary.status = status;
+        s.apply(reno_client::Update::RunUpserted(summary), cx);
+    });
+    draw(vcx);
+}
+
+#[gpui::test]
+fn a_new_command_waits_for_its_running_summary(cx: &mut TestAppContext) {
+    use reno_proto::ActionClass;
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, "architect1");
+    let run = run_id("architect1");
+    let command = |id| tool(id, "bash", ActionClass::Command, json!({"command": "pwd"}));
+    push_events(vcx, &store, &run, [command("before-running")]);
+    assert!(painted(vcx, "step-before-running"));
+    assert!(!painted(vcx, "tool-detail-before-running"));
+
+    vcx.update(|_, cx| crate::prefs::update(cx, |p| p.expand_new_commands = false));
+    push_events(vcx, &store, &run, [command("disabled-before-running")]);
+    vcx.update(|_, cx| crate::prefs::update(cx, |p| p.expand_new_commands = true));
+    push_events(vcx, &store, &run, [command("manual-before-running")]);
+    click(vcx, "step-manual-before-running");
+    assert!(painted(vcx, "tool-detail-manual-before-running"));
+    click(vcx, "step-manual-before-running");
+    assert!(!painted(vcx, "tool-detail-manual-before-running"));
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+
+    tool_run_summary(vcx, &store, &run, 1, RunStatus::Running);
+    assert!(
+        painted(vcx, "tool-detail-before-running"),
+        "the older event opens when Running is reported"
+    );
+    assert!(!painted(vcx, "tool-detail-disabled-before-running"));
+    assert!(!painted(vcx, "tool-detail-manual-before-running"));
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+}
+
+#[gpui::test]
+fn a_resumed_command_waits_for_its_running_summary(cx: &mut TestAppContext) {
+    use reno_proto::{ActionClass, ExecEvent, SessionRef, StopReason};
+    use serde_json::json;
+
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, "builder1");
+    let run = run_id("builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    tool_run_summary(vcx, &store, &run, 1, RunStatus::Interrupted);
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [
+            tool(
+                "ended-command",
+                "bash",
+                ActionClass::Command,
+                json!({"command":"ls"}),
+            ),
+            ExecEvent::Done {
+                stop: StopReason::Interrupted,
+                diagnostic: None,
+                result: None,
+                reason: None,
+            },
+            ExecEvent::Resumed {
+                from_attempt: 1,
+                session: SessionRef("resumed".to_owned()),
+            },
+            tool(
+                "resumed-command",
+                "bash",
+                ActionClass::Command,
+                json!({"command":"pwd"}),
+            ),
+        ],
+    );
+    assert!(painted(vcx, "step-resumed-command"));
+    assert!(!painted(vcx, "tool-detail-resumed-command"));
+
+    tool_run_summary(vcx, &store, &run, 2, RunStatus::Running);
+    assert!(
+        painted(vcx, "tool-detail-resumed-command"),
+        "the resumed attempt opens when its own summary arrives"
+    );
+    assert!(!painted(vcx, "tool-detail-ended-command"));
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+}
+
+fn tool_text_at(
+    vcx: &mut VisualTestContext,
+    screen: &Entity<RunScreen>,
+    selector: &'static str,
+    text: &str,
+    off: usize,
+) -> gpui::Point<gpui::Pixels> {
+    let bounds = vcx
+        .debug_bounds(selector)
+        .expect("the tool detail is visible");
+    screen
+        .read_with(vcx, |s, _| {
+            s.select.registry.borrow().iter().find_map(|piece| {
+                if piece.bounds.top() < bounds.top() || piece.bounds.bottom() > bounds.bottom() {
+                    return None;
+                }
+                let at = piece.layout.text().find(text)? + off;
+                let origin = piece.layout.position_for_index(at)?;
+                Some(origin + gpui::point(px(1.0), piece.layout.line_height() / 2.0))
+            })
+        })
+        .unwrap_or_else(|| panic!("tool text {text:?} in {selector} participates in selection"))
+}
+
+fn drag_tool_text(
+    vcx: &mut VisualTestContext,
+    from: gpui::Point<gpui::Pixels>,
+    to: gpui::Point<gpui::Pixels>,
+) {
+    use gpui::{Modifiers, MouseButton, point};
+
+    vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(
+        point(from.x + px(8.0), from.y + px(8.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    draw(vcx);
+    vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    draw(vcx);
+}
+
+#[gpui::test]
+fn selecting_tool_details_copies_the_unicode_file_labels_and_bodies_in_order(
+    cx: &mut TestAppContext,
+) {
+    use reno_proto::{ActionClass, ExecEvent};
+    use serde_json::json;
+
+    cx.update(super::bind_keys);
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let screen = open(vcx, &root, "builder1");
+    let run = run_id("builder1");
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    let command = "printf 'λ command'";
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [
+            tool(
+                "copy-command",
+                "bash",
+                ActionClass::Command,
+                json!({"command":command}),
+            ),
+            tool(
+                "copy-edit",
+                "edit",
+                ActionClass::Edit,
+                json!({
+                    "file_path":"src/é.rs","old_string":"old","new_string":"déjà λx"
+                }),
+            ),
+            tool(
+                "copy-next-edit",
+                "edit",
+                ActionClass::Edit,
+                json!({
+                    "file_path":"src/次.rs","old_string":"before","new_string":"after"
+                }),
+            ),
+            ExecEvent::Text {
+                text: "Following **entry** begins here.".to_owned(),
+            },
+        ],
+    );
+
+    let from = tool_text_at(vcx, &screen, "tool-detail-copy-edit", "déjà λx", 1);
+    let to = tool_text_at(
+        vcx,
+        &screen,
+        "tool-detail-copy-edit",
+        "déjà λx",
+        "déjà λ".len(),
+    );
+    drag_tool_text(vcx, from, to);
+    vcx.simulate_keystrokes("cmd-c");
+    assert_eq!(clipboard(vcx), "éjà λ");
+    let anchors = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
+    let prefix = "- old\n+ ".len();
+    assert_eq!(anchors.len(), 1);
+    assert_eq!(anchors[0].range, Some(prefix + 1..prefix + "déjà λ".len()));
+
+    let from = tool_text_at(
+        vcx,
+        &screen,
+        "tool-detail-copy-command",
+        command,
+        "printf '".len(),
+    );
+    let to = screen
+        .read_with(vcx, |s, _| s.painted_point(" begins here.", 7))
+        .expect("next reply");
+    drag_tool_text(vcx, from, to);
+    vcx.simulate_keystrokes("cmd-c");
+    let seen = clipboard(vcx);
+    assert!(seen.starts_with("λ command'\n"), "{seen:?}");
+    assert!(
+        seen.contains("src/é.rs\n- old\n+ déjà λx\nsrc/次.rs\n- before\n+ after"),
+        "{seen:?}"
+    );
+    assert!(seen.ends_with("\n\nFollowing entry begins"), "{seen:?}");
+
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    let source = clipboard(vcx);
+    assert!(source.starts_with("λ command'\n"), "{source:?}");
+    assert!(
+        source.contains("src/é.rs\n- old\n+ déjà λx\nsrc/次.rs\n- before\n+ after"),
+        "{source:?}"
+    );
+    assert!(
+        source.ends_with("\n\nFollowing **entry** begins"),
+        "{source:?}"
+    );
+
+    let anchors = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
+    push_events(
+        vcx,
+        &store,
+        &run,
+        [tool_result("copy-command", "command result")],
+    );
+    assert_eq!(
+        screen.read_with(vcx, |s, cx| s.selection_anchors(cx)),
+        anchors
+    );
+    assert!(painted(vcx, "tool-output-copy-command"));
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    assert_eq!(
+        clipboard(vcx),
+        source,
+        "the input anchor survives the command result"
+    );
+}

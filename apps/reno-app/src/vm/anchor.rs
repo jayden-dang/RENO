@@ -938,6 +938,7 @@ mod tests {
             open: &is_open,
             output_open: &never,
             output_full: &never,
+            tool_inputs: &|_, _| Vec::new(),
             tree: &tree,
         };
         let sel = Selection {

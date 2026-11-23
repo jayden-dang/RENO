@@ -595,7 +595,7 @@ impl RunScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let lines = convo::step_lines(calls);
-        let mut disclosures = self.tool_disclosures(theme, key, calls, cx);
+        let inputs = self.tool_inputs(key, calls, cx);
         div()
             .flex()
             .flex_col()
@@ -605,9 +605,7 @@ impl RunScreen {
                     .iter()
                     .zip(convo::line_calls(calls))
                     .enumerate()
-                    .map(|(ln, line)| {
-                        self.step_row(theme, (key, ln), line, (calls, &mut disclosures), cx)
-                    }),
+                    .map(|(ln, line)| self.step_row(theme, (key, ln), line, (calls, &inputs), cx)),
             )
             .into_any_element()
     }
