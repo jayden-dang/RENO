@@ -555,6 +555,7 @@ impl RunScreen {
         let hits = self.find.by_row.get(&key)?;
         Some(Rc::new(crate::ui::markdown_view::Marks {
             matcher: self.find.matcher.clone(),
+            source_hits: self.find_highlights(key, Part::Whole),
             reveal: self.find.navigated.then_some(self.find.navigation),
             current: hits
                 .iter()

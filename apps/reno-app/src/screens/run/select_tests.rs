@@ -1110,3 +1110,167 @@ fn resolving_an_earlier_path_keeps_the_keyboard_menu_on_its_selected_web_link(
     draw(vcx);
     assert_eq!(recording.opened.borrow().as_slice(), [LINK]);
 }
+
+#[gpui::test]
+fn checkbox_source_queries_highlight_the_drawn_boxes(cx: &mut TestAppContext) {
+    const REPLY: &str = "- [x] Lowercase marker\n- [X] Uppercase marker\n- [ ] Unchecked marker";
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, REPLY);
+
+    let query = |vcx: &mut VisualTestContext, text, expected| {
+        vcx.simulate_keystrokes("cmd-f");
+        draw(vcx);
+        vcx.simulate_keystrokes("cmd-a");
+        vcx.simulate_input(text);
+        draw(vcx);
+        assert_eq!(
+            screen
+                .read_with(vcx, |s, _| s.find_count_label())
+                .as_deref(),
+            Some(expected),
+        );
+    };
+    let color_near_box = |vcx: &mut VisualTestContext, item, current| {
+        let body = screen.read_with(vcx, |s, _| s.painted_point(item, 0).unwrap());
+        vcx.update(|window, cx| {
+            let theme = crate::ui::theme::current(cx);
+            let color = crate::ui::find::hit_style(&theme, current).background_color;
+            window.painted_quads().into_iter().any(|quad| {
+                let b = quad.bounds.map(|n| px(n.0 / window.scale_factor()));
+                quad.background.as_solid() == color
+                    && b.right() < body.x
+                    && b.left() > body.x - px(32.0)
+                    && b.size.width >= px(7.0)
+                    && b.top() < body.y
+                    && body.y < b.bottom()
+            })
+        })
+    };
+
+    query(vcx, "[x]", "1 of 2");
+    assert!(color_near_box(vcx, "Lowercase marker", true));
+    assert!(color_near_box(vcx, "Uppercase marker", false));
+    vcx.simulate_keystrokes("enter cmd-g");
+    draw(vcx);
+    assert_eq!(
+        screen
+            .read_with(vcx, |s, _| s.find_count_label())
+            .as_deref(),
+        Some("2 of 2")
+    );
+    assert!(color_near_box(vcx, "Uppercase marker", true));
+    assert!(color_near_box(vcx, "Lowercase marker", false));
+
+    vcx.simulate_keystrokes("cmd-alt-c");
+    query(vcx, "[X]", "1 of 1");
+    assert!(color_near_box(vcx, "Uppercase marker", true));
+    assert!(!color_near_box(vcx, "Lowercase marker", false));
+    assert!(!color_near_box(vcx, "Lowercase marker", true));
+    query(vcx, "[x]", "1 of 1");
+    assert!(color_near_box(vcx, "Lowercase marker", true));
+    assert!(!color_near_box(vcx, "Uppercase marker", false));
+    assert!(!color_near_box(vcx, "Uppercase marker", true));
+    query(vcx, "[ ]", "1 of 1");
+    assert!(color_near_box(vcx, "Unchecked marker", true));
+
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    let body = screen.read_with(vcx, |s, _| s.painted_point("Uppercase marker", 0).unwrap());
+    press(vcx, point(body.x - px(24.0), body.y), 2, Modifiers::none());
+    assert_eq!(copy_with_the_keyboard(vcx), "☑ ");
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    assert_eq!(clipboard(vcx).as_deref(), Some("[X]"));
+}
+
+#[gpui::test]
+fn panned_nested_table_margins_pick_visible_text_and_keep_existing_endpoints(
+    cx: &mut TestAppContext,
+) {
+    let (store, _root, vcx, screen) = open(cx);
+    let reply = format!(
+        "> - A nested table\n>\n>   | ghost | hiddenprefix nearword visibleword {} |\n>   | --- | --- |\n>   | seed | body |",
+        "trailing ".repeat(24)
+    );
+    append_reply(vcx, &store, &screen, &reply);
+
+    let table = vcx.debug_bounds("md-table-scroll").expect("nested table");
+    let transcript = vcx.debug_bounds("transcript").unwrap();
+    let glyph = |vcx: &VisualTestContext, text, index| {
+        screen.read_with(vcx, |s, _| {
+            s.painted_point(text, index)
+                .unwrap_or_else(|| panic!("missing layout for {text:?}"))
+        })
+    };
+    let margin = point(table.left() - px(14.0), glyph(vcx, "ghost", 4).y);
+    assert!(transcript.contains(&margin) && !table.contains(&margin));
+
+    let pan = |vcx: &mut VisualTestContext, x| {
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: table.center(),
+            delta: gpui::ScrollDelta::Pixels(point(x, px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Started,
+            source: gpui::ScrollSource::Pointer,
+        });
+        draw(vcx);
+    };
+    let from_ghost = margin.x - glyph(vcx, "ghost", 4).x;
+    pan(vcx, from_ghost);
+    assert!(glyph(vcx, "ghost", "ghost".len()).x < table.left());
+    assert!(
+        (glyph(vcx, "ghost", 4).x - margin.x).abs() < px(2.0),
+        "the fully hidden word is laid out immediately under the list inset"
+    );
+    press(vcx, margin, 2, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "hiddenprefix",
+        "the nested table margin selects the nearest visible word"
+    );
+
+    let from_near = table.left() - glyph(vcx, "nearword", 0).x;
+    pan(vcx, from_near);
+    assert!(glyph(vcx, "hiddenprefix", "hiddenprefix".len()).x < table.left());
+    assert!(glyph(vcx, "nearword", 2).x > table.left());
+    press(vcx, margin, 2, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "nearword",
+        "a margin double-click on a partly clipped cell maps to visible text"
+    );
+
+    let end = glyph(vcx, "visibleword", "visibleword".len());
+    assert!(table.contains(&end));
+    drag(vcx, end, margin);
+    let copied = copy_with_the_keyboard(vcx);
+    assert!(
+        copied.starts_with("nearword ") && copied.contains("visibleword"),
+        "the drag starts its copied range at the visible edge: {copied:?}"
+    );
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    let source = clipboard(vcx).unwrap();
+    assert!(source.starts_with("nearword ") && source.contains("visibleword"));
+    let saved = screen.read_with(vcx, |s, _| s.selection_anchors());
+    assert!(!saved.is_empty());
+
+    let click_margin = point(table.left() - px(32.0), margin.y);
+    assert!(transcript.contains(&click_margin) && !table.contains(&click_margin));
+    let near_end = glyph(vcx, "visibleword", "visibleword".len() - 1);
+    pan(vcx, click_margin.x - near_end.x);
+    assert!(glyph(vcx, "visibleword", "visibleword".len()).x < table.left());
+    assert!(
+        (glyph(vcx, "visibleword", "visibleword".len() - 1).x - click_margin.x).abs() < px(2.0)
+    );
+    assert_eq!(screen.read_with(vcx, |s, _| s.selection_anchors()), saved);
+    assert_eq!(copy_with_the_keyboard(vcx), copied);
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    assert_eq!(clipboard(vcx).as_deref(), Some(source.as_str()));
+
+    press(vcx, click_margin, 1, Modifiers::none());
+    assert!(
+        screen
+            .read_with(vcx, |s, _| s.selection_anchors())
+            .is_empty(),
+        "a single click cannot keep the selection hidden underneath the margin"
+    );
+}

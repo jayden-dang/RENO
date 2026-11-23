@@ -168,6 +168,8 @@ impl Map {
 #[derive(Clone)]
 pub(crate) struct Piece {
     pub(crate) bounds: Bounds<Pixels>,
+    /// The visible portion used for pointer targeting. The layout retains its source coordinates.
+    pub(crate) hit_bounds: Option<Bounds<Pixels>>,
     pub(crate) layout: TextLayout,
     pub(crate) key: Key,
     pub(crate) slot: Slot,
@@ -177,7 +179,7 @@ pub(crate) struct Piece {
 impl Piece {
     /// The source byte under `point`, or the nearest one when it is outside the text.
     pub(crate) fn source_at(&self, point: Point<Pixels>) -> usize {
-        let at = match self.layout.index_for_position(point) {
+        let at = match self.layout.index_for_position(self.visible_point(point)) {
             Ok(at) | Err(at) => at,
         };
         self.map.source_at(at)
@@ -185,6 +187,7 @@ impl Piece {
 
     /// The source bytes of the word or drawn line under `point`; none for any other unit.
     pub(crate) fn unit_at(&self, point: Point<Pixels>, unit: SelectUnit) -> Option<Range<usize>> {
+        let point = self.visible_point(point);
         let text = self.layout.text();
         let range = match unit {
             SelectUnit::Word => {
@@ -195,6 +198,19 @@ impl Piece {
             SelectUnit::Char | SelectUnit::Block => return None,
         };
         Some(self.map.source_range(range))
+    }
+
+    fn visible_point(&self, at: Point<Pixels>) -> Point<Pixels> {
+        let Some(clip) = self.hit_bounds.filter(|bounds| *bounds != self.bounds) else {
+            return at;
+        };
+        let inside = |start: Pixels, end: Pixels, value: Pixels| {
+            value.clamp(start, end - px(0.01).min((end - start) / 2.0))
+        };
+        point(
+            inside(clip.left(), clip.right(), at.x),
+            inside(clip.top(), clip.bottom(), at.y),
+        )
     }
 
     /// The row of the text that `point` is on, as bytes of the laid-out text, without the
@@ -245,6 +261,7 @@ impl Track {
             child,
             piece: Some(Piece {
                 bounds: Bounds::default(),
+                hit_bounds: None,
                 layout,
                 key,
                 slot,
@@ -302,6 +319,8 @@ impl Element for Track {
         self.child.paint(window, cx);
         if let Some(mut piece) = self.piece.take() {
             piece.bounds = piece.layout.bounds();
+            let visible = piece.bounds.intersect(&window.content_mask().bounds);
+            piece.hit_bounds = (!visible.is_empty()).then_some(visible);
             self.registry.borrow_mut().push(piece);
         }
     }

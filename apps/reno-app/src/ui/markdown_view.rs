@@ -186,6 +186,7 @@ pub(crate) struct Marks {
     pub(crate) matcher: Rc<crate::vm::find::Matcher>,
     pub(crate) current: Option<usize>,
     pub(crate) current_source: Option<Range<usize>>,
+    pub(crate) source_hits: Vec<(Range<usize>, bool)>,
     pub(crate) reveal: Option<u64>,
 }
 
@@ -981,6 +982,20 @@ fn find_hits(env: &Env, text: &str, base: usize, atom: Option<usize>) -> Vec<(Ra
         .collect()
 }
 
+fn task_find_hit(
+    env: &Env,
+    source: &Range<usize>,
+    glyph: Range<usize>,
+) -> Option<(Range<usize>, bool)> {
+    let matches = &env.host.marks.as_ref()?.source_hits;
+    let first = matches.partition_point(|(hit, _)| hit.end <= source.start);
+    let mut overlaps = matches[first..]
+        .iter()
+        .take_while(|(hit, _)| hit.start < source.end);
+    let (_, current) = overlaps.next()?;
+    Some((glyph, *current || overlaps.any(|(_, current)| *current)))
+}
+
 /// Files a painted text with the transcript's selection, when the host tracks one.
 fn tracked(env: &Env, element: AnyElement, layout: gpui::TextLayout, segs: Vec<Seg>) -> AnyElement {
     match &env.host.select {
@@ -1768,7 +1783,15 @@ fn inline_with_reveal(
             layout: from..text.len(),
             atom: first + n,
         });
-        finds.extend(find_hits(env, shown, from, Some(first + n)));
+        if let Some(task) = &style.task {
+            finds.extend(task_find_hit(
+                env,
+                &task.range,
+                from..from + shown.trim_end().len(),
+            ));
+        } else {
+            finds.extend(find_hits(env, shown, from, Some(first + n)));
+        }
     }
     let spans = highlight_runs(spans, &layers(env, &segs, text.len(), &finds));
     let styled = StyledText::new(SharedString::from(text.clone())).with_runs(spans);
@@ -2063,6 +2086,7 @@ mod tests {
         .expect("a plain query compiles");
         let host = Host::preview().marked(Some(Rc::new(Marks {
             reveal: None,
+            source_hits: Vec::new(),
             matcher,
             current: Some(1),
             current_source: None,
@@ -2115,6 +2139,7 @@ mod tests {
         let host = Host::transcript(None, None, None)
             .marked(Some(Rc::new(Marks {
                 reveal: None,
+                source_hits: Vec::new(),
                 matcher: Rc::new(
                     crate::vm::find::Query {
                         text: "Search".into(),
@@ -2177,6 +2202,7 @@ mod tests {
         let host = Host::transcript(None, None, None)
             .marked(Some(Rc::new(Marks {
                 reveal: None,
+                source_hits: Vec::new(),
                 matcher: Rc::new(
                     crate::vm::find::Query {
                         text: "a".into(),

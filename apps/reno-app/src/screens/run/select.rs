@@ -264,8 +264,7 @@ impl RunScreen {
     /// past the texts, the nearest.
     fn nearest_piece<'a>(&self, pieces: &'a [Piece], point: Point<Pixels>) -> Option<&'a Piece> {
         let area = self.select.list.get();
-        let gap = |p: &Piece| {
-            let b = &p.bounds;
+        let gap = |b: &Bounds<Pixels>| {
             let dy = if point.y < b.top() {
                 b.top() - point.y
             } else if point.y > b.bottom() {
@@ -285,13 +284,15 @@ impl RunScreen {
         };
         pieces
             .iter()
-            .filter(|p| p.bounds.intersects(&area) || area.size.width == px(0.0))
-            .filter(|p| self.select.order.contains_key(&p.key))
-            .min_by(|a, b| {
+            .filter_map(|p| p.hit_bounds.map(|bounds| (p, bounds)))
+            .filter(|(_, bounds)| bounds.intersects(&area) || area.size.width == px(0.0))
+            .filter(|(p, _)| self.select.order.contains_key(&p.key))
+            .min_by(|(_, a), (_, b)| {
                 gap(a)
                     .partial_cmp(&gap(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
+            .map(|(piece, _)| piece)
     }
 
     /// The position under `point`, from the texts painted last frame.
