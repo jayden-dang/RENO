@@ -306,7 +306,7 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
             }
             out
         }
-        Row::Worked { secs, .. } => {
+        Row::Worked { secs, rows, .. } if !rows.is_empty() => {
             vec![Text::sourceless(Slot::HEAD, &convo::worked_label(*secs))]
         }
         Row::Tools { key, calls } => {

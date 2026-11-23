@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use gpui::{App, Context, Task, WeakEntity, Window};
@@ -61,7 +62,7 @@ const RESULT_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const NEW_DIRS_PER_GROUP: usize = 64;
 
 struct ResultResources {
-    version: Vec<(String, u64)>,
+    version: u64,
     targets: HashMap<String, Rc<[FileTarget]>>,
 }
 
@@ -161,10 +162,12 @@ impl RunScreen {
             .filter(|call| self.outputs_open.contains(&self.tool_key(key, &call.id)))
             .filter_map(|call| Some((&call.id, call.output.as_ref()?)))
             .collect();
-        let version: Vec<_> = outputs
-            .iter()
-            .map(|(id, output)| ((*id).clone(), output.bytes))
-            .collect();
+        let mut signature = DefaultHasher::new();
+        for (id, output) in &outputs {
+            id.hash(&mut signature);
+            output.bytes.hash(&mut signature);
+        }
+        let version = signature.finish();
         let mut index = self.file_index.borrow_mut();
         if index
             .results
@@ -175,48 +178,41 @@ impl RunScreen {
         }
         let old = index.results.remove(&key);
         let run = self.run_of(key);
-        let old_targets = |id: &str| {
-            old.as_ref()
-                .and_then(|known| known.targets.get(id))
-                .cloned()
-        };
-        let targets: HashMap<_, Rc<[FileTarget]>> = outputs
-            .into_iter()
-            .map(|(id, output)| {
-                (
-                    id.clone(),
-                    old_targets(id).unwrap_or_else(|| Rc::from(result_paths(&output.text))),
-                )
-            })
-            .collect();
+        let old_targets = |id: &str| old.as_ref().and_then(|known| known.targets.get(id));
         let mut names = HashSet::new();
-        // An output newly opened in an existing group gets first access to the read budget.
-        let new = |id: &str| {
-            old.as_ref()
-                .is_none_or(|known| !known.targets.contains_key(id))
-        };
-        let dirs = [true, false]
-            .into_iter()
-            .flat_map(|fresh| version.iter().filter(move |(id, _)| new(id) == fresh))
-            .flat_map(|(id, _)| {
-                targets
-                    .get(id)
-                    .into_iter()
-                    .flat_map(|targets| targets.iter())
-            })
-            .map(|target| target.path.rsplit_once('/').map_or("", |(dir, _)| dir))
-            .filter(|dir| {
-                names.insert(*dir) && !index.dirs.contains_key(&(run.clone(), (*dir).to_owned()))
-            })
-            .take(NEW_DIRS_PER_GROUP)
-            .map(str::to_owned)
-            .collect();
-        let cost = version.iter().map(|(id, _)| id.len() + 32).sum::<usize>()
-            + targets
-                .values()
-                .flat_map(|items| items.iter())
-                .map(|target| target.path.len() + 32)
-                .sum::<usize>();
+        let mut dirs = Vec::new();
+        let mut targets = HashMap::new();
+        let mut cost = 1;
+        let mut ordered = outputs;
+        // Give a newly opened output first access to the resource budget.
+        ordered.sort_by_key(|(id, _)| old_targets(id).is_some());
+        for (id, output) in ordered {
+            let files: Rc<[FileTarget]> = old_targets(id)
+                .cloned()
+                .unwrap_or_else(|| Rc::from(result_paths(&output.text)));
+            let bytes =
+                id.len() + 32 + files.iter().map(|file| file.path.len() + 32).sum::<usize>();
+            if cost + bytes > RESULT_CACHE_BYTES / 4 {
+                break;
+            }
+            for file in files.iter() {
+                if dirs.len() >= NEW_DIRS_PER_GROUP {
+                    break;
+                }
+                let dir = file
+                    .path
+                    .rsplit_once('/')
+                    .map_or("", |(dir, _)| dir)
+                    .to_owned();
+                if names.insert(dir.clone())
+                    && !index.dirs.contains_key(&(run.clone(), dir.clone()))
+                {
+                    dirs.push(dir);
+                }
+            }
+            cost += bytes;
+            targets.insert(id.clone(), files);
+        }
         index
             .results
             .insert(key, ResultResources { version, targets }, cost);
