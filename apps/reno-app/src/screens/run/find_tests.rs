@@ -5,7 +5,10 @@
 
 use std::time::Duration;
 
-use gpui::{AppContext as _, Entity, ListOffset, TestAppContext, VisualTestContext, px};
+use gpui::{
+    AppContext as _, Entity, KeyUpEvent, Keystroke, ListOffset, Modifiers, TestAppContext,
+    VisualTestContext, px,
+};
 use reno_client::Update;
 use reno_client::fake::FakeConfig;
 use reno_proto::{ActionClass, ExecEvent, RunId, SessionRef, StopReason, ToolCall};
@@ -2106,12 +2109,14 @@ fn keyboard_opens_a_history_fold_and_its_command_output(cx: &mut TestAppContext)
         s.rows()
             .iter()
             .find_map(|row| {
-                match row {
-            Row::Worked { key, rows, .. } if rows.iter().any(|row| {
-                matches!(row, Row::Tools { calls, .. } if calls.iter().any(|call| call.id == "t2"))
-            }) => Some(*key),
-            _ => None,
-        }
+                let Row::Worked { key, rows, .. } = row else {
+                    return None;
+                };
+                rows.iter()
+                    .any(|row| {
+                        matches!(row, Row::Tools { calls, .. } if calls.iter().any(|call| call.id == "t2"))
+                    })
+                    .then_some(*key)
             })
             .unwrap()
     });
@@ -2131,6 +2136,14 @@ fn keyboard_opens_a_history_fold_and_its_command_output(cx: &mut TestAppContext)
             });
             if focused {
                 vcx.simulate_keystrokes("enter");
+                // GPUI's keystroke helper only sends KeyDown. Buttons activate on KeyUp.
+                vcx.simulate_event(KeyUpEvent {
+                    keystroke: Keystroke {
+                        modifiers: Modifiers::default(),
+                        key: "enter".into(),
+                        key_char: None,
+                    },
+                });
                 draw(vcx);
                 return;
             }

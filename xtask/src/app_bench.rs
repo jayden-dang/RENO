@@ -722,7 +722,7 @@ fn transcript_scenario(
             ("RENO_BENCH_FIND", "looked at"),
             ("RENO_BENCH_FIND_CAPTURE", "1"),
         ]);
-        // Keep the mock run on its isolated daemon until the app has drawn Find.
+        // Keep the mock run on its isolated daemon until the app has activated Find.
         Some(follower)
     } else {
         follower.wait()?;
