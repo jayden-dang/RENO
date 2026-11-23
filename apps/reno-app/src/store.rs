@@ -1094,13 +1094,12 @@ impl Store {
             move |client| async move { client.get_run(&requested).await },
             cx,
             D {
-                ok: Box::new(move |store, summary: RunSummary, cx| {
+                ok: Box::new(move |store, summary: RunSummary, _| {
                     if store.tool_watch.probe_generation == generation
                         && store.tool_watch.probe.as_ref() == Some(&(run, attempt))
                         && summary.attempt.max(1) == attempt
                     {
                         store.accept_tool_watch(&summary);
-                        store.apply(Update::RunUpserted(summary), cx);
                     }
                 }),
                 err: Box::new(|_, _| {}),
