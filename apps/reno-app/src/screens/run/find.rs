@@ -70,6 +70,8 @@ pub(super) struct Find {
     /// Whether the current hit was gone to since the query changed: the first Enter goes to the
     /// first hit rather than past it.
     navigated: bool,
+    /// A new request for each explicit navigation, even when the same hit wraps.
+    navigation: u64,
     /// The recount waiting to run (armed by an event, not polling).
     timer: Option<Task<()>>,
     /// The calls whose output search opened, with the row each is in, to measure them again.
@@ -433,6 +435,7 @@ impl RunScreen {
             self.find.found.step(forward);
         }
         self.find.navigated = true;
+        self.find.navigation = self.find.navigation.wrapping_add(1);
         self.find_reveal(cx);
     }
 
@@ -552,6 +555,7 @@ impl RunScreen {
         let hits = self.find.by_row.get(&key)?;
         Some(Rc::new(crate::ui::markdown_view::Marks {
             matcher: self.find.matcher.clone(),
+            reveal: self.find.navigated.then_some(self.find.navigation),
             current: hits
                 .iter()
                 .position(|&at| self.find.found.current == Some(at)),

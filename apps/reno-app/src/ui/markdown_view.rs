@@ -186,6 +186,7 @@ pub(crate) struct Marks {
     pub(crate) matcher: Rc<crate::vm::find::Matcher>,
     pub(crate) current: Option<usize>,
     pub(crate) current_source: Option<Range<usize>>,
+    pub(crate) reveal: Option<u64>,
 }
 
 /// A reply drawn for the transcript's selection.
@@ -1370,6 +1371,16 @@ fn table(
     cx: &mut App,
 ) -> AnyElement {
     let theme = *env.theme;
+    let reveal = env
+        .host
+        .marks
+        .as_ref()
+        .filter(|marks| marks.current.is_some())
+        .and_then(|marks| marks.reveal)
+        .map(|request| TableReveal {
+            request,
+            edges: Rc::default(),
+        });
     let cells = std::iter::once(header)
         .chain(rows.iter().map(Vec::as_slice))
         .enumerate()
@@ -1386,12 +1397,15 @@ fn table(
                 .px(px(10.0))
                 .py(px(6.0))
                 .when(row == 0, |d| d.font_weight(FontWeight::MEDIUM));
-            let cell_box = match align.get(column) {
-                Some(TableAlign::Center) => cell_box.text_center(),
-                Some(TableAlign::Right) => cell_box.text_right(),
-                _ => cell_box,
+            let align = align.get(column).copied().unwrap_or_default();
+            let cell_box = match align {
+                TableAlign::Center => cell_box.text_center(),
+                TableAlign::Right => cell_box.text_right(),
+                TableAlign::Left => cell_box.text_left(),
             };
-            cell_box.child(inline(cell, env, cx))
+            let first = env.take_atoms(cell.len());
+            let reveal = reveal.as_ref().map(|reveal| (reveal, align));
+            cell_box.child(inline_with_reveal(cell, first, env, cx, reveal))
         })
         .collect::<Vec<_>>();
     let grid = div()
@@ -1407,6 +1421,7 @@ fn table(
         id: format!("md-table-{reply}-{ordinal}").into(),
         content: grid.into_any_element(),
         theme,
+        reveal,
     }
     .into_any_element()
 }
@@ -1416,18 +1431,55 @@ struct TableViewport {
     id: SharedString,
     content: AnyElement,
     theme: Theme,
+    reveal: Option<TableReveal>,
 }
 
-#[derive(Clone, Default)]
+struct TableReveal {
+    request: u64,
+    edges: Rc<Cell<Option<(Pixels, Pixels)>>>,
+}
+
+#[derive(Default)]
 struct TableScroll {
     handle: ScrollHandle,
-    grab: Rc<Cell<Option<Pixels>>>,
+    grab: Cell<Option<Pixels>>,
+    revealed: Cell<Option<u64>>,
+}
+
+impl TableScroll {
+    fn reveal_match(&self, reveal: &TableReveal, window: &Window, cx: &mut App) {
+        let Some((left, right)) = reveal.edges.take() else {
+            return;
+        };
+        if self.revealed.replace(Some(reveal.request)) == Some(reveal.request) {
+            return;
+        }
+        let viewport = self.handle.bounds();
+        let margin = px(6.0).min(viewport.size.width / 4.0);
+        let start = viewport.left() + margin;
+        let end = viewport.right() - margin;
+        let shift = if left < start || right - left > end - start {
+            start - left
+        } else {
+            (end - right).min(px(0.0))
+        };
+        let current = self.handle.offset().x;
+        let next = (current + shift).clamp(-self.handle.max_offset().x, px(0.0));
+        if next != current {
+            let handle = self.handle.clone();
+            // The current frame already placed the table at the previous offset.
+            window.defer(cx, move |window, _| {
+                handle.set_offset(point(next, px(0.0)));
+                window.refresh();
+            });
+        }
+    }
 }
 
 impl RenderOnce for TableViewport {
     fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
         let scroll = window.with_global_id(self.id.clone().into(), |id, window| {
-            window.with_element_state(id, |state: Option<TableScroll>, _| {
+            window.with_element_state(id, |state: Option<Rc<TableScroll>>, _| {
                 let state = state.unwrap_or_default();
                 (state.clone(), state)
             })
@@ -1442,6 +1494,12 @@ impl RenderOnce for TableViewport {
             .overflow_hidden()
             .child(
                 div()
+                    .when_some(self.reveal, |viewport, reveal| {
+                        let scroll = scroll.clone();
+                        viewport.on_children_prepainted(move |_, window, cx| {
+                            scroll.reveal_match(&reveal, window, cx);
+                        })
+                    })
                     .id(self.id)
                     .debug_selector(|| "md-table-scroll".to_owned())
                     .w_full()
@@ -1455,7 +1513,7 @@ impl RenderOnce for TableViewport {
     }
 }
 
-fn table_scrollbar(scroll: TableScroll, theme: Theme) -> impl IntoElement {
+fn table_scrollbar(scroll: Rc<TableScroll>, theme: Theme) -> impl IntoElement {
     let handle = scroll.handle.clone();
     div()
         .h(px(10.0))
@@ -1579,6 +1637,16 @@ struct LinkSpan {
 
 /// [`inline`] for runs that are atoms `first`, `first + 1`, ... of the reply.
 fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyElement {
+    inline_with_reveal(runs, first, env, cx, None)
+}
+
+fn inline_with_reveal(
+    runs: &[InlineRun],
+    first: usize,
+    env: &Env,
+    cx: &mut App,
+    reveal: Option<(&TableReveal, TableAlign)>,
+) -> AnyElement {
     let theme = env.theme;
     let base = &env.base;
     let policy = &env.host.links;
@@ -1747,11 +1815,46 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
             }
         };
     let element = tracked(env, element, layout.clone(), segs);
-    if overlays.is_empty() {
+    let element = if overlays.is_empty() {
         element
     } else {
-        Overlays::new(element, layout, overlays).into_any_element()
+        Overlays::new(element, layout.clone(), overlays).into_any_element()
+    };
+    if let Some((reveal, align)) = reveal
+        && let Some((range, _)) = finds.into_iter().find(|(_, current)| *current)
+    {
+        let edges = reveal.edges.clone();
+        div()
+            .on_children_prepainted(move |_, _, _| {
+                edges.set(table_match_edges(&layout, &range, align));
+            })
+            .child(element)
+            .into_any_element()
+    } else {
+        element
     }
+}
+
+fn table_match_edges(
+    layout: &gpui::TextLayout,
+    range: &Range<usize>,
+    align: TableAlign,
+) -> Option<(Pixels, Pixels)> {
+    let start = layout.position_for_index(range.start)?.x;
+    let end = layout.position_for_index(range.end)?.x;
+    let align_offset = match align {
+        TableAlign::Left => px(0.0),
+        TableAlign::Center | TableAlign::Right => {
+            let line = layout.line_layout_for_index(range.start)?;
+            let extra = layout.bounds().size.width - line.width();
+            if align == TableAlign::Center {
+                extra / 2.0
+            } else {
+                extra
+            }
+        }
+    };
+    Some((start.min(end) + align_offset, start.max(end) + align_offset))
 }
 
 fn inline_link_menu(
@@ -1959,6 +2062,7 @@ mod tests {
         .map(Rc::new)
         .expect("a plain query compiles");
         let host = Host::preview().marked(Some(Rc::new(Marks {
+            reveal: None,
             matcher,
             current: Some(1),
             current_source: None,
@@ -2010,6 +2114,7 @@ mod tests {
         stream.set_text(source);
         let host = Host::transcript(None, None, None)
             .marked(Some(Rc::new(Marks {
+                reveal: None,
                 matcher: Rc::new(
                     crate::vm::find::Query {
                         text: "Search".into(),
@@ -2071,6 +2176,7 @@ mod tests {
             .unwrap();
         let host = Host::transcript(None, None, None)
             .marked(Some(Rc::new(Marks {
+                reveal: None,
                 matcher: Rc::new(
                     crate::vm::find::Query {
                         text: "a".into(),

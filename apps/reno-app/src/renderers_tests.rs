@@ -1079,6 +1079,7 @@ fn front_matter_draws_as_pairs_and_comments_are_hidden(cx: &mut TestAppContext) 
     let match_start = source.find(query).unwrap();
     let (host, registry) = selectable_reply(&source);
     let host = host.marked(Some(Rc::new(Marks {
+        reveal: None,
         matcher: Rc::new(
             Query {
                 text: query.to_owned(),

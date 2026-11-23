@@ -1959,3 +1959,97 @@ fn dragging_in_either_direction_across_a_hoisted_note_copies_the_visible_ranges(
         );
     }
 }
+
+#[gpui::test]
+fn find_reveals_a_clipped_table_match_again_after_manual_pan(cx: &mut TestAppContext) {
+    use reno_client::fake::transcript::{RENDER2_REPLY, RENDER2_RUN};
+
+    const QUERY: &str = "owns";
+    let (_store, root, vcx) = setup(cx);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run_id(RENDER2_RUN), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .expect("the second Render check is open");
+    let reply = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            s.items().items.iter().enumerate().find_map(|(ix, item)| {
+                let Row::Prose { text, .. } = s.items().row(s.rows(), ix)? else {
+                    return None;
+                };
+                (item.visual.is_none() && text.as_str() == RENDER2_REPLY).then_some(ix)
+            })
+        })
+    };
+    wait_for(vcx, "the rich reply arrived", |vcx| reply(vcx).is_some());
+    let ix = reply(vcx).unwrap();
+    screen.update(vcx, |s, cx| {
+        s.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+        s.note_place(cx);
+        cx.notify();
+    });
+    draw(vcx);
+
+    let match_is_visible = |vcx: &mut VisualTestContext| {
+        let table = vcx.debug_bounds("md-table-scroll").expect("table viewport");
+        let glyph_edges = screen.read_with(vcx, |s, _| {
+            [0, QUERY.len()].map(|index| s.painted_point(QUERY, index).expect("laid-out match"))
+        });
+        let inside_view = screen.read_with(vcx, |s, _| {
+            let view = s.list.viewport_bounds();
+            glyph_edges
+                .iter()
+                .all(|edge| table.contains(edge) && view.contains(edge))
+        });
+        inside_view
+            && vcx.update(|window, cx| {
+                let theme = crate::ui::theme::current(cx);
+                let view = table.scale(window.scale_factor());
+                window.painted_quads().into_iter().any(|quad| {
+                    quad.background.as_solid() == Some(theme.accent)
+                        && view.contains(&quad.bounds.origin)
+                        && view.contains(&quad.bounds.bottom_right())
+                })
+            })
+    };
+
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    type_query(vcx, QUERY);
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 1"));
+    assert!(
+        !match_is_visible(vcx),
+        "the search starts at the table's left edge"
+    );
+
+    for keys in ["enter", "enter", "cmd-g"] {
+        vcx.simulate_keystrokes(keys);
+        for _ in 0..3 {
+            draw(vcx);
+        }
+        assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 1"));
+        assert!(
+            match_is_visible(vcx),
+            "{keys} reveals the whole painted match"
+        );
+        let at = vcx.debug_bounds("md-table-scroll").unwrap().center();
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(5000.0), px(0.0))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Started,
+            source: gpui::ScrollSource::Pointer,
+        });
+        for _ in 0..3 {
+            draw(vcx);
+        }
+        assert!(
+            !match_is_visible(vcx),
+            "the owner can pan away after {keys}"
+        );
+    }
+}
