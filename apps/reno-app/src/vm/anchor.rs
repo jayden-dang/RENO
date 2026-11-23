@@ -542,10 +542,10 @@ impl Builder<'_> {
         let word_end = text.find(char::is_whitespace).unwrap_or(text.len()).max(1);
         let word = &text[..word_end.min(text.len())];
         let window = self.window();
-        let skip_comments = skip_comments && !text.contains("<!--");
+        let skip_prefix_comments = skip_comments && !text.contains("<!--");
         let mut seen = 0;
         for (at, _) in window.match_indices(word) {
-            if skip_comments {
+            if skip_prefix_comments {
                 while seen < at {
                     let Some(open) = window[seen..at].find("<!--") else {
                         seen = at;
@@ -558,7 +558,8 @@ impl Builder<'_> {
                     continue;
                 }
             }
-            if let Some((len, pairs)) = walk(&window[at..], text, skip_comments) {
+            if let Some((len, pairs)) = walk(&window[at..], text, Spelling::Prose { skip_comments })
+            {
                 let from = self.cursor + at;
                 let pairs: Vec<_> = pairs.iter().map(|(s, t)| (from + s, *t)).collect();
                 self.cursor = from + len;
@@ -635,7 +636,7 @@ fn footnote_offsets(spelling: &str, label: &str, src: &Range<usize>) -> Vec<(usi
         return Vec::new();
     };
     let inside = body.trim_start_matches(|c: char| c.is_ascii_whitespace());
-    let Some((_, label_offsets)) = walk(inside, label, false) else {
+    let Some((_, label_offsets)) = walk(inside, label, Spelling::FootnoteLabel) else {
         return Vec::new();
     };
     let label_start = src.start + 2 + body.len() - inside.len();
@@ -652,28 +653,54 @@ fn footnote_offsets(spelling: &str, label: &str, src: &Range<usize>) -> Vec<(usi
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum Spelling {
+    Prose { skip_comments: bool },
+    FootnoteLabel,
+}
+
 /// Reads `text` off the front of `source`: a run of whitespace in the text matches a run of
 /// whitespace in the source (a line break, with its quote or list margin), and a backslash
 /// before punctuation is skipped. The source bytes used, with `(source, text)` offsets at each
 /// character; `None` when the text is not there.
-fn walk(source: &str, text: &str, skip_comments: bool) -> Option<(usize, Vec<(usize, usize)>)> {
+fn walk(source: &str, text: &str, spelling: Spelling) -> Option<(usize, Vec<(usize, usize)>)> {
+    let prose = matches!(spelling, Spelling::Prose { .. });
+    let skip_comments = matches!(
+        spelling,
+        Spelling::Prose {
+            skip_comments: true
+        }
+    );
+    let space = |c: char| {
+        if prose {
+            c.is_whitespace()
+        } else {
+            c.is_ascii_whitespace()
+        }
+    };
     let mut pairs = Vec::new();
     let mut at = 0;
     let mut chars = text.char_indices().peekable();
     while let Some((t, c)) = chars.next() {
-        if skip_comments {
+        if skip_comments && !text[t..].starts_with("<!--") {
             while let Some(len) = html_comment_len(&source[at..]) {
                 at += len;
             }
         }
         pairs.push((at, t));
-        if c.is_whitespace() {
+        if space(c) {
             let start = at;
+            while chars.peek().is_some_and(|(_, n)| space(*n)) {
+                chars.next();
+            }
+            let next_is_literal_comment = chars
+                .peek()
+                .is_some_and(|(next, _)| text[*next..].starts_with("<!--"));
             loop {
                 at += source[at..]
-                    .find(|s: char| !s.is_whitespace() && s != '>')
+                    .find(|s: char| !(space(s) || prose && s == '>'))
                     .unwrap_or(source.len() - at);
-                let Some(len) = skip_comments
+                let Some(len) = (skip_comments && !next_is_literal_comment)
                     .then(|| html_comment_len(&source[at..]))
                     .flatten()
                 else {
@@ -683,9 +710,6 @@ fn walk(source: &str, text: &str, skip_comments: bool) -> Option<(usize, Vec<(us
             }
             if at == start {
                 return None;
-            }
-            while chars.peek().is_some_and(|(_, n)| n.is_whitespace()) {
-                chars.next();
             }
             continue;
         }
@@ -721,6 +745,39 @@ mod tests {
             let visible = source.find("-->").unwrap() + 3;
             assert_eq!(footnote.src, visible..visible + "[^n]".len());
             assert!(footnote.is_atomic());
+        }
+    }
+
+    #[test]
+    fn raw_html_keeps_source_anchors_with_both_a_literal_and_a_hidden_comment() {
+        let source = "<div title=\"<!--\">Visible<!-- drop --> text</div>";
+        let anchored = atoms_of(source);
+        let raw = &anchored[0];
+        assert_eq!(raw.text, "<div title=\"<!--\">Visible text</div>");
+        assert_eq!(raw.src, 0..source.len());
+        let visible = source.find("text").unwrap();
+        let drawn = raw.text.find("text").unwrap();
+        assert_eq!(
+            raw.search_source(&(drawn..drawn + 4)),
+            Some(visible..visible + 4)
+        );
+        assert_eq!(copy(&anchored, 0..source.len()), raw.text);
+    }
+
+    #[test]
+    fn a_literal_greater_than_stays_searchable_inside_a_footnote_label() {
+        for raw in ["a > b", "a  >   b"] {
+            let source = format!("Use [^{raw}].\n\n[^a > b]: Note.");
+            let anchored = atoms_of(&source);
+            let note = anchored.iter().find(|atom| atom.text == "[a > b]").unwrap();
+            let source_mark = source.find('>').unwrap();
+            let drawn_mark = note.text.find('>').unwrap();
+            assert_eq!(
+                note.search_source(&(drawn_mark..drawn_mark + 1)),
+                Some(source_mark..source_mark + 1),
+                "{source:?}"
+            );
+            assert!(note.is_atomic());
         }
     }
 
