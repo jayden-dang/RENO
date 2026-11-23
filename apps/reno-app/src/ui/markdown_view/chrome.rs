@@ -3,12 +3,13 @@
 //! (or a button has keyboard focus). A diagram also has Preview and Code tabs (TRANSCRIPT-10.1).
 //!
 //! Copy puts only the block's code on the clipboard and says so with a toast. Whether a block
-//! wraps, and which tab a diagram is on, are remembered per block in bounded stores, so they
-//! survive the row scrolling away.
+//! wraps, which tab a diagram is on, and how far it is zoomed, are remembered per
+//! block in bounded stores, so they survive the row scrolling away.
 
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
-use gpui::{AnyElement, App, ClipboardItem, ElementId, Stateful, div, prelude::*, px};
+use gpui::{AnyElement, App, ClipboardItem, ElementId, Stateful, Task, div, prelude::*, px};
 
 use super::lru::Lru;
 use crate::ui::icon::Icon;
@@ -88,20 +89,206 @@ pub(crate) fn set_tab(key: u64, tab: DiagramTab, cx: &mut App) {
     super::settled(cx);
 }
 
-/// The Preview and Code tabs of the diagram `key`, `current` pressed.
-pub(crate) fn tab_bar(key: u64, current: DiagramTab, theme: &Theme) -> AnyElement {
+/// The most a diagram is zoomed: twice its natural size.
+pub(crate) const MAX_ZOOM: f32 = 2.0;
+/// How long after the last zoom step the drawing is made again at the new size.
+pub(crate) const RERASTER_AFTER: Duration = Duration::from_millis(300);
+/// How much one point of wheel travel zooms, as a rate of the current size.
+const ZOOM_PER_POINT: f32 = 0.002;
+/// A zoom this near the fit is the fit.
+const FIT_EPSILON: f32 = 0.005;
+
+/// How far a diagram is zoomed in: a share of its natural size. A diagram that is not zoomed fits
+/// the column, and has no `Zoom`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Zoom {
+    pub(crate) factor: f32,
+}
+
+impl Zoom {
+    /// The zoom after the wheel travelled `delta` points (up zooms in) from `from`, never below
+    /// `fit` (the share of its size at which it fits the column) nor above [`MAX_ZOOM`]. `None`
+    /// is the fit itself.
+    fn stepped(from: f32, delta: f32, fit: f32) -> Option<Zoom> {
+        let factor = (from.max(fit) * (delta * ZOOM_PER_POINT).exp()).min(MAX_ZOOM);
+        (factor > fit + FIT_EPSILON).then_some(Zoom { factor })
+    }
+
+    /// The level as the readout says it.
+    pub(crate) fn percent(self) -> u32 {
+        (self.factor * 100.0).round() as u32
+    }
+}
+
+/// A diagram's zoom, the share of its size its drawing was last made at, and the deadline that
+/// makes it again.
+struct Zoomed {
+    zoom: Zoom,
+    /// Until the deadline fires the old drawing is stretched to the new size.
+    raster: f32,
+    /// Dropping it (a new step, a reset, the store forgetting the diagram) cancels the wait.
+    due: Option<Task<()>>,
+}
+
+/// The zoom of each diagram, keyed by the hash of its source like [`Tabs`].
+struct Zooms {
+    by_key: Lru<u64, Zoomed>,
+    #[cfg(test)]
+    fired: usize,
+}
+
+impl gpui::Global for Zooms {}
+
+impl Default for Zooms {
+    fn default() -> Self {
+        Self {
+            by_key: Lru::new(WRAP_ENTRIES, usize::MAX),
+            #[cfg(test)]
+            fired: 0,
+        }
+    }
+}
+
+/// How far the diagram `key` is zoomed; `None` while it fits the column.
+pub(crate) fn zoom(key: u64, cx: &mut App) -> Option<Zoom> {
+    cx.default_global::<Zooms>()
+        .by_key
+        .get(&key)
+        .map(|held| held.zoom)
+}
+
+/// The share of its natural size the diagram `key` is drawn at: the size it had when the owner
+/// last stopped zooming, and one while it fits.
+pub(crate) fn raster_factor(key: u64, cx: &mut App) -> f32 {
+    cx.default_global::<Zooms>()
+        .by_key
+        .get(&key)
+        .map_or(1.0, |held| held.raster)
+}
+
+/// Back to fit.
+pub(crate) fn reset_zoom(key: u64, cx: &mut App) {
+    if cx.default_global::<Zooms>().by_key.remove(&key).is_some() {
+        super::settled(cx);
+    }
+}
+
+/// The wheel travelled `delta` points over the diagram `key`, which fits the column at `fit` of
+/// its size: zoom, and arm the redraw at the new size [`RERASTER_AFTER`] after the last step. A
+/// step that changes nothing (at either end) arms nothing.
+pub(crate) fn zoom_by(key: u64, delta: f32, fit: f32, cx: &mut App) {
+    let zooms = &mut cx.default_global::<Zooms>().by_key;
+    let held = zooms.remove(&key);
+    let from = held.as_ref().map_or(fit, |held| held.zoom.factor);
+    let next = Zoom::stepped(from, delta, fit);
+    let unchanged = match (&held, next) {
+        (Some(held), Some(next)) => held.zoom == next,
+        (None, None) => true,
+        _ => false,
+    };
+    if unchanged {
+        if let Some(held) = held {
+            zooms.insert(key, held, 1);
+        }
+        return;
+    }
+    if let Some(zoom) = next {
+        let raster = held.as_ref().map_or(1.0, |held| held.raster);
+        let due = cx.spawn(async move |cx| {
+            cx.background_executor().timer(RERASTER_AFTER).await;
+            cx.update(|cx| draw_again_at(key, cx));
+        });
+        cx.default_global::<Zooms>().by_key.insert(
+            key,
+            Zoomed {
+                zoom,
+                raster,
+                due: Some(due),
+            },
+            1,
+        );
+    }
+    super::settled(cx);
+}
+
+/// The deadline: the drawing of `key` is made again at the size the owner settled on.
+fn draw_again_at(key: u64, cx: &mut App) {
+    let zooms = cx.default_global::<Zooms>();
+    let Some(mut held) = zooms.by_key.remove(&key) else {
+        return;
+    };
+    held.raster = held.zoom.factor.max(1.0);
+    if let Some(done) = held.due.take() {
+        done.detach();
+    }
+    zooms.by_key.insert(key, held, 1);
+    #[cfg(test)]
+    {
+        zooms.fired += 1;
+    }
+    super::settled(cx);
+}
+
+/// How many times the deadline has fired, for its test.
+#[cfg(test)]
+pub(crate) fn rerasters(cx: &mut App) -> usize {
+    cx.default_global::<Zooms>().fired
+}
+
+/// The zoom readout and its reset, at the right of the tabs while the drawing is zoomed.
+fn zoom_readout(key: u64, zoom: Zoom, theme: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .ml(px(10.0))
+        .child(
+            div()
+                .debug_selector(|| "diagram-zoom-level".to_owned())
+                .text_size(px(12.0))
+                .text_color(theme.muted)
+                .child(format!("{}%", zoom.percent())),
+        )
+        .child(
+            kit::line_button(
+                theme,
+                "diagram-zoom-reset",
+                None,
+                "Reset zoom",
+                kit::Tone::Quiet,
+                true,
+            )
+            .on_click(move |_, _, cx| reset_zoom(key, cx)),
+        )
+        .into_any_element()
+}
+
+/// The Preview and Code tabs of the diagram `key`, `current` pressed, and the zoom readout when
+/// the drawing is `zoomed`.
+pub(crate) fn tab_bar(
+    key: u64,
+    current: DiagramTab,
+    zoomed: Option<Zoom>,
+    theme: &Theme,
+) -> AnyElement {
     let tab = |face, id, label| {
         kit::segment(theme, id, label, current == face)
             .on_click(move |_, _, cx| set_tab(key, face, cx))
     };
     div()
         .flex()
+        .items_center()
         .px(px(8.0))
         .pt(px(8.0))
         .child(kit::segmented(theme).children([
             tab(DiagramTab::Preview, "diagram-tab-preview", "Preview"),
             tab(DiagramTab::Code, "diagram-tab-code", "Code"),
         ]))
+        .children(
+            zoomed
+                .filter(|_| current == DiagramTab::Preview)
+                .map(|zoom| zoom_readout(key, zoom, theme)),
+        )
         .into_any_element()
 }
 
@@ -230,6 +417,23 @@ mod tests {
             }
             assert!(cx.default_global::<Wraps>().0.len() <= WRAP_ENTRIES);
         });
+    }
+
+    #[test]
+    fn a_zoom_step_is_held_between_fit_and_twice_the_size() {
+        let fit = 0.8;
+        assert_eq!(Zoom::stepped(fit, -300.0, fit), None, "out from fit is fit");
+        assert_eq!(Zoom::stepped(fit, 0.0, fit), None, "no travel, no zoom");
+        let in_a_notch = Zoom::stepped(fit, 60.0, fit).expect("zoomed in");
+        assert!(in_a_notch.factor > fit && in_a_notch.factor < MAX_ZOOM);
+        assert_eq!(Zoom::stepped(1.9, 1000.0, fit).map(|z| z.factor), Some(2.0));
+        assert_eq!(Zoom::stepped(1.3, -1000.0, fit), None, "all the way out");
+        let half_way = Zoom::stepped(1.5, -100.0, fit).expect("still zoomed");
+        assert!(half_way.factor < 1.5 && half_way.factor > fit);
+        // A column that grew since the zoom was set: a zoom under the new fit steps from the fit.
+        let stale = Zoom::stepped(0.6, 60.0, 0.9).expect("zoomed in from fit");
+        assert!(stale.factor > 0.9);
+        assert_eq!(Zoom { factor: 1.5 }.percent(), 150);
     }
 
     #[gpui::test]

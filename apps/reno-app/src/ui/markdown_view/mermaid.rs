@@ -378,6 +378,25 @@ pub(crate) struct Diagram {
     pub(crate) image: Arc<gpui::RenderImage>,
     pub(crate) width: f32,
     pub(crate) height: f32,
+    /// What it shows and in which colours ([`look_of`]), whatever size it is drawn at.
+    look: u64,
+}
+
+/// A fingerprint of a diagram's source and theme: two drawings with the same one differ only in
+/// the size they were made at.
+fn look_of(source: &str, theme: &Theme) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    theme_key(theme).hash(&mut hasher);
+    hasher.finish()
+}
+
+impl Diagram {
+    /// Whether this is a drawing of `source` in `theme`, at whatever size: what stands in for a
+    /// drawing being made again at a new size needs no "Rendering\u{2026}" note.
+    pub(crate) fn is_look_of(&self, source: &str, theme: &Theme) -> bool {
+        self.look == look_of(source, theme)
+    }
 }
 
 /// Where a diagram is.
@@ -498,6 +517,7 @@ pub(crate) fn drawing(
         Some(Slot::Failed) => return Drawing::Failed,
         None => {}
     }
+    let look = look_of(source, theme);
     let (text, theme) = (source.to_owned(), *theme);
     let task = cx.spawn({
         let key = key.clone();
@@ -517,6 +537,7 @@ pub(crate) fn drawing(
                         image,
                         width: raster.width,
                         height: raster.height,
+                        look,
                     }))
                 });
                 let diagrams = cx.default_global::<Diagrams>();

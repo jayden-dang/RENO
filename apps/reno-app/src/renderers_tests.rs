@@ -565,3 +565,197 @@ fn a_diagram_drawn_again_keeps_its_picture_and_says_so(cx: &mut TestAppContext) 
     settle(vcx, |vcx| !painted(vcx, "md-diagram-rendering"));
     assert!(painted(vcx, "md-diagram"));
 }
+
+/// A flowchart wider than the transcript's column, so it fits no better than three quarters of
+/// its size and scrolls sideways once it is zoomed.
+const WIDE_FLOW: &str = "flowchart LR\n  A[Client] --> B[Handshake] --> C[Negotiation] --> D[Session] --> E[Transfer] --> F[Teardown] --> G[Archive]";
+
+fn wide_flow_key() -> u64 {
+    markdown_view::chrome::key_of(Some("mermaid"), WIDE_FLOW)
+}
+
+fn natural_width_of(source: &str) -> f32 {
+    let theme = Theme::for_appearance(Appearance::Dark);
+    let svg = markdown_view::mermaid::render_svg(source, &theme).unwrap();
+    markdown_view::mermaid::rasterize(&svg, 1.0).unwrap().width
+}
+
+/// One wheel step of `dy` points over the middle of the drawn diagram, with or without the
+/// command key, and the redraw that follows.
+fn wheel(vcx: &mut VisualTestContext, dy: f32, command: bool) {
+    let at = vcx.debug_bounds("md-diagram").expect("drawn").center();
+    wheel_by(vcx, at, gpui::point(px(0.0), px(dy)), command);
+}
+
+fn wheel_by(
+    vcx: &mut VisualTestContext,
+    at: gpui::Point<gpui::Pixels>,
+    delta: gpui::Point<gpui::Pixels>,
+    command: bool,
+) {
+    vcx.simulate_event(gpui::ScrollEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(delta),
+        modifiers: if command {
+            gpui::Modifiers::command()
+        } else {
+            gpui::Modifiers::none()
+        },
+        touch_phase: gpui::TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
+    });
+    draw(vcx);
+}
+
+fn zoom_of(vcx: &mut VisualTestContext) -> Option<f32> {
+    let key = wide_flow_key();
+    vcx.update(|_, cx| markdown_view::chrome::zoom(key, cx).map(|z| z.factor))
+}
+
+fn zoomed_width(vcx: &mut VisualTestContext) -> f32 {
+    let zoom = vcx.debug_bounds("md-diagram-zoom").expect("drawn");
+    f32::from(zoom.size.width) - 24.0
+}
+
+/// Holding the command key while scrolling over a diagram zooms it, from where it fits the
+/// column to twice its size, shows the level with a reset while zoomed, and the reset (or
+/// scrolling back out) returns it to fit. Scrolling without the key never zooms.
+#[gpui::test]
+fn cmd_scroll_zooms_between_fit_and_two_hundred_percent_and_reset_returns(cx: &mut TestAppContext) {
+    let natural = natural_width_of(WIDE_FLOW);
+    let text = format!("```mermaid\n{WIDE_FLOW}\n```");
+    let (_view, vcx) = probe(cx, &text, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+    assert!(
+        natural > 700.0,
+        "the diagram must be wider than the column to tell fit from natural size: {natural}"
+    );
+    let fit = zoomed_width(vcx);
+    assert!(
+        fit < natural,
+        "fitted to the column, not at its natural size"
+    );
+    assert_eq!(zoom_of(vcx), None);
+    assert!(!painted(vcx, "diagram-zoom-reset"), "no reset while fitted");
+
+    // No command key: the wheel is the list's, not the diagram's.
+    wheel(vcx, 200.0, false);
+    assert_eq!(zoom_of(vcx), None);
+
+    // Scrolling out from fit goes nowhere.
+    wheel(vcx, -300.0, true);
+    assert_eq!(zoom_of(vcx), None);
+    assert!(!painted(vcx, "diagram-zoom-reset"));
+
+    // One step in: zoomed, with the reset showing.
+    wheel(vcx, 40.0, true);
+    let first = zoom_of(vcx).expect("zoomed");
+    assert!(first > fit / natural, "larger than fit: {first}");
+    assert!(first < 2.0);
+    assert!(painted(vcx, "diagram-zoom-reset"));
+    assert!(
+        (zoomed_width(vcx) - first * natural).abs() < 1.5,
+        "drawn at the zoom's share of its size"
+    );
+
+    // Far past the top: held at twice its size, never more.
+    for _ in 0..30 {
+        wheel(vcx, 200.0, true);
+    }
+    assert_eq!(zoom_of(vcx), Some(2.0));
+    assert!((zoomed_width(vcx) - 2.0 * natural).abs() < 1.5);
+
+    // Sideways scroll reaches the part of the zoomed diagram outside the column.
+    let before = vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x;
+    let at = vcx.debug_bounds("md-diagram").unwrap().center();
+    wheel_by(vcx, at, gpui::point(px(-120.0), px(0.0)), false);
+    let after = vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x;
+    assert!(after < before - px(100.0), "{before:?} -> {after:?}");
+    assert_eq!(zoom_of(vcx), Some(2.0), "a sideways scroll is not a zoom");
+
+    // The reset goes straight back to fit.
+    click(vcx, "diagram-zoom-reset");
+    assert_eq!(zoom_of(vcx), None);
+    assert!((zoomed_width(vcx) - fit).abs() < 1.5);
+    assert!(!painted(vcx, "diagram-zoom-reset"));
+
+    // And so does scrolling all the way out.
+    wheel(vcx, 60.0, true);
+    assert!(zoom_of(vcx).is_some());
+    for _ in 0..30 {
+        wheel(vcx, -200.0, true);
+    }
+    assert_eq!(zoom_of(vcx), None);
+    assert!((zoomed_width(vcx) - fit).abs() < 1.5);
+}
+
+/// The picture is sharpened once the owner stops zooming: one new drawing 300 ms after the last
+/// step, however many steps came before, and none while steps keep coming.
+#[gpui::test]
+fn the_re_raster_fires_once_after_the_last_zoom_step(cx: &mut TestAppContext) {
+    use markdown_view::chrome::{self, RERASTER_AFTER};
+    let text = format!("```mermaid\n{WIDE_FLOW}\n```");
+    let (_view, vcx) = probe(cx, &text, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+    let key = wide_flow_key();
+    let drawings =
+        |vcx: &mut VisualTestContext| vcx.update(|_, cx| markdown_view::mermaid::cached(cx));
+    let raster = |vcx: &mut VisualTestContext| vcx.update(|_, cx| chrome::raster_factor(key, cx));
+    let fired = |vcx: &mut VisualTestContext| vcx.update(|_, cx| chrome::rerasters(cx));
+    let base = drawings(vcx);
+    assert_eq!(raster(vcx), 1.0);
+
+    for step in 0..3 {
+        wheel(vcx, 150.0, true);
+        if step < 2 {
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            vcx.run_until_parked();
+        }
+    }
+    let zoom = zoom_of(vcx).expect("zoomed");
+    assert!(zoom > 1.0, "zoomed past its natural size: {zoom}");
+
+    vcx.executor()
+        .advance_clock(RERASTER_AFTER - std::time::Duration::from_millis(1));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(
+        (fired(vcx), raster(vcx)),
+        (0, 1.0),
+        "not before the wait is up"
+    );
+    assert_eq!(
+        drawings(vcx),
+        base,
+        "no new drawing while steps may still come"
+    );
+
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(2));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(fired(vcx), 1, "once, not once per step");
+    assert!(
+        (raster(vcx) - zoom).abs() < 1e-4,
+        "drawn at the zoom it settled on"
+    );
+    assert_eq!(drawings(vcx), base + 1, "one new drawing, at the new size");
+
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(2_000));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(fired(vcx), 1, "nothing is armed once it has fired");
+    assert_eq!(drawings(vcx), base + 1);
+
+    // A new step arms it again, and only the last of a burst fires.
+    wheel(vcx, -20.0, true);
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    wheel(vcx, -20.0, true);
+    vcx.executor()
+        .advance_clock(RERASTER_AFTER + std::time::Duration::from_millis(1));
+    vcx.run_until_parked();
+    assert_eq!(fired(vcx), 2);
+}

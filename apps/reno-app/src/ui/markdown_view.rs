@@ -844,20 +844,84 @@ fn display_math(tex: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
 /// column whole, and only one that would need its labels smaller than this to fit scrolls.
 const DIAGRAM_MIN_SCALE: f32 = 0.75;
 
+/// The padding around a drawn diagram, on each side.
+const DIAGRAM_PAD: f32 = 12.0;
+
 /// A drawn diagram: fit to the column, but never smaller than three quarters of its size, so its
 /// labels stay legible; a wider diagram scrolls sideways.
 pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElement {
+    diagram_in_scroller(diagram, key, None)
+}
+
+/// Where the zoom of a diagram is kept: its key, and how far it is zoomed now.
+struct Zooming {
+    key: u64,
+    now: Option<chrome::Zoom>,
+}
+
+/// The picture inside a box that scrolls sideways. With a `zooming`, holding the command key while
+/// scrolling over it zooms it between fit-to-width and [`chrome::MAX_ZOOM`], and what that
+/// leaves outside the column is reached by scrolling sideways.
+fn diagram_in_scroller(
+    diagram: &mermaid::Diagram,
+    scroll_key: u64,
+    zooming: Option<Zooming>,
+) -> AnyElement {
+    let zoom = zooming.as_ref().and_then(|z| z.now).map(|z| z.factor);
+    // Zoomed in, the picture is its zoomed size and no less. Zoomed out of its natural size (a
+    // column narrower than that), it is that share of its size and no less than the fit.
+    let (scale, min_scale) = match zoom {
+        Some(factor) if factor >= 1.0 => (factor, 1.0),
+        Some(factor) => (1.0, factor.max(DIAGRAM_MIN_SCALE)),
+        None => (1.0, DIAGRAM_MIN_SCALE),
+    };
+    let (width, height) = (diagram.width * scale, diagram.height * scale);
+    let column: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = Rc::default();
+    let natural = diagram.width;
     div()
         .debug_selector(|| "md-diagram".to_owned())
-        .id(("md-diagram-scroll", key as usize))
+        .id(("md-diagram-scroll", scroll_key as usize))
+        .relative()
         .w_full()
         .overflow_x_scroll()
-        .child(div().w_full().flex().p(px(12.0)).child(Picture {
-            image: diagram.image.clone(),
-            width: diagram.width,
-            height: diagram.height,
-            min_scale: DIAGRAM_MIN_SCALE,
-        }))
+        .restrict_scroll_to_axis()
+        .child({
+            let seen = column.clone();
+            gpui::canvas(move |bounds, _, _| seen.set(Some(bounds)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h(px(0.0))
+        })
+        .child(
+            div()
+                .debug_selector(|| "md-diagram-zoom".to_owned())
+                .w_full()
+                .min_w(px(width * min_scale + 2.0 * DIAGRAM_PAD))
+                .flex()
+                .p(px(DIAGRAM_PAD))
+                .child(Picture {
+                    image: diagram.image.clone(),
+                    width,
+                    height,
+                    min_scale,
+                })
+                .when_some(zooming, |d, zooming| {
+                    d.on_scroll(move |event, window, cx| {
+                        if !event.modifiers.platform {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        let Some(bounds) = column.get() else { return };
+                        let inner = f32::from(bounds.size.width) - 2.0 * DIAGRAM_PAD;
+                        let fit = picture::shown_width(inner, natural, DIAGRAM_MIN_SCALE)
+                            / natural.max(1.0);
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        chrome::zoom_by(zooming.key, f32::from(delta.y), fit, cx);
+                    })
+                }),
+        )
         .into_any_element()
 }
 
@@ -878,7 +942,9 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
     let key = chrome::key_of(Some("mermaid"), source);
     let ordinal = env.next_card();
     let place = diagram_place(env, ordinal);
-    let drawing = mermaid::drawing(source, env.theme, env.scale, place, cx);
+    let zoom = chrome::zoom(key, cx);
+    let raster = chrome::raster_factor(key, cx);
+    let drawing = mermaid::drawing(source, env.theme, env.scale * raster, place, cx);
     if matches!(drawing, mermaid::Drawing::Failed) {
         return code_block(source, Some("mermaid"), None, env, cx);
     }
@@ -901,7 +967,7 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
     let face = match (tab, drawing) {
         (chrome::DiagramTab::Code, _) => source_view().into_any_element(),
         (chrome::DiagramTab::Preview, mermaid::Drawing::Ready(diagram)) => {
-            diagram_picture(&diagram, scroll_key)
+            diagram_in_scroller(&diagram, scroll_key, Some(Zooming { key, now: zoom }))
         }
         (
             chrome::DiagramTab::Preview,
@@ -909,8 +975,12 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
                 previous: Some(old),
             },
         ) => div()
-            .child(diagram_picture(&old, scroll_key))
-            .child(note())
+            .child(diagram_in_scroller(
+                &old,
+                scroll_key,
+                Some(Zooming { key, now: zoom }),
+            ))
+            .when(!old.is_look_of(source, env.theme), |d| d.child(note()))
             .into_any_element(),
         (chrome::DiagramTab::Preview, _) => {
             div().child(source_view()).child(note()).into_any_element()
@@ -927,7 +997,7 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
         },
         env.theme,
         div()
-            .child(chrome::tab_bar(key, tab, env.theme))
+            .child(chrome::tab_bar(key, tab, zoom, env.theme))
             .child(face)
             .into_any_element(),
     );
