@@ -13,7 +13,9 @@ use super::select::Spot;
 use super::*;
 use crate::prefs::PREVIEW_LINES;
 use crate::ui::markdown_view::lru::Lru;
-use crate::ui::markdown_view::{Host, SelectHost, Streaming, select as pick, visual::visual_view};
+use crate::ui::markdown_view::{
+    Grew, Host, SelectHost, Streaming, select as pick, visual::visual_view,
+};
 use crate::ui::motion;
 use crate::vm::find;
 use crate::vm::selection::{self, Slot};
@@ -187,8 +189,18 @@ impl RunScreen {
                 // The reply is drawn for this run's worktree, with its find hits painted over the
                 // words and its texts tracked for selection.
                 let client = self.store.read(cx).client();
+                let screen = cx.weak_entity();
                 let host =
                     Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
+                        .when_grown(Some(Grew(Rc::new(move |cx| {
+                            screen
+                                .update(cx, |this, cx| {
+                                    if this.list.is_following_tail() {
+                                        this.pause_following(cx);
+                                    }
+                                })
+                                .ok();
+                        }))))
                         .while_streaming(streaming)
                         .marked(self.find_marks(*key))
                         .selectable(Some(Rc::new(SelectHost {

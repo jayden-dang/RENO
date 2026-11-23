@@ -600,12 +600,146 @@ fn opening_a_fold_while_following_stops_following(
     );
     click(vcx, &format!("worked-{}", fold.0));
     draw(vcx);
-    assert!(
-        !screen.read_with(vcx, |s, _| s.is_following_tail()),
-        "what grew stays in view"
-    );
+    stops_following_and_keeps_its_place(vcx, &screen, "opening a fold");
+}
+
+/// One wheel step of `dy` points with the command key held, over the middle of what `selector`
+/// paints.
+fn command_wheel(vcx: &mut VisualTestContext, selector: &'static str, dy: f32) {
+    let at = vcx.debug_bounds(selector).expect("drawn").center();
+    vcx.simulate_event(gpui::ScrollEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(dy))),
+        modifiers: gpui::Modifiers::command(),
+        touch_phase: gpui::TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
+    });
+    draw(vcx);
+}
+
+/// Following the tail, then what the owner grows: the view stops following, shows "jump to
+/// latest", and the place it rests at is the one kept.
+fn stops_following_and_keeps_its_place(
+    vcx: &mut VisualTestContext,
+    screen: &Entity<RunScreen>,
+    what: &str,
+) {
+    wait_for(vcx, &format!("{what}: the view stopped following"), |vcx| {
+        !screen.read_with(vcx, |s, _| s.is_following_tail())
+    });
     wait_for(vcx, "painted(vcx, \"jump-latest\")", |vcx| {
         painted(vcx, "jump-latest")
+    });
+    screen.read_with(vcx, |s, _| {
+        let place = s.saved_place();
+        assert!(place.is_some(), "{what}: the view rests off the tail");
+        assert_eq!(s.panel_state().place(), place, "{what} left a stale place");
+    });
+}
+
+#[gpui::test]
+fn zooming_a_diagram_or_opening_an_output_while_following_stops_following(cx: &mut TestAppContext) {
+    let (store, _root, vcx, screen) = open(cx);
+    let run = run_id("acp8");
+    // The run goes on with a short diagram, a step that printed something, and a closing line,
+    // all within one view, with the view following the tail.
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 0,
+                session: SessionRef("s".into()),
+            },
+            text(
+                "The flow:\n\n```mermaid\nflowchart LR\n  A[Client] --> B[Server]\n```\n\nThat is all.",
+            ),
+            ExecEvent::Tool {
+                id: "z1".into(),
+                call: ToolCall::new(
+                    "bash",
+                    serde_json::json!({ "command": "ls" }),
+                    ActionClass::Command,
+                ),
+            },
+            ExecEvent::ToolResult {
+                id: "z1".into(),
+                ok: true,
+                summary: Some("3 files".into()),
+                output: Some(reno_proto::ToolOutput {
+                    text: "a\nb\nc\n".into(),
+                    bytes: 6,
+                    truncated: false,
+                }),
+            },
+        ],
+    );
+    wait_for(vcx, "the diagram and the step are drawn", |vcx| {
+        painted(vcx, "md-diagram") && painted(vcx, "step-z1")
+    });
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    command_wheel(vcx, "md-diagram", 60.0);
+    assert!(painted(vcx, "diagram-zoom-reset"), "the diagram zoomed");
+    stops_following_and_keeps_its_place(vcx, &screen, "zooming a diagram");
+
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    wait_for(vcx, "the step is drawn again", |vcx| {
+        painted(vcx, "step-z1")
+    });
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    click(vcx, "step-z1");
+    draw(vcx);
+    assert!(painted(vcx, "tool-output-z1"), "the step opened its output");
+    stops_following_and_keeps_its_place(vcx, &screen, "opening an output");
+}
+/// What the owner grew and then left for the tail before the list had laid out is not taken back
+/// off the tail afterwards.
+#[gpui::test]
+fn going_back_to_the_tail_right_after_opening_something_keeps_following(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let (fold, _) = *folds(vcx, &screen).last().unwrap();
+    wait_for(vcx, "the fold is drawn", |vcx| {
+        painted(vcx, &format!("worked-{}", fold.0))
+    });
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+    screen.update(vcx, |s, cx| {
+        s.toggle(fold, cx);
+        s.jump_to_latest(cx);
+    });
+    for _ in 0..4 {
+        draw(vcx);
+    }
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+}
+
+/// A transcript that fits its view has no end to hold the view above: opening or zooming in it
+/// neither leaves the tail nor keeps asking to look at the view again.
+#[gpui::test]
+fn growing_what_fits_the_view_settles_and_keeps_following(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = setup(cx);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("keeper1"), window, cx);
+    });
+    let screen = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("a run screen");
+    wait_for(vcx, "the steps are drawn", |vcx| painted(vcx, "step-t1"));
+    screen.read_with(vcx, |s, _| {
+        assert!(
+            f32::from(s.list.max_offset_for_scrollbar().y) < 2.0,
+            "the run fits its view"
+        );
+    });
+    screen.update(vcx, |s, cx| s.pause_following(cx));
+    for _ in 0..5 {
+        draw(vcx);
+    }
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.rechecks, 0, "nothing left to look at again");
+        assert!(s.is_following_tail());
     });
 }
 

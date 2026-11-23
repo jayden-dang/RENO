@@ -83,6 +83,10 @@ const PROMPT_AT_TOP: f32 = 48.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
 /// How many items from the top of the view are measured again when the renderers settle.
+/// How far above the end of the transcript the view is held when it stops following there: the
+/// list takes a view within a pixel of the end for the tail.
+const HOLD_ABOVE_END: f32 = 2.0;
+
 const SETTLED_ITEMS: usize = 40;
 /// Replies whose parsed tree is kept, and replies whose files were looked up, before the least
 /// recently drawn go. A long thread has more replies than that; drawing one again parses it again.
@@ -227,6 +231,9 @@ pub(crate) struct RunScreen {
     /// and whether the owner has moved the view since this screen opened.
     place_pending: Option<Place>,
     place_moved: bool,
+    /// Frames left before the view and its place are looked at again, after the view moved with
+    /// no wheel event (the list has not laid out yet where it now rests).
+    rechecks: u8,
     /// Focus for the panel, so its letters and its keys do not reach the steer input.
     panel_focus: FocusHandle,
     /// The panel was drawn on the last frame (it is not hidden or closed).
@@ -390,6 +397,7 @@ impl RunScreen {
             panel_touched: false,
             place_pending: place,
             place_moved: false,
+            rechecks: 0,
             panel_focus: cx.focus_handle(),
             panel_shown: false,
             files: None,
@@ -546,8 +554,51 @@ impl RunScreen {
         self.open.toggle(key);
         self.reflow(key, cx);
         if opening && following {
-            self.keep_in_view(key);
+            self.keep_in_view(key, cx);
         }
+    }
+
+    /// The owner opened what grows the transcript (a fold, an output, a diagram zoom) while the
+    /// view follows the tail: it stops following where it rests, so what grew stays in view.
+    pub(crate) fn pause_following(&mut self, cx: &mut Context<Self>) {
+        self.hold_above_end();
+        self.view_moved(cx);
+    }
+
+    /// Sets the view a little above the end of the transcript. The list's own pause keeps no hold
+    /// on a bottom-aligned list that rests at its end, and takes a view within a pixel of the end
+    /// for the tail. A transcript that fits has nothing to hold.
+    fn hold_above_end(&mut self) {
+        if f32::from(self.list.max_offset_for_scrollbar().y) > HOLD_ABOVE_END {
+            self.scroll_to_px((self.scrolled_px() - HOLD_ABOVE_END).max(0.0));
+        }
+    }
+
+    /// The view moved with no wheel event: its place is kept, now and again once the list has
+    /// laid out where it rests.
+    fn view_moved(&mut self, cx: &mut Context<Self>) {
+        self.note_place(cx);
+        self.rechecks = 2;
+        cx.notify();
+    }
+
+    /// Runs on every render. The frame after the view moved, the list has laid out where it rests:
+    /// if it took the view back to the tail (what opened sat too near the end to reach the top of
+    /// the view) the view is held off the tail again; either way the place is read from there.
+    fn recheck_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rechecks == 0 {
+            return;
+        }
+        self.rechecks -= 1;
+        if self.rechecks > 0 {
+            let this = cx.entity_id();
+            window.on_next_frame(move |_, cx| cx.notify(this));
+            return;
+        }
+        if self.list.is_following_tail() {
+            self.hold_above_end();
+        }
+        self.note_place(cx);
     }
 
     /// The owner opens or closes a reasoning row. What the stream or the Thinking setting shows
@@ -607,12 +658,14 @@ impl RunScreen {
     }
 
     /// Stops following the tail, with the item of `key` at the top of the view.
-    pub(super) fn keep_in_view(&mut self, key: Key) {
+    pub(super) fn keep_in_view(&mut self, key: Key, cx: &mut Context<Self>) {
+        self.pause_following(cx);
         if let Some(ix) = self.items.item_of(key) {
             self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.0),
             });
+            self.view_moved(cx);
         }
     }
 
@@ -1413,6 +1466,7 @@ impl RunScreen {
     /// The owner moved the view: where it rests now is the place to keep, saved soon. A view at
     /// the tail has no place.
     pub(super) fn note_place(&mut self, cx: &mut Context<Self>) {
+        self.rechecks = 0;
         let place = self.saved_place();
         self.place_moved = true;
         self.place_pending = None;
@@ -1599,6 +1653,7 @@ impl Render for RunScreen {
         }
         self.remeasure_settled(cx);
         self.follow_thinking_setting(cx);
+        self.recheck_view(window, cx);
         // The texts file themselves again as the list paints them.
         self.begin_paint();
         if self.place_pending.is_some() {

@@ -115,6 +115,19 @@ pub(crate) struct Host {
     pub(crate) marks: Option<Rc<Marks>>,
     /// Where the transcript tracks painted text for selection (TRANSCRIPT-2.1).
     pub(crate) select: Option<Rc<SelectHost>>,
+    /// Told when the owner zooms a diagram in, so a host that follows the end of its content can
+    /// stop following.
+    pub(crate) grew: Option<Grew>,
+}
+
+/// What a host does when something the owner opened grows what it shows.
+#[derive(Clone)]
+pub(crate) struct Grew(pub(crate) Rc<dyn Fn(&mut App)>);
+
+impl std::fmt::Debug for Grew {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Grew")
+    }
 }
 
 /// What to paint over a reply: what to look for, and which of the reply's drawn matches is the one the
@@ -154,6 +167,7 @@ impl Host {
             streaming: false,
             marks: None,
             select: None,
+            grew: None,
         }
     }
 
@@ -171,6 +185,7 @@ impl Host {
             streaming: false,
             marks: None,
             select: None,
+            grew: None,
         }
     }
 
@@ -183,6 +198,12 @@ impl Host {
     /// Paints the find hits `marks` names.
     pub(crate) fn marked(mut self, marks: Option<Rc<Marks>>) -> Self {
         self.marks = marks;
+        self
+    }
+
+    /// Says what to do when the owner zooms a diagram in.
+    pub(crate) fn when_grown(mut self, grew: Option<Grew>) -> Self {
+        self.grew = grew;
         self
     }
 
@@ -857,6 +878,7 @@ pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElemen
 struct Zooming {
     key: u64,
     now: Option<chrome::Zoom>,
+    grew: Option<Grew>,
 }
 
 /// The picture inside a box that scrolls sideways. With a `zooming`, holding the command key while
@@ -918,7 +940,10 @@ fn diagram_in_scroller(
                         let fit = picture::shown_width(inner, natural, DIAGRAM_MIN_SCALE)
                             / natural.max(1.0);
                         let delta = event.delta.pixel_delta(window.line_height());
-                        chrome::zoom_by(zooming.key, f32::from(delta.y), fit, cx);
+                        let zoomed_in = chrome::zoom_by(zooming.key, f32::from(delta.y), fit, cx);
+                        if let Some(Grew(grew)) = zooming.grew.as_ref().filter(|_| zoomed_in) {
+                            grew(cx);
+                        }
                     })
                 }),
         )
@@ -963,11 +988,18 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
             .debug_selector(|| "md-diagram-source".to_owned())
             .child(code_body(source, (None, None), false, scroll_key, env))
     };
+    let zooming = || {
+        Some(Zooming {
+            key,
+            now: zoom,
+            grew: env.host.grew.clone(),
+        })
+    };
     let tab = chrome::tab(key, cx);
     let face = match (tab, drawing) {
         (chrome::DiagramTab::Code, _) => source_view().into_any_element(),
         (chrome::DiagramTab::Preview, mermaid::Drawing::Ready(diagram)) => {
-            diagram_in_scroller(&diagram, scroll_key, Some(Zooming { key, now: zoom }))
+            diagram_in_scroller(&diagram, scroll_key, zooming())
         }
         (
             chrome::DiagramTab::Preview,
@@ -975,11 +1007,7 @@ fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
                 previous: Some(old),
             },
         ) => div()
-            .child(diagram_in_scroller(
-                &old,
-                scroll_key,
-                Some(Zooming { key, now: zoom }),
-            ))
+            .child(diagram_in_scroller(&old, scroll_key, zooming()))
             .when(!old.is_look_of(source, env.theme), |d| d.child(note()))
             .into_any_element(),
         (chrome::DiagramTab::Preview, _) => {

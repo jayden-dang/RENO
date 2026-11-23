@@ -175,8 +175,8 @@ pub(crate) fn reset_zoom(key: u64, cx: &mut App) {
 
 /// The wheel travelled `delta` points over the diagram `key`, which fits the column at `fit` of
 /// its size: zoom, and arm the redraw at the new size [`RERASTER_AFTER`] after the last step. A
-/// step that changes nothing (at either end) arms nothing.
-pub(crate) fn zoom_by(key: u64, delta: f32, fit: f32, cx: &mut App) {
+/// step that changes nothing (at either end) arms nothing. Whether the drawing got bigger.
+pub(crate) fn zoom_by(key: u64, delta: f32, fit: f32, cx: &mut App) -> bool {
     let zooms = &mut cx.default_global::<Zooms>().by_key;
     let held = zooms.remove(&key);
     let from = held.as_ref().map_or(fit, |held| held.zoom.factor);
@@ -190,8 +190,9 @@ pub(crate) fn zoom_by(key: u64, delta: f32, fit: f32, cx: &mut App) {
         if let Some(held) = held {
             zooms.insert(key, held, 1);
         }
-        return;
+        return false;
     }
+    let grew = next.is_some_and(|zoom| zoom.factor > from);
     if let Some(zoom) = next {
         let raster = held.as_ref().map_or(1.0, |held| held.raster);
         let due = cx.spawn(async move |cx| {
@@ -209,6 +210,7 @@ pub(crate) fn zoom_by(key: u64, delta: f32, fit: f32, cx: &mut App) {
         );
     }
     super::settled(cx);
+    grew
 }
 
 /// The deadline: the drawing of `key` is made again at the size the owner settled on.

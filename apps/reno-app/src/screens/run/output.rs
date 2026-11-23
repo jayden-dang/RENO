@@ -40,7 +40,7 @@ impl RunScreen {
         set.toggle(id.to_owned());
         self.reflow(key, cx);
         if opening && following {
-            self.keep_in_view(key);
+            self.keep_in_view(key, cx);
         }
     }
 
