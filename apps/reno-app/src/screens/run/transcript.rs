@@ -100,7 +100,7 @@ impl RunScreen {
     }
 
     /// The run a row belongs to: the thread's `n`th, in the high bits of its key.
-    fn run_of(&self, key: Key) -> RunId {
+    pub(super) fn run_of(&self, key: Key) -> RunId {
         usize::try_from(key.0 >> 40)
             .ok()
             .and_then(|n| self.runs.get(n))
