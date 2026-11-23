@@ -665,6 +665,46 @@ impl RunScreen {
         )
     }
 
+    fn resource_links(
+        &self,
+        theme: &Theme,
+        key: Key,
+        call: &ToolEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let files = self.file_links_for(self.run_of(key), cx);
+        let targets = self.result_targets(key, &call.id)?;
+        let targets: Vec<_> = targets
+            .iter()
+            .filter(|target| files.resolves(&target.path, cx))
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .children(targets.into_iter().enumerate().map(|(ix, target)| {
+                    let id = if ix == 0 {
+                        format!("resource-link-{}", call.id)
+                    } else {
+                        format!("resource-link-{}-{ix}", call.id)
+                    };
+                    let files = files.clone();
+                    kit::line_button(theme, id, None, target.path.clone(), kit::Tone::Quiet, true)
+                        .on_click(move |_, window, cx| {
+                            if files.resolves(&target.path, cx) {
+                                files.open(target.clone(), window, cx);
+                            }
+                        })
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn output_block(
         &self,
         theme: &Theme,
@@ -822,6 +862,7 @@ impl RunScreen {
                             }),
                     ),
             )
+            .children(self.resource_links(theme, key, call, cx))
             .into_any_element()
     }
     fn edit_badge(

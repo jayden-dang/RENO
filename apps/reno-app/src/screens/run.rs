@@ -322,6 +322,7 @@ pub(crate) struct RunScreen {
     panel_shown: bool,
     /// The Files tab's tree, viewer and watch, made when it first shows.
     files: Option<files::FilesTab>,
+    files_run: RunId,
     /// The Terminal tabs: a slot each, with its view made when it first shows.
     terms: terminal::Terms,
     /// The History tab's log, search and selection, made when it first shows.
@@ -492,6 +493,7 @@ impl RunScreen {
             panel_focus: cx.focus_handle(),
             panel_shown: false,
             files: None,
+            files_run: run.clone(),
             terms,
             history: None,
             history_page: crate::vm::git_graph::PAGE,
@@ -810,7 +812,8 @@ impl RunScreen {
         let from = from.min(self.rows.len());
         let rows_replaced = rows.is_some();
         let old_rows = match rows {
-            Some(new) => {
+            Some(mut new) => {
+                transcript::hide_interrupted_tools(&mut new);
                 let old = self.rows.split_off(from);
                 self.rows.extend(new);
                 old
@@ -1091,7 +1094,10 @@ impl RunScreen {
         let end = (top + SETTLED_ITEMS).min(self.items.len());
         for ix in top..end {
             let holds_output = self.items.items[ix].visual.is_some()
-                || matches!(self.items.row(&self.rows, ix), Some(Row::Prose { .. }));
+                || matches!(
+                    self.items.row(&self.rows, ix),
+                    Some(Row::Prose { .. } | Row::Tools { .. })
+                );
             if holds_output {
                 self.measure_again(ix);
             }
@@ -1867,9 +1873,12 @@ impl RunScreen {
         self.store.read(cx).state().run(&self.run)
     }
 
-    fn transcript_link_policy(&self, cx: &mut Context<Self>) -> LinkPolicy {
+    fn transcript_link_policy(&self, reply: Option<Key>, cx: &mut Context<Self>) -> LinkPolicy {
         LinkPolicy::Transcript {
-            files: Some(self.file_links(cx)),
+            files: Some(self.file_links_for(
+                reply.map_or_else(|| self.run.clone(), |key| self.run_of(key)),
+                cx,
+            )),
         }
     }
 
@@ -1881,7 +1890,8 @@ impl RunScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let link = link.filter(|url| menu_link_allowed(&self.transcript_link_policy(cx), url, cx));
+        let link =
+            link.filter(|url| menu_link_allowed(&self.transcript_link_policy(reply, cx), url, cx));
         let following = self.list.is_following_tail();
         let return_focus = if self.transcript_menu_focus.is_focused(window) {
             self.transcript_menu
@@ -1978,7 +1988,7 @@ impl RunScreen {
         match item {
             MenuItem::Open => {
                 if let Some(target) = menu.link {
-                    let policy = self.transcript_link_policy(cx);
+                    let policy = self.transcript_link_policy(menu.reply, cx);
                     let action = policy.action(&target);
                     window.defer(cx, move |window, cx| policy.run(&action, window, cx));
                 }

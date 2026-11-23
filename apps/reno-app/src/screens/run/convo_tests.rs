@@ -910,3 +910,101 @@ fn a_finished_turn_offers_scroll_to_its_prompt_and_the_last_turn_scroll_to_top(
     assert!(!following(vcx, &screen));
     place_is_kept(vcx, "scroll to top");
 }
+
+#[gpui::test]
+fn an_error_turn_shows_a_callout_with_copy_error(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = open(cx, "builder1");
+    let run = run_id("builder1");
+    let store = screen.read_with(vcx, |s, _| s.store.clone());
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![ExecEvent::Done {
+            stop: reno_proto::StopReason::Error,
+            result: Some("Build failed.".into()),
+            diagnostic: Some("cargo: the build directory is locked".into()),
+            reason: None,
+        }],
+    );
+    let key = screen.read_with(vcx, |s, _| s.rows.last().unwrap().key());
+    assert!(painted(vcx, &format!("error-callout-{}", key.0)));
+    click(vcx, &format!("error-copy-{}", key.0));
+    assert_eq!(
+        vcx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("cargo: the build directory is locked"),
+    );
+}
+
+fn pending_command(id: &str) -> ExecEvent {
+    ExecEvent::Tool {
+        id: id.into(),
+        call: reno_proto::ToolCall::new(
+            "bash",
+            serde_json::json!({"command": "pwd"}),
+            reno_proto::ActionClass::Command,
+        ),
+    }
+}
+
+#[gpui::test]
+fn an_empty_reply_and_a_call_canceled_before_output_are_hidden(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live(cx);
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![pending_command("canceled"), reply_text("")],
+    );
+    screen.read_with(vcx, |s, _| {
+        assert!(
+            !s.rows
+                .iter()
+                .any(|row| matches!(row, Row::Prose { text, .. } if text.is_empty()))
+        );
+    });
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![ExecEvent::Done {
+            stop: reno_proto::StopReason::Interrupted,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        }],
+    );
+    screen.read_with(vcx, |s, _| {
+        assert!(!s.rows.iter().flat_map(|row| match row {
+            Row::Worked { rows, .. } => rows.as_slice(),
+            row => std::slice::from_ref(row),
+        }).any(|row| matches!(row, Row::Tools { calls, .. } if calls.iter().any(|c| c.id == "canceled"))));
+    });
+}
+
+#[gpui::test]
+fn a_call_with_no_result_in_a_completed_turn_stays_pending_in_its_group(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live(cx);
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            pending_command("still-pending"),
+            ExecEvent::Done {
+                stop: reno_proto::StopReason::Completed,
+                result: None,
+                diagnostic: None,
+                reason: None,
+            },
+        ],
+    );
+    screen.read_with(vcx, |s, _| {
+        assert!(s.rows.iter().flat_map(|row| match row {
+            Row::Worked { rows, .. } => rows.as_slice(),
+            row => std::slice::from_ref(row),
+        }).any(|row| matches!(row, Row::Tools { calls, .. } if calls.iter().any(|c| c.id == "still-pending" && c.outcome == crate::transcript::Outcome::Pending))));
+    });
+}

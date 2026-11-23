@@ -612,15 +612,14 @@ impl RunScreen {
     }
 
     fn step_menu_target(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let policy = self.transcript_link_policy(cx);
         let targets = self.select.menu_targets.borrow();
         let mut visible: Vec<_> = targets
             .iter()
             .filter(|target| {
-                target
-                    .id
-                    .destination()
-                    .is_none_or(|url| super::menu_link_allowed(&policy, url, cx))
+                target.id.destination().is_none_or(|url| {
+                    let policy = self.transcript_link_policy(Some(target.id.reply), cx);
+                    super::menu_link_allowed(&policy, url, cx)
+                })
             })
             .map(|target| &target.id)
             .collect();

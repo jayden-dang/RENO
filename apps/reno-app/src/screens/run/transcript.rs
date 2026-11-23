@@ -23,6 +23,32 @@ use crate::vm::selection::{self, Slot};
 /// The line height of reasoning text.
 const REASONING_LINE: f32 = 21.0;
 
+/// Filter the screen's copy of the finished turn. The builder keeps every call so a late result
+/// can still patch its original group and the next projection can show it.
+pub(super) fn hide_interrupted_tools(rows: &mut [Row]) {
+    let mut start = 0;
+    for end in 0..rows.len() {
+        let Row::Done { stop, .. } = &rows[end] else {
+            continue;
+        };
+        if *stop == StopReason::Interrupted {
+            for row in &mut rows[start..end] {
+                if let Row::Worked { rows: steps, .. } = row {
+                    steps.retain_mut(|step| {
+                        if let Row::Tools { calls, .. } = step {
+                            calls.retain(|call| call.finished() || call.output.is_some());
+                            convo::has_steps(calls)
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
+        }
+        start = end + 1;
+    }
+}
+
 impl RunScreen {
     /// One list item: its row, with the space below it, the subagent chips that hang on it and,
     /// under the last item of a live run, "Thinking".
@@ -43,9 +69,16 @@ impl RunScreen {
             let tree = Self::parse_reply(&mut self.markdown, &mut self.live_reply, key, text, live);
             self.probe_files(key, len, &tree, cx);
         }
+        if let Some(Row::Tools { key, calls }) = items::row_of(&self.rows, 0, &item) {
+            let dirs = self.result_directories(*key, calls);
+            self.probe_directories(self.run_of(*key), dirs, cx);
+        }
         let Some(row) = items::row_of(&self.rows, 0, &item) else {
             return div().into_any_element();
         };
+        if matches!(row, Row::Worked { rows, .. } if rows.is_empty()) {
+            return div().into_any_element();
+        }
         let top = item.inner.is_none().then_some(ix);
         let body = self.row_body(row, top, &theme, cx);
         // "Thinking" under the last row while the agent works between steps.
@@ -129,7 +162,11 @@ impl RunScreen {
             .and_then(|i| self.rows.get(i.top))
             .map_or_else(|| self.run.clone(), |row| self.run_of(row.key()));
         let client = self.store.read(cx).client();
-        let host = Host::transcript(Some(run), client, Some(self.file_links(cx)));
+        let host = Host::transcript(
+            Some(run.clone()),
+            client,
+            Some(self.file_links_for(run, cx)),
+        );
         div()
             .w_full()
             .pb(px(if last { 26.0 } else { 16.0 }))
@@ -206,58 +243,55 @@ impl RunScreen {
                 let link_screen = screen.clone();
                 let reply = *key;
                 let link_targets = self.select.menu_targets.clone();
-                let host =
-                    Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
-                        .when_grown(Some(Grew(Rc::new(move |cx| {
-                            screen
-                                .update(cx, |this, cx| {
-                                    if this.list.is_following_tail() {
-                                        this.pause_following(cx);
-                                    }
-                                })
-                                .ok();
-                        }))))
-                        .on_footnote(move |note, cx| {
-                            note_screen
-                                .update(cx, |this, cx| this.reveal_footnote(note, cx))
-                                .ok();
+                let host = Host::transcript(
+                    Some(self.run_of(*key)),
+                    client,
+                    Some(self.file_links_for(self.run_of(*key), cx)),
+                )
+                .when_grown(Some(Grew(Rc::new(move |cx| {
+                    screen
+                        .update(cx, |this, cx| {
+                            if this.list.is_following_tail() {
+                                this.pause_following(cx);
+                            }
                         })
-                        .on_link_menu(
-                            move |target, at, window, cx| {
-                                link_screen
-                                    .update(cx, |this, cx| {
-                                        this.open_transcript_menu(
-                                            at,
-                                            target,
-                                            Some(reply),
-                                            window,
-                                            cx,
-                                        );
-                                    })
-                                    .ok();
+                        .ok();
+                }))))
+                .on_footnote(move |note, cx| {
+                    note_screen
+                        .update(cx, |this, cx| this.reveal_footnote(note, cx))
+                        .ok();
+                })
+                .on_link_menu(
+                    move |target, at, window, cx| {
+                        link_screen
+                            .update(cx, |this, cx| {
+                                this.open_transcript_menu(at, target, Some(reply), window, cx);
+                            })
+                            .ok();
+                    },
+                    move |atom, target, bounds| {
+                        link_targets.borrow_mut().push(MenuTarget {
+                            id: MenuTargetId {
+                                reply,
+                                link: Some(MenuLinkId {
+                                    atom,
+                                    destination: target.to_owned(),
+                                }),
                             },
-                            move |atom, target, bounds| {
-                                link_targets.borrow_mut().push(MenuTarget {
-                                    id: MenuTargetId {
-                                        reply,
-                                        link: Some(MenuLinkId {
-                                            atom,
-                                            destination: target.to_owned(),
-                                        }),
-                                    },
-                                    bounds,
-                                });
-                            },
-                        )
-                        .while_streaming(streaming)
-                        .marked(self.find_marks(*key))
-                        .selectable(Some(Rc::new(SelectHost {
-                            registry: self.select.registry.clone(),
-                            key: *key,
-                            anchors: stream.anchors(),
-                            selected: self.selection_for(*key),
-                            style: pick::selection_style(theme),
-                        })));
+                            bounds,
+                        });
+                    },
+                )
+                .while_streaming(streaming)
+                .marked(self.find_marks(*key))
+                .selectable(Some(Rc::new(SelectHost {
+                    registry: self.select.registry.clone(),
+                    key: *key,
+                    anchors: stream.anchors(),
+                    selected: self.selection_for(*key),
+                    style: pick::selection_style(theme),
+                })));
                 div()
                     .group(turn_end_group(*key))
                     .relative()
@@ -348,19 +382,29 @@ impl RunScreen {
             Row::Routing { key, view } => self.routing_card(theme, *key, view, cx),
             Row::Worked { key, secs, .. } => self.worked(theme, *key, *secs, cx),
             Row::Done {
+                key,
                 stop,
                 result,
                 diagnostic,
                 reason,
-                ..
             } => div()
-                .child(done_line(
-                    theme,
-                    *stop,
-                    result.as_deref(),
-                    diagnostic.as_deref(),
-                    reason.as_ref(),
-                ))
+                .child(if *stop == StopReason::Error {
+                    error_callout(
+                        theme,
+                        *key,
+                        result.as_deref(),
+                        diagnostic.as_deref(),
+                        reason.as_ref(),
+                    )
+                } else {
+                    done_line(
+                        theme,
+                        *stop,
+                        result.as_deref(),
+                        diagnostic.as_deref(),
+                        reason.as_ref(),
+                    )
+                })
                 // Only the thread's latest run says what the branch holds.
                 .children(
                     top.filter(|&ix| self.items.is_last_done(ix))
@@ -1005,6 +1049,76 @@ pub(super) fn event_line(theme: &Theme, glyph: Icon, tone: gpui::Hsla, text: &st
         .text_color(theme.muted)
         .child(icon(glyph, 15.0, tone))
         .child(SharedString::from(text.to_owned()))
+        .into_any_element()
+}
+
+fn error_callout(
+    theme: &Theme,
+    key: Key,
+    result: Option<&str>,
+    diagnostic: Option<&str>,
+    reason: Option<&reno_proto::StopDetail>,
+) -> AnyElement {
+    let reason = reason.map(ToString::to_string);
+    let summary = reason
+        .as_deref()
+        .or(result)
+        .unwrap_or("The run ended with an error.");
+    let diagnostic = diagnostic.filter(|diagnostic| !diagnostic.is_empty());
+    let copy = diagnostic.unwrap_or(summary).to_owned();
+    div()
+        .debug_selector(move || format!("error-callout-{}", key.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.danger.opacity(0.45))
+        .bg(theme.danger.opacity(0.08))
+        .px(px(12.0))
+        .py(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(icon(Icon::X, 15.0, theme.danger))
+                .child(
+                    div()
+                        .text_color(theme.danger)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Failed"),
+                )
+                .child(div().flex_1())
+                .child(
+                    kit::line_button(
+                        theme,
+                        format!("error-copy-{}", key.0),
+                        None,
+                        "Copy error",
+                        kit::Tone::Quiet,
+                        true,
+                    )
+                    .on_click(move |_, _, cx| output::copy(cx, copy.clone(), "Error copied")),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(14.0))
+                .text_color(theme.text)
+                .child(SharedString::from(summary.to_owned())),
+        )
+        .children(
+            diagnostic
+                .filter(|&diagnostic| diagnostic != summary)
+                .map(|diagnostic| {
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(12.0))
+                        .text_color(theme.muted)
+                        .child(SharedString::from(diagnostic.to_owned()))
+                }),
+        )
         .into_any_element()
 }
 

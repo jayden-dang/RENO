@@ -1289,6 +1289,21 @@ fn the_elapsed_time_survives_leaving_and_reopening_the_thread(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_worktree_path_in_a_tool_result_is_a_button_that_opens_the_file(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = render_tool_cards(cx);
+    show_render_tool(vcx, &screen, "g1");
+    wait_drawn(vcx, |vcx| painted(vcx, "resource-link-g1"));
+    click(vcx, "resource-link-g1");
+    wait_drawn(vcx, |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.files_model()
+                .and_then(|files| files.doc())
+                .is_some_and(|doc| doc.path == "src/supervisor.rs")
+        })
+    });
+}
+
+#[gpui::test]
 fn a_run_seen_queueing_with_no_open_journal_does_not_time_cold_replay(cx: &mut TestAppContext) {
     use reno_proto::{ActionClass, ExecEvent, SessionRef, StopReason};
 

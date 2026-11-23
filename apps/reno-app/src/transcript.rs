@@ -461,6 +461,7 @@ pub(crate) fn build_rows(
             // Context occupancy is a gauge (read with `ContextUsage::latest`) and a changed
             // configuration shows in the run's summary, not as a transcript row.
             ExecEvent::ContextUsage { .. } | ExecEvent::ConfigChanged { .. } => {}
+            ExecEvent::Text { text } if text.is_empty() => {}
             ExecEvent::Text { text } => match built.rows.last_mut() {
                 Some(Row::Prose { text: open, .. }) => open.push_str(text),
                 _ => built.rows.push(Row::Prose {
@@ -943,6 +944,7 @@ impl TurnBuilder {
                 });
             }
             ExecEvent::ContextUsage { .. } | ExecEvent::ConfigChanged { .. } => {}
+            ExecEvent::Text { text } if text.is_empty() => {}
             ExecEvent::Text { text } => match self.rows.last_mut() {
                 Some(Row::Prose { text: open, .. }) if self.hidden.is_none() => {
                     open.push_str(text);
