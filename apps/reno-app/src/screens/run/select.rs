@@ -88,16 +88,27 @@ pub(super) struct Select {
     task: Option<Task<()>>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct MenuLinkId {
+    pub(super) atom: usize,
+    pub(super) destination: String,
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub(super) struct MenuTargetId {
     pub(super) reply: Key,
-    pub(super) link: Option<usize>,
+    pub(super) link: Option<MenuLinkId>,
+}
+
+impl MenuTargetId {
+    pub(super) fn destination(&self) -> Option<&str> {
+        self.link.as_ref().map(|link| link.destination.as_str())
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct MenuTarget {
     pub(super) id: MenuTargetId,
-    pub(super) destination: Option<String>,
     pub(super) bounds: Bounds<Pixels>,
 }
 
@@ -581,17 +592,22 @@ impl RunScreen {
             .iter()
             .filter(|target| {
                 target
-                    .destination
-                    .as_deref()
+                    .id
+                    .destination()
                     .is_none_or(|url| super::menu_link_allowed(&policy, url, cx))
             })
-            .map(|target| target.id)
+            .map(|target| &target.id)
             .collect();
-        visible.sort_unstable_by_key(|id| (self.items.item_of(id.reply), id.link));
+        visible.sort_unstable_by_key(|id| {
+            (
+                self.items.item_of(id.reply),
+                id.link.as_ref().map(|link| link.atom),
+            )
+        });
         visible.dedup();
         let current = visible
             .iter()
-            .position(|&id| Some(id) == self.select.menu_target);
+            .position(|&id| Some(id) == self.select.menu_target.as_ref());
         let next = match (current, forward) {
             (Some(at), true) => visible.get(at + 1).or_else(|| visible.first()),
             (Some(at), false) => at
@@ -601,12 +617,13 @@ impl RunScreen {
             (None, true) => visible.first(),
             (None, false) => visible.last(),
         };
-        self.select.menu_target = next.copied();
+        self.select.menu_target = next.map(|&id| id.clone());
         cx.notify();
     }
 
     pub(super) fn menu_target_outline(&self, theme: &Theme) -> Option<AnyElement> {
-        let selected = self.select.menu_target?;
+        let selected = self.select.menu_target.clone()?;
+        let is_link = selected.link.is_some();
         let targets = self.select.menu_targets.clone();
         let accent = theme.accent;
         Some(
@@ -614,7 +631,7 @@ impl RunScreen {
                 .absolute()
                 .inset_0()
                 .debug_selector(move || {
-                    if selected.link.is_some() {
+                    if is_link {
                         "transcript-context-link"
                     } else {
                         "transcript-context-reply"

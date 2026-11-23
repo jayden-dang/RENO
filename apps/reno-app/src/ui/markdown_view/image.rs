@@ -22,6 +22,7 @@ use gpui::{
     prelude::*, px,
 };
 use reno_client::Client;
+use reno_markdown::parser::InlineImage;
 use reno_proto::RunId;
 
 use super::Host;
@@ -257,18 +258,20 @@ pub(crate) fn picture(image: Arc<gpui::Image>) -> gpui::Div {
         .child(img(image).max_w_full().rounded(px(6.0)))
 }
 
-/// The image a markdown `![alt](src)` stands for. `wrapper` is the link around the image
+/// The image a markdown `![alt](src)` stands for. The wrapper is the link around the image
 /// (`[![alt](src)](url)`), followed as any link is (TRANSCRIPT-11.5).
 pub(crate) fn view(
-    alt: &str,
-    src: &str,
-    wrapper: Option<&str>,
+    image: &InlineImage,
+    atom: usize,
     host: &ImageHost,
     markdown: &Host,
     theme: &Theme,
     cx: &mut App,
 ) -> AnyElement {
-    let wrapped = wrapper
+    let (alt, src) = (image.alt.as_str(), image.source.as_str());
+    let wrapped = image
+        .link
+        .as_deref()
         .map(|url| (markdown.links.action(url), url))
         .filter(|(action, _)| *action != Action::Plain);
     let body = match classify(src) {
@@ -279,7 +282,13 @@ pub(crate) fn view(
         },
         Classified::Remote { url, host: site } => {
             let (action, target) = wrapped.unwrap_or_else(|| (markdown.links.action(&url), &url));
-            return clickable(link_card(alt, &url, &site, theme), action, target, markdown);
+            return clickable(
+                link_card(alt, &url, &site, theme),
+                action,
+                target,
+                atom,
+                markdown,
+            );
         }
         Classified::Refused => failed_note(theme, not_loaded_text(alt, src)),
     };
@@ -290,13 +299,20 @@ pub(crate) fn view(
                 .child(body),
             action,
             target,
+            atom,
             markdown,
         ),
         None => body,
     }
 }
 
-fn clickable(body: Stateful<Div>, action: Action, target: &str, markdown: &Host) -> AnyElement {
+fn clickable(
+    body: Stateful<Div>,
+    action: Action,
+    target: &str,
+    atom: usize,
+    markdown: &Host,
+) -> AnyElement {
     if action == Action::Plain {
         return body.into_any_element();
     }
@@ -305,14 +321,13 @@ fn clickable(body: Stateful<Div>, action: Action, target: &str, markdown: &Host)
     body.cursor_pointer()
         .on_click(move |_, window, cx| policy.run(&action, window, cx))
         .when_some(markdown.link_menu.clone(), |card, menu| {
-            let index = menu.reserve(1);
             let (track, tracked_target) = (menu.clone(), target.clone());
             card.relative()
                 .child(
                     gpui::canvas(
                         |_, _, _| (),
                         move |bounds, (), window, _| {
-                            track.paint_target(index, &tracked_target, bounds, window);
+                            track.paint_target(atom, &tracked_target, bounds, window);
                         },
                     )
                     .absolute()

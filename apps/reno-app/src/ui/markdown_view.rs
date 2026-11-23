@@ -9,7 +9,7 @@
 //! only `http`, `https` and `mailto` URLs open, and a link whose URL is still streaming never
 //! does.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -151,7 +151,6 @@ type TrackLink = dyn Fn(usize, &str, Bounds<Pixels>);
 struct LinkMenu {
     open: Rc<OpenLinkMenu>,
     track: Rc<TrackLink>,
-    next: Rc<Cell<usize>>,
 }
 
 impl std::fmt::Debug for LinkMenu {
@@ -172,15 +171,9 @@ impl LinkMenu {
         (self.open)(target, event.position, window, cx);
     }
 
-    fn reserve(&self, count: usize) -> usize {
-        let start = self.next.get();
-        self.next.set(start + count);
-        start
-    }
-
-    fn paint_target(&self, index: usize, target: &str, bounds: Bounds<Pixels>, window: &Window) {
+    fn paint_target(&self, atom: usize, target: &str, bounds: Bounds<Pixels>, window: &Window) {
         if let Some(bounds) = super::menu::visible_target(bounds, window) {
-            (self.track)(index, target, bounds);
+            (self.track)(atom, target, bounds);
         }
     }
 }
@@ -291,7 +284,6 @@ impl Host {
         self.link_menu = Some(LinkMenu {
             open: Rc::new(open),
             track: Rc::new(track),
-            next: Rc::default(),
         });
         self
     }
@@ -662,9 +654,8 @@ fn paragraph(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
         }
         from = first + n + 1;
         parts.push(image::view(
-            &shown.alt,
-            &shown.source,
-            shown.link.as_deref(),
+            shown,
+            first + n,
             images,
             env.host,
             env.theme,
@@ -1318,8 +1309,18 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
 }
 
 enum InlineAction {
-    Link(Action, String),
+    Link {
+        action: Action,
+        target: String,
+        atom: usize,
+    },
     Footnote(usize),
+}
+
+struct LinkSpan {
+    atom: usize,
+    range: Range<usize>,
+    target: String,
 }
 
 /// [`inline`] for runs that are atoms `first`, `first + 1`, ... of the reply.
@@ -1410,7 +1411,11 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
         if let Some(action) = footnote.map(InlineAction::Footnote).or_else(|| {
             action.map(|action| {
                 let target = style.link.as_deref().unwrap_or(&run.text).to_owned();
-                InlineAction::Link(action, target)
+                InlineAction::Link {
+                    action,
+                    target,
+                    atom: first + n,
+                }
             })
         }) {
             links.push((from..from + shown.len(), action));
@@ -1448,7 +1453,11 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
                 let targets = links
                     .iter()
                     .filter_map(|(range, action)| match action {
-                        InlineAction::Link(_, target) => Some((range.clone(), target.clone())),
+                        InlineAction::Link { target, atom, .. } => Some(LinkSpan {
+                            atom: *atom,
+                            range: range.clone(),
+                            target: target.clone(),
+                        }),
                         InlineAction::Footnote(_) => None,
                     })
                     .collect::<Vec<_>>();
@@ -1462,7 +1471,7 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
             let bounds = env.footnote_bounds.clone();
             let text = InteractiveText::new(("md-text", hasher.finish() as usize), styled)
                 .on_click(ranges, move |ix, window, cx| match actions.get(ix) {
-                    Some(InlineAction::Link(action, _)) => policy.run(action, window, cx),
+                    Some(InlineAction::Link { action, .. }) => policy.run(action, window, cx),
                     Some(InlineAction::Footnote(target)) => {
                         let destination = bounds.borrow().get(*target).copied();
                         if let (Some(navigation), Some(destination)) = (&navigation, destination) {
@@ -1489,18 +1498,17 @@ fn inline_link_menu(
     text: InteractiveText,
     layout: gpui::TextLayout,
     menu: LinkMenu,
-    targets: Vec<(Range<usize>, String)>,
+    targets: Vec<LinkSpan>,
 ) -> AnyElement {
-    let first = menu.reserve(targets.len());
     let targets = Rc::new(targets);
     let painted = {
         let (menu, layout, targets) = (menu.clone(), layout.clone(), targets.clone());
         gpui::canvas(
             |_, _, _| (),
             move |_, (), window, _| {
-                for (i, (range, target)) in targets.iter().enumerate() {
-                    if let Some(bounds) = link_bounds(&layout, range) {
-                        menu.paint_target(first + i, target, bounds, window);
+                for target in targets.iter() {
+                    if let Some(bounds) = link_bounds(&layout, &target.range) {
+                        menu.paint_target(target.atom, &target.target, bounds, window);
                     }
                 }
             },
@@ -1520,8 +1528,8 @@ fn inline_link_menu(
                     .index_for_position(event.position)
                     .ok()
                     .and_then(|ix| {
-                        targets.iter().find_map(|(range, target)| {
-                            range.contains(&ix).then_some(target.as_str())
+                        targets.iter().find_map(|target| {
+                            target.range.contains(&ix).then_some(target.target.as_str())
                         })
                     });
                 menu.open(target, event, window, cx);

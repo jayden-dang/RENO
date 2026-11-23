@@ -643,14 +643,20 @@ fn append_reply(
     screen: &Entity<RunScreen>,
     reply: &str,
 ) {
-    use reno_proto::{ExecEvent, Seq, SessionRef, StopReason};
-
-    let run = run_id(RENDER_RUN);
     wait_for(vcx, "the seeded reply is complete", |vcx| {
         screen.read_with(vcx, |s, _| {
             s.rows().iter().any(|row| matches!(row, Row::Done { .. }))
         })
     });
+    append_reply_events(vcx, store, reply);
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+}
+
+fn append_reply_events<C: gpui::AppContext>(cx: &mut C, store: &Entity<Store>, reply: &str) {
+    use reno_proto::{ExecEvent, Seq, SessionRef, StopReason};
+
+    let run = run_id(RENDER_RUN);
     for event in [
         ExecEvent::Resumed {
             from_attempt: 0,
@@ -664,7 +670,7 @@ fn append_reply(
             reason: None,
         },
     ] {
-        store.update(vcx, |s, cx| {
+        store.update(cx, |s, cx| {
             let seq = s
                 .state()
                 .transcript(&run)
@@ -681,8 +687,6 @@ fn append_reply(
             );
         });
     }
-    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
-    draw(vcx);
 }
 
 #[gpui::test]
@@ -1040,4 +1044,69 @@ fn transcript_menu_keyboard_targets_replies_and_links_from_the_composer(cx: &mut
     draw(vcx);
     assert!(painted(vcx, "transcript-menu"));
     assert!(!painted(vcx, "transcript-menu-copy-link"));
+}
+
+#[gpui::test]
+fn resolving_an_earlier_path_keeps_the_keyboard_menu_on_its_selected_web_link(
+    cx: &mut TestAppContext,
+) {
+    const PATH: &str = "many/f000.txt";
+    const LINK: &str = "https://example.com/after";
+    const REPLY: &str = "See `many/f000.txt` and [the web guide](https://example.com/after).";
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    wait_for(vcx, "the seeded reply is complete", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.rows().iter().any(|row| matches!(row, Row::Done { .. }))
+        })
+    });
+    vcx.simulate_keystrokes("shift-tab");
+    draw(vcx);
+
+    // Keep the foreground turn open between painting the new reply and sending keys. The
+    // actual fs.list task can run on Tokio, and its result updates the screen on a later turn.
+    vcx.update(|window, cx| {
+        append_reply_events(cx, &store, REPLY);
+        screen.update(cx, |s, cx| {
+            s.refresh(cx);
+            s.jump_to_latest(cx);
+        });
+        window.draw(cx).clear(cx);
+        assert!(screen.read(cx).painted_point("the web guide", 4).is_some());
+        assert!(!screen.read(cx).file_resolves(PATH, cx));
+        let mut key = |name| {
+            window.dispatch_keystroke(gpui::Keystroke::parse(name).unwrap(), cx);
+            window.draw(cx).clear(cx);
+        };
+        for name in ["alt-up", "shift-f10", "down", "enter"] {
+            key(name);
+        }
+    });
+    assert_eq!(
+        clipboard(vcx).as_deref(),
+        Some(LINK),
+        "the selected web target before resolution"
+    );
+    wait_for(
+        vcx,
+        "the worktree listing resolved the earlier path",
+        |vcx| screen.read_with(vcx, |s, cx| s.file_resolves(PATH, cx)),
+    );
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert_eq!(
+        clipboard(vcx).as_deref(),
+        Some(LINK),
+        "the same web target after resolution"
+    );
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert_eq!(recording.opened.borrow().as_slice(), [LINK]);
 }

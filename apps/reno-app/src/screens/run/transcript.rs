@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use reno_markdown::BlockTree;
 
-use super::select::{MenuTarget, MenuTargetId, Spot};
+use super::select::{MenuLinkId, MenuTarget, MenuTargetId, Spot};
 use super::*;
 use crate::prefs::PREVIEW_LINES;
 use crate::ui::markdown_view::lru::Lru;
@@ -234,13 +234,15 @@ impl RunScreen {
                                     })
                                     .ok();
                             },
-                            move |link, target, bounds| {
+                            move |atom, target, bounds| {
                                 link_targets.borrow_mut().push(MenuTarget {
                                     id: MenuTargetId {
                                         reply,
-                                        link: Some(link),
+                                        link: Some(MenuLinkId {
+                                            atom,
+                                            destination: target.to_owned(),
+                                        }),
                                     },
-                                    destination: Some(target.to_owned()),
                                     bounds,
                                 });
                             },
@@ -290,7 +292,6 @@ impl RunScreen {
                                 if let Some(bounds) = menu::visible_target(bounds, window) {
                                     targets.borrow_mut().push(MenuTarget {
                                         id: MenuTargetId { reply, link: None },
-                                        destination: None,
                                         bounds,
                                     });
                                 }

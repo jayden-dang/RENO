@@ -1759,12 +1759,12 @@ impl RunScreen {
             .menu_targets
             .borrow()
             .iter()
-            .find(|target| Some(target.id) == self.select.menu_target)
+            .find(|target| Some(&target.id) == self.select.menu_target.as_ref())
             .cloned();
         if let Some(target) = target {
             self.open_transcript_menu(
                 target.bounds.bottom_left(),
-                target.destination.as_deref(),
+                target.id.destination(),
                 Some(target.id.reply),
                 window,
                 cx,
