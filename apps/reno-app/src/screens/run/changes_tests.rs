@@ -1234,6 +1234,7 @@ fn show_watched_command(
     use std::time::Duration;
 
     tool_run_summary(vcx, store, run, 4, RunStatus::Queued);
+    store.update(vcx, |store, _| store.confirm_tool_watch_for_test(run));
     push_events(
         vcx,
         store,

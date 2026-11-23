@@ -219,6 +219,7 @@ struct ToolWatch {
     attempts: Lru<RunId, WatchedAttempt>,
     calls: Lru<(RunId, String), WatchedCall>,
     probe: Option<(RunId, u32)>,
+    probe_generation: u64,
 }
 
 impl ToolWatch {
@@ -227,6 +228,7 @@ impl ToolWatch {
             attempts: Lru::new(WATCHED_ATTEMPTS, usize::MAX),
             calls: Lru::new(WATCHED_CALLS, usize::MAX),
             probe: None,
+            probe_generation: 0,
         }
     }
 
@@ -1058,10 +1060,7 @@ impl Store {
                     self.confirm_tool_watch(run.run_id.clone(), run.attempt, cx);
                 }
             }
-            Update::RunUpserted(run) => {
-                let following = self.open.as_ref() == Some(&run.run_id);
-                self.tool_watch.summary(run, following);
-            }
+            Update::RunUpserted(run) => self.tool_watch.summary(run, false),
             Update::RunEvent { run, seq, event } => {
                 let next = self
                     .state
@@ -1081,10 +1080,50 @@ impl Store {
     /// A fresh run.get taken after following starts can establish that this attempt was still
     /// queued. A delayed runs.watch snapshot alone cannot establish that.
     fn confirm_tool_watch(&mut self, run: RunId, attempt: u32, cx: &mut Context<Self>) {
-        let probe = (run.clone(), attempt.max(1));
-        if self.client().is_some() && self.tool_watch.probe.as_ref() != Some(&probe) {
-            self.tool_watch.probe = Some(probe);
-            self.fetch_run(&run, cx);
+        let attempt = attempt.max(1);
+        let probe = (run.clone(), attempt);
+        if self.client().is_none() || self.tool_watch.probe.as_ref() == Some(&probe) {
+            return;
+        }
+        self.tool_watch.probe = Some(probe);
+        self.tool_watch.probe_generation = self.tool_watch.probe_generation.wrapping_add(1);
+        let generation = self.tool_watch.probe_generation;
+        let requested = run.clone();
+        self.call(
+            "Could not confirm the run's start",
+            move |client| async move { client.get_run(&requested).await },
+            cx,
+            D {
+                ok: Box::new(move |store, summary: RunSummary, cx| {
+                    if store.tool_watch.probe_generation == generation
+                        && store.tool_watch.probe.as_ref() == Some(&(run, attempt))
+                        && summary.attempt.max(1) == attempt
+                    {
+                        store.accept_tool_watch(&summary);
+                        store.apply(Update::RunUpserted(summary), cx);
+                    }
+                }),
+                err: Box::new(|_, _| {}),
+                quiet: true,
+            },
+        );
+    }
+
+    fn accept_tool_watch(&mut self, summary: &RunSummary) {
+        let following = self.open.as_ref() == Some(&summary.run_id)
+            && self.state.run(&summary.run_id).is_none_or(|known| {
+                known.attempt < summary.attempt
+                    || (known.attempt == summary.attempt
+                        && !known.status.is_terminal()
+                        && !matches!(known.status, RunStatus::Evaluating | RunStatus::Interrupted))
+            });
+        self.tool_watch.summary(summary, following);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_tool_watch_for_test(&mut self, run: &RunId) {
+        if let Some(summary) = self.state.run(run).cloned() {
+            self.accept_tool_watch(&summary);
         }
     }
 
@@ -1714,6 +1753,9 @@ impl Store {
     /// tasks live on tokio, so the call enters the runtime first. A run already followed is left
     /// alone.
     pub(crate) fn open_run(&mut self, run: RunId, cx: &mut Context<Self>) {
+        if self.open.as_ref() != Some(&run) {
+            self.tool_watch.probe = None;
+        }
         self.open = Some(run.clone());
         let from = self.state.transcript(&run).map(Transcript::resume_from);
         if let Some(mirror) = &self.mirror {
@@ -2774,13 +2816,7 @@ impl Store {
 
     /// `run.get` for a run the window does not hold (opened from a trigger or Home).
     pub(crate) fn ensure_run(&mut self, run: &RunId, cx: &mut Context<Self>) {
-        if self.state.run(run).is_none() {
-            self.fetch_run(run, cx);
-        }
-    }
-
-    fn fetch_run(&mut self, run: &RunId, cx: &mut Context<Self>) {
-        if !self.fetching_runs.insert(run.clone()) {
+        if self.state.run(run).is_some() || !self.fetching_runs.insert(run.clone()) {
             return;
         }
         let id = run.clone();

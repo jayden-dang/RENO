@@ -681,11 +681,11 @@ pub(crate) enum Change {
 
 /// A tool call as the call index holds it.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
 pub(crate) struct CallInfo<'a> {
     pub(crate) input: &'a reno_proto::ToolCall,
     pub(crate) call_seq: Seq,
     /// The seq of the event that gave the call its result; none while it has none.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) result_seq: Option<Seq>,
 }
 
@@ -784,7 +784,6 @@ impl TurnBuilder {
     }
 
     /// The tool call `id` as the events gave it, and where its result came.
-    #[cfg_attr(not(test), expect(dead_code))] // Task 24's tool cards read it; only the builder's tests do today.
     pub(crate) fn call(&self, id: &str) -> Option<CallInfo<'_>> {
         let (input, call_seq, result_seq) = self.calls.get(id)?;
         Some(CallInfo {
