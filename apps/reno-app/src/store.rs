@@ -220,6 +220,7 @@ struct ToolWatch {
     calls: Lru<(RunId, String), WatchedCall>,
     probe: Option<(RunId, u32)>,
     probe_generation: u64,
+    probe_task: Option<Task<()>>,
 }
 
 impl ToolWatch {
@@ -229,7 +230,13 @@ impl ToolWatch {
             calls: Lru::new(WATCHED_CALLS, usize::MAX),
             probe: None,
             probe_generation: 0,
+            probe_task: None,
         }
+    }
+
+    fn clear_probe(&mut self) {
+        self.probe = None;
+        self.probe_task = None;
     }
 
     fn summary(&mut self, summary: &RunSummary, following: bool) {
@@ -545,6 +552,9 @@ impl Store {
     /// The Run screen shows `run` (`None`: no run is on screen). The run left and the run shown
     /// are both seen now.
     pub(crate) fn look_at(&mut self, run: Option<RunId>, cx: &mut Context<Self>) {
+        if self.looking != run {
+            self.tool_watch.clear_probe();
+        }
         let now = self.now_ms();
         for run in self.looking.iter().chain(run.iter()) {
             self.seen.mark(run, now);
@@ -1051,7 +1061,8 @@ impl Store {
                     self.tool_watch.summary(run, false);
                 }
                 let queued = runs.iter().find(|run| {
-                    self.open.as_ref() == Some(&run.run_id)
+                    self.looking.as_ref() == Some(&run.run_id)
+                        && self.open.as_ref() == Some(&run.run_id)
                         && matches!(run.status, RunStatus::Queued | RunStatus::Leased)
                 });
                 if let Some(run) = queued {
@@ -1080,30 +1091,35 @@ impl Store {
     fn confirm_tool_watch(&mut self, run: RunId, attempt: u32, cx: &mut Context<Self>) {
         let attempt = attempt.max(1);
         let probe = (run.clone(), attempt);
-        if self.client().is_none() || self.tool_watch.probe.as_ref() == Some(&probe) {
+        if self.tool_watch.probe.as_ref() == Some(&probe) {
             return;
         }
+        let Some(client) = self.client() else {
+            return;
+        };
+        self.tool_watch.clear_probe();
         self.tool_watch.probe = Some(probe);
         self.tool_watch.probe_generation = self.tool_watch.probe_generation.wrapping_add(1);
         let generation = self.tool_watch.probe_generation;
         let requested = run.clone();
-        self.call(
-            "Could not confirm the run's start",
-            move |client| async move { client.get_run(&requested).await },
-            cx,
-            D {
-                ok: Box::new(move |store, summary: RunSummary, _| {
-                    if store.tool_watch.probe_generation == generation
-                        && store.tool_watch.probe.as_ref() == Some(&(run, attempt))
-                        && summary.attempt.max(1) == attempt
-                    {
-                        store.accept_tool_watch(&summary);
-                    }
-                }),
-                err: Box::new(|_, _| {}),
-                quiet: true,
-            },
-        );
+        let read = Tokio::spawn(cx, async move { client.get_run(&requested).await });
+        self.tool_watch.probe_task = Some(cx.spawn(async move |this, cx| {
+            let summary = read.await.ok().and_then(Result::ok);
+            this.update(cx, |store, _| {
+                if store.tool_watch.probe_generation != generation
+                    || store.tool_watch.probe.as_ref() != Some(&(run, attempt))
+                {
+                    return;
+                }
+                if let Some(done) = store.tool_watch.probe_task.take() {
+                    done.detach();
+                }
+                if let Some(summary) = summary.filter(|summary| summary.attempt.max(1) == attempt) {
+                    store.accept_tool_watch(&summary);
+                }
+            })
+            .ok();
+        }));
     }
 
     fn accept_tool_watch(&mut self, summary: &RunSummary) {
@@ -1132,7 +1148,7 @@ impl Store {
         let changed = self.state.apply(update);
         if changed.connection && self.state.connection() != ConnectionStatus::Connected {
             self.tool_watch.attempts = Lru::new(WATCHED_ATTEMPTS, usize::MAX);
-            self.tool_watch.probe = None;
+            self.tool_watch.clear_probe();
         }
         if let Some(before) = before {
             let events = job_events(
@@ -1751,7 +1767,7 @@ impl Store {
     /// alone.
     pub(crate) fn open_run(&mut self, run: RunId, cx: &mut Context<Self>) {
         if self.open.as_ref() != Some(&run) {
-            self.tool_watch.probe = None;
+            self.tool_watch.clear_probe();
         }
         self.open = Some(run.clone());
         let from = self.state.transcript(&run).map(Transcript::resume_from);
