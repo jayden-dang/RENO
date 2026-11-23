@@ -1,21 +1,26 @@
 //! What a tool printed, under its call in the transcript.
 //!
-//! Collapsed by default: a group opens to its calls, and a call with output opens to a mono
-//! block with its first lines, "Show N more lines" and Copy. A call that failed is drawn in the
+//! Each group shows its calls. Output opens to a mono block with its first lines,
+//! "Show N more lines" and Copy. A call that failed is drawn in the
 //! danger tone; an output the daemon cut says how big the whole was.
 
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, FontWeight, IntoElement, RenderOnce, SharedString,
-    Window, div, img, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, FontWeight, IntoElement, RenderOnce, Role,
+    SharedString, Window, div, img, prelude::*, px,
 };
-use reno_client::visuals::VisualImage;
-use reno_proto::{ExecEvent, RunId, ToolOutput};
+use reno_client::{Transcript, visuals::VisualImage};
+use reno_proto::{ActionClass, ExecEvent, RunId, RunStatus, RunSummary, Seq, ToolCall, ToolOutput};
+use serde_json::Value;
 
 use super::RunScreen;
 use super::select::Spot;
-use crate::transcript::{Key, Outcome, ToolEntry};
+use crate::prefs::Prefs;
+use crate::transcript::{Key, Outcome, Row, ToolEntry};
 use crate::ui::find as find_look;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO};
@@ -26,7 +31,173 @@ use crate::ui::toast;
 use crate::vm::changes as facts;
 use crate::vm::convo;
 use crate::vm::find;
-use crate::vm::selection::{Kind, Slot};
+use crate::vm::selection::{Kind, Slot, ToolInput, ToolInputPart, ToolInputs};
+
+pub(super) type ToolKey = (RunId, u64, String);
+
+/// The event stream can get ahead of the run summary. Keep the source ranges until the summary
+/// confirms their attempt, with one range per unchanged expansion preference.
+pub(super) struct ToolEvents {
+    through: Option<Seq>,
+    attempt: Option<u32>,
+    waiting: Vec<ToolBatch>,
+    closed: HashSet<ToolKey>,
+}
+
+struct ToolBatch {
+    first: Seq,
+    last: Seq,
+    expansion: (bool, bool),
+}
+
+impl ToolEvents {
+    pub(super) fn from_loaded(transcript: Option<&Transcript>) -> Self {
+        let mut cursor = Self {
+            through: None,
+            attempt: Some(1),
+            waiting: Vec::new(),
+            closed: HashSet::new(),
+        };
+        if let Some(transcript) = transcript {
+            cursor.advance(transcript);
+        }
+        cursor
+    }
+
+    fn advance<'a>(&mut self, transcript: &'a Transcript) -> &'a [(Seq, ExecEvent)] {
+        let after = transcript
+            .events
+            .partition_point(|(seq, _)| Some(*seq) <= self.through);
+        let new = &transcript.events[after..];
+        self.through = transcript.highest;
+        let boundary = new.iter().rposition(|(_, event)| {
+            matches!(event, ExecEvent::Done { .. } | ExecEvent::Resumed { .. })
+        });
+        if let Some(at) = boundary {
+            self.waiting.clear();
+            self.closed.clear();
+            self.attempt = match new[at].1 {
+                ExecEvent::Resumed { from_attempt, .. } => Some(from_attempt.saturating_add(1)),
+                _ => None,
+            };
+            &new[at + 1..]
+        } else {
+            new
+        }
+    }
+
+    fn observe(&mut self, transcript: &Transcript, expansion: (bool, bool)) {
+        let new = self.advance(transcript);
+        if self.attempt.is_none()
+            || expansion == (false, false)
+            || (self.waiting.is_empty()
+                && !new
+                    .iter()
+                    .any(|(_, event)| matches!(event, ExecEvent::Tool { .. })))
+        {
+            return;
+        }
+        let (Some(&(first, _)), Some(&(last, _))) = (new.first(), new.last()) else {
+            return;
+        };
+        if let Some(batch) = self.waiting.last_mut()
+            && batch.expansion == expansion
+            && batch.last.next() == Some(first)
+        {
+            batch.last = last;
+        } else {
+            self.waiting.push(ToolBatch {
+                first,
+                last,
+                expansion,
+            });
+        }
+    }
+
+    fn confirmed(&mut self, summary: Option<&RunSummary>) -> bool {
+        let (Some(attempt), Some(summary)) = (self.attempt, summary) else {
+            return false;
+        };
+        if summary.attempt > attempt
+            || (summary.attempt == attempt
+                && (summary.status.is_terminal()
+                    || matches!(
+                        summary.status,
+                        RunStatus::Interrupted | RunStatus::Evaluating
+                    )))
+        {
+            self.waiting.clear();
+            self.closed.clear();
+        }
+        summary.attempt == attempt && summary.status == RunStatus::Running
+    }
+}
+
+enum ToolDetail<'a> {
+    Command(&'a Value),
+    Patch(&'a str),
+    Edit(Vec<(&'a str, &'a str)>),
+}
+
+impl<'a> ToolDetail<'a> {
+    fn of(call: &'a ToolCall) -> Option<Self> {
+        match call.class {
+            ActionClass::Command => Some(Self::Command(&call.input)),
+            ActionClass::Edit => {
+                if let Some(patch) = ["patch", "diff"]
+                    .iter()
+                    .filter_map(|key| call.input.get(key)?.as_str())
+                    .find(|patch| !patch.trim().is_empty())
+                {
+                    return Some(Self::Patch(patch));
+                }
+
+                let edit = |input: &'a Value| {
+                    let (old, new) = ["old_string", "oldText", "old_text"]
+                        .into_iter()
+                        .zip(["new_string", "newText", "new_text"])
+                        .find_map(|(old, new)| {
+                            Some((input.get(old)?.as_str()?, input.get(new)?.as_str()?))
+                        })?;
+                    (old != new).then_some((old, new))
+                };
+                let edits: Vec<_> = std::iter::once(&call.input)
+                    .chain(
+                        call.input
+                            .get("edits")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .filter_map(edit)
+                    .collect();
+                (!edits.is_empty()).then_some(Self::Edit(edits))
+            }
+            _ => None,
+        }
+    }
+
+    fn body(&self) -> Cow<'_, str> {
+        match self {
+            Self::Command(input) => ["command", "cmd"]
+                .iter()
+                .find_map(|key| input.get(key)?.as_str())
+                .map_or_else(|| Cow::Owned(input.to_string()), Cow::Borrowed),
+            Self::Patch(patch) => Cow::Borrowed(patch),
+            Self::Edit(edits) => Cow::Owned(
+                edits
+                    .iter()
+                    .flat_map(|(old, new)| {
+                        old.lines()
+                            .map(|line| format!("- {line}"))
+                            .chain(new.lines().map(|line| format!("+ {line}")))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+    }
+}
 
 /// Puts `text` on the clipboard and says so.
 pub(super) fn copy(cx: &mut gpui::App, text: String, what: &'static str) {
@@ -35,17 +206,128 @@ pub(super) fn copy(cx: &mut gpui::App, text: String, what: &'static str) {
 }
 
 impl RunScreen {
+    pub(super) fn tool_key(&self, key: Key, id: &str) -> ToolKey {
+        let start = key.order().map_or(key.0, |(_, start)| start);
+        (self.run_of(key), start, id.to_owned())
+    }
+
+    pub(super) fn expand_new_tools(&mut self, cx: &gpui::App) {
+        let state = self.store.read(cx).state();
+        let Some(transcript) = state.transcript(&self.run) else {
+            return;
+        };
+        let previously_seen = self.tool_events.through;
+        self.tool_events
+            .observe(transcript, Prefs::tool_expansion(cx));
+        if !self.tool_events.confirmed(state.run(&self.run)) {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.tool_events.waiting);
+        let closed = std::mem::take(&mut self.tool_events.closed);
+        let events = &transcript.events;
+        let mut rows = self.rows[self.prefix_len..].iter().rev().peekable();
+        let mut remeasure = None;
+        for batch in waiting.into_iter().rev() {
+            let start = events.partition_point(|(seq, _)| *seq < batch.first);
+            let end = events.partition_point(|(seq, _)| *seq <= batch.last);
+            let (edits, commands) = batch.expansion;
+            for (seq, event) in events[start..end].iter().rev() {
+                let ExecEvent::Tool { id, call } = event else {
+                    continue;
+                };
+                let eligible = match call.class {
+                    ActionClass::Command => commands,
+                    ActionClass::Edit => edits && ToolDetail::of(call).is_some(),
+                    _ => false,
+                };
+                if !eligible {
+                    continue;
+                }
+                while rows.peek().is_some_and(|row| {
+                    row.key()
+                        .order()
+                        .is_none_or(|(_, start)| start > seq.0.saturating_add(1))
+                }) {
+                    rows.next();
+                }
+                if let Some(Row::Tools { key, calls }) = rows.peek()
+                    && calls.iter().any(|entry| &entry.id == id)
+                {
+                    let tool = self.tool_key(*key, id);
+                    if closed.contains(&tool) {
+                        continue;
+                    }
+                    let became_visible = self.outputs_open.keep_open(tool);
+                    if became_visible
+                        && Some(*seq) <= previously_seen
+                        && remeasure != Some(*key)
+                        && let Some(ix) = self.items.item_of(*key)
+                    {
+                        self.measure_again(ix);
+                        remeasure = Some(*key);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn tool_inputs(&self, key: Key, calls: &[ToolEntry], cx: &App) -> ToolInputs {
+        let Some((segment, start)) = key.order() else {
+            return Vec::new();
+        };
+        let run = self.run_of(key);
+        let Some(transcript) = self.store.read(cx).state().transcript(&run) else {
+            return Vec::new();
+        };
+        let next = self.items.item_of(key).and_then(|at| {
+            self.items.items[at + 1..]
+                .iter()
+                .find_map(|item| item.key.order())
+                .filter(|(next_segment, _)| *next_segment == segment)
+                .map(|(_, next)| next)
+        });
+        let events = &transcript.events;
+        let first = events.partition_point(|(seq, _)| seq.0.saturating_add(1) < start);
+        let last = next.map_or(events.len(), |next| {
+            events.partition_point(|(seq, _)| seq.0.saturating_add(1) < next)
+        });
+        let inputs: HashMap<_, _> = events
+            .get(first..last)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(_, event)| match event {
+                ExecEvent::Tool { id, call } => Some((id.as_str(), call)),
+                _ => None,
+            })
+            .collect();
+        calls
+            .iter()
+            .map(|entry| {
+                let detail = ToolDetail::of(inputs.get(entry.id.as_str())?)?;
+                let opened = self.outputs_open.contains(&self.tool_key(key, &entry.id));
+                Some(ToolInput {
+                    diff: !matches!(detail, ToolDetail::Command(_)),
+                    body: opened.then(|| detail.body().into_owned()),
+                })
+            })
+            .collect()
+    }
+
     /// Opens or closes the output of one call, or shows all of it, and measures the row again.
     /// Opening one while the view follows the tail stops following, so what grew stays in view.
     fn toggle_output(&mut self, key: Key, id: &str, full: bool, cx: &mut Context<Self>) {
+        let tool = self.tool_key(key, id);
         let set = if full {
             &mut self.outputs_full
         } else {
             &mut self.outputs_open
         };
-        let opening = !set.contains(&id.to_owned());
+        let opening = !set.contains(&tool);
+        if !full && !opening && tool.0 == self.run && !self.tool_events.waiting.is_empty() {
+            self.tool_events.closed.insert(tool.clone());
+        }
         let following = self.list.is_following_tail();
-        set.toggle(id.to_owned());
+        set.toggle(tool);
         self.reflow(key, cx);
         if opening && following {
             self.keep_in_view(key, cx);
@@ -58,15 +340,12 @@ impl RunScreen {
         &self,
         theme: &Theme,
         (key, ln): (Key, usize),
-        line: &convo::StepLine,
-        calls: &[ToolEntry],
+        (line, range): (&convo::StepLine, Range<usize>),
+        (calls, inputs): (&[ToolEntry], &[Option<ToolInput>]),
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (at, call) = line
-            .call
-            .as_ref()
-            .and_then(|id| calls.iter().enumerate().find(|(_, c)| &c.id == id))
-            .map_or((None, None), |(n, c)| (Some(n), Some(c)));
+        let at = line.call.as_ref().map(|_| range.start);
+        let call = at.and_then(|n| calls.get(n));
         // The matches in the command or path the line shows. A match in a part of the label the
         // line does not show (a run of edits says only "Edited 2 files") tints the whole line.
         let hits = at.map_or_else(Vec::new, |n| {
@@ -93,21 +372,22 @@ impl RunScreen {
         };
         // A run of edits says only "Edited 2 files": where a match is in a file's path, the line
         // names that file, with the match painted.
-        let edit_calls = (line.icon == convo::StepIcon::Edit)
-            .then(|| convo::line_calls(calls).get(ln).cloned())
-            .flatten();
-        let edits = edit_calls.clone().and_then(|run| {
-            let verb = line.text.split(' ').next().unwrap_or("Edited");
-            convo::edit_line_with_hits(calls, run, verb, &|n| {
-                self.find_highlights(key, find::Part::Label(n))
+        let edits = (line.icon == convo::StepIcon::Edit)
+            .then(|| {
+                let verb = line.text.split(' ').next().unwrap_or("Edited");
+                convo::edit_line_with_hits(calls, range.clone(), verb, &|n| {
+                    self.find_highlights(key, find::Part::Label(n))
+                })
             })
-        });
+            .flatten();
         let (line_text, painted, unpainted) = match edits {
             Some((text, shown)) => (text, shown, Vec::new()),
             None => (line.text.clone(), painted, unpainted),
         };
         let output = call.filter(|c| c.output.is_some());
-        let shown = output.is_some_and(|c| self.outputs_open.contains(&c.id));
+        let detail = at.and_then(|n| inputs.get(n)?.as_ref());
+        let toggle = call.filter(|_| output.is_some() || detail.is_some());
+        let shown = toggle.is_some_and(|c| self.outputs_open.contains(&self.tool_key(key, &c.id)));
         let glyph = match line.icon {
             convo::StepIcon::Terminal => Icon::Terminal,
             convo::StepIcon::Read => Icon::Search,
@@ -126,7 +406,7 @@ impl RunScreen {
             .gap(px(8.0))
             .text_size(px(13.0))
             .text_color(theme.muted)
-            .when_some(output.map(|c| c.id.clone()), |d, call_id| {
+            .when_some(toggle.map(|c| c.id.clone()), |d, call_id| {
                 let text = theme.text;
                 d.cursor_pointer()
                     .hover(move |s| s.text_color(text))
@@ -178,7 +458,7 @@ impl RunScreen {
                         &painted,
                     )),
             )
-            .when(output.is_some(), |d| {
+            .when(toggle.is_some(), |d| {
                 d.child(icon(
                     if shown { Icon::ChevDown } else { Icon::Fwd },
                     12.0,
@@ -190,11 +470,17 @@ impl RunScreen {
                 .as_ref()
                 .map(|out| self.output_block(theme, (key, ln), (at.unwrap_or(0), c), out, cx))
         });
+        let edits = (line.icon == convo::StepIcon::Edit && call.is_none())
+            .then(|| range.clone())
+            .into_iter()
+            .flatten()
+            .filter_map(|n| Some((n, calls.get(n)?, inputs.get(n)?.as_ref()?)))
+            .map(|(n, call, input)| self.edit_disclosure(theme, (key, ln, n), call, input, cx))
+            .collect::<Vec<_>>();
         let images = if self.store.read(cx).capabilities().tool_images {
             let run = self.run_of(key);
-            at.map(|n| n..n + 1)
-                .or(edit_calls)
-                .and_then(|range| calls.get(range))
+            calls
+                .get(range)
                 .into_iter()
                 .flatten()
                 .filter_map(|call| self.tool_result_images(theme, &run, call, cx))
@@ -207,8 +493,80 @@ impl RunScreen {
             .flex_col()
             .gap(px(6.0))
             .child(row)
+            .children(edits)
             .children(images)
             .children(block)
+            .children(detail.zip(call.zip(at)).and_then(|(input, (call, n))| {
+                self.tool_detail_block(
+                    theme,
+                    key,
+                    Slot::tool_input(ln, n, ToolInputPart::Body),
+                    &call.id,
+                    input,
+                )
+            }))
+            .into_any_element()
+    }
+
+    fn edit_disclosure(
+        &self,
+        theme: &Theme,
+        (key, ln, at): (Key, usize, usize),
+        call: &ToolEntry,
+        input: &ToolInput,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = call.id.clone();
+        let label = ToolInput::file_label(call);
+        let body = self.tool_detail_block(
+            theme,
+            key,
+            Slot::tool_input(ln, at, ToolInputPart::Body),
+            &id,
+            input,
+        );
+        let label_piece = self.text_piece(
+            theme,
+            Spot {
+                key,
+                slot: Slot::tool_input(ln, at, ToolInputPart::File),
+                base: 0,
+                len: label.len(),
+                total: Some(label.len()),
+            },
+            label,
+            &[],
+        );
+        let focus = theme.accent;
+        div()
+            .ml(px(22.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                super::transcript::disclosure(
+                    theme,
+                    SharedString::from(format!("step-{id}")),
+                    body.is_some(),
+                    label_piece,
+                )
+                .h(px(26.0))
+                .px(px(10.0))
+                .rounded(px(999.0))
+                .border_1()
+                .border_color(theme.hairline)
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .role(Role::Button)
+                .aria_label(label.to_owned())
+                .focusable()
+                .tab_stop(true)
+                .focus_visible(move |s| s.border_color(focus))
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.toggle_output(key, &id, false, cx)),
+                ),
+            )
+            .children(body)
             .into_any_element()
     }
 
@@ -286,7 +644,7 @@ impl RunScreen {
         let id = call.id.clone();
         let hits = self.find_highlights(key, find::Part::Output(at));
         let failed = matches!(call.outcome, Outcome::Failed(_));
-        let full = self.outputs_full.contains(&id);
+        let full = self.outputs_full.contains(&self.tool_key(key, &id));
         let folded = facts::fold(&out.text, facts::OUTPUT_LINES);
         let body = if full {
             out.text.strip_suffix('\n').unwrap_or(&out.text)
@@ -433,6 +791,52 @@ impl RunScreen {
                     ),
             )
             .into_any_element()
+    }
+    fn tool_detail_block(
+        &self,
+        theme: &Theme,
+        key: Key,
+        slot: Slot,
+        id: &str,
+        input: &ToolInput,
+    ) -> Option<AnyElement> {
+        let text = input.body.as_deref()?;
+        let selector = format!("tool-detail-{id}");
+        let mut base = 0;
+        Some(
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .mx(px(12.0))
+                .mb(px(10.0))
+                .px(px(14.0))
+                .py(px(9.0))
+                .rounded(px(10.0))
+                .bg(theme.shell)
+                .font_family(MONO)
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .children(text.split('\n').map(|line| {
+                    let tone = match (input.diff, line.as_bytes().first()) {
+                        (true, Some(b'+')) => theme.success,
+                        (true, Some(b'-')) => theme.danger,
+                        _ => theme.text,
+                    };
+                    let spot = Spot {
+                        key,
+                        slot,
+                        base,
+                        len: line.len(),
+                        total: Some(text.len()),
+                    };
+                    base += line.len() + 1;
+                    div()
+                        .min_h(px(18.0))
+                        .text_color(tone)
+                        .child(self.text_piece(theme, spot, line, &[]))
+                }))
+                .into_any_element(),
+        )
     }
 }
 

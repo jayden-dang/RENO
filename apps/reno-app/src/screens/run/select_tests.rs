@@ -189,7 +189,7 @@ fn a_selection_is_anchored_to_entry_keys_with_source_byte_ranges(cx: &mut TestAp
     let (_store, _root, vcx, screen) = open(cx);
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
-    let anchors = screen.read_with(vcx, |s, _| s.selection_anchors());
+    let anchors = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
     let keys: Vec<_> = screen.read_with(vcx, |s, _| s.rows().iter().map(Row::key).collect());
     assert_eq!(anchors.len(), 2, "{anchors:?}");
     assert_eq!(anchors[0].key, keys[0]);
@@ -276,7 +276,7 @@ fn a_selection_holds_while_its_start_scrolls_out_of_view_and_the_drag_scrolls_th
     vcx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
     assert!(screen.read_with(vcx, |s, _| s.has_selection()));
     let copied = screen
-        .read_with(vcx, |s, _| s.selected_text())
+        .read_with(vcx, |s, cx| s.selected_text(cx))
         .expect("text");
     assert!(copied.starts_with("draw") || PROMPT.contains(copied.split("\n\n").next().unwrap()));
 }

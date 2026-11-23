@@ -486,6 +486,13 @@ impl<K: Eq + Hash + Clone> Opens<K> {
         !self.search.is_empty()
     }
 
+    /// Keep `k` open independently of search. Returns whether it was closed.
+    pub(crate) fn keep_open(&mut self, k: K) -> bool {
+        let was_closed = !self.contains(&k);
+        self.owner.insert(k);
+        was_closed
+    }
+
     /// The owner opens `k` (a demo hook, a restore). A no-op when it is open.
     pub(crate) fn owner_open(&mut self, k: K) {
         if !self.contains(&k) {

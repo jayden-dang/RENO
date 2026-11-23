@@ -172,7 +172,14 @@ impl RunScreen {
 
     #[cfg(test)]
     pub(crate) fn output_is_open(&self, call: &str) -> bool {
-        self.outputs_open.contains(&call.to_owned())
+        let tools_open = |row: &Row| {
+            matches!(row, Row::Tools { key, calls } if calls.iter().any(|entry| entry.id == call)
+                && self.outputs_open.contains(&self.tool_key(*key, call)))
+        };
+        self.rows.iter().any(|row| match row {
+            Row::Worked { rows, .. } => rows.iter().any(tools_open),
+            row => tools_open(row),
+        })
     }
 
     // --- opening and closing -----------------------------------------------------------------
@@ -495,11 +502,12 @@ impl RunScreen {
             measure.push(hit.key);
         }
         if let Some((call, cut)) = need.output {
-            if self.outputs_open.search_open(call.clone()) {
+            let key = self.tool_key(hit.key, &call);
+            if self.outputs_open.search_open(key.clone()) {
                 opened_any = true;
                 self.find.opened_outputs.push((call.clone(), hit.key));
             }
-            if cut && self.outputs_full.search_open(call.clone()) {
+            if cut && self.outputs_full.search_open(key) {
                 opened_any = true;
                 self.find.opened_outputs.push((call, hit.key));
             }

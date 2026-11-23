@@ -25,7 +25,7 @@ use crate::actions::{
     End, FocusRunInput, Home, LineDown, LineUp, NextMenuTarget, NextPrompt, OpenMenu, PageDown,
     PageUp, PrevPrompt, PreviousMenuTarget,
 };
-use crate::transcript::Key;
+use crate::transcript::{Key, ToolEntry};
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
 use crate::ui::theme::Theme;
@@ -312,14 +312,19 @@ impl RunScreen {
     }
 
     /// What `unit` selects at `point`: the word or drawn line under it, or the block around it.
-    fn unit_selection(&self, point: Point<Pixels>, unit: SelectUnit) -> Option<Selection> {
+    fn unit_selection(
+        &self,
+        point: Point<Pixels>,
+        unit: SelectUnit,
+        cx: &App,
+    ) -> Option<Selection> {
         let at = self.position_at(point)?;
         let whole = unit == SelectUnit::Block || {
             let pieces = self.select.registry.borrow();
             self.nearest_piece(&pieces, point)?.map.is_sourceless()
         };
         if whole {
-            return self.view(|entries, shown| selection::block_at(at, entries, shown));
+            return self.view(cx, |entries, shown| selection::block_at(at, entries, shown));
         }
         let range = {
             let pieces = self.select.registry.borrow();
@@ -374,7 +379,7 @@ impl RunScreen {
             }
             unit => {
                 self.select.drag = None;
-                if let Some(sel) = self.unit_selection(event.position, unit) {
+                if let Some(sel) = self.unit_selection(event.position, unit, cx) {
                     self.select.current = Some(sel);
                     self.focus_transcript(window, cx);
                     cx.notify();
@@ -530,10 +535,11 @@ impl RunScreen {
     // --- copying -------------------------------------------------------------------------------
 
     /// Runs `f` over the entries in reading order and what each shows.
-    fn view<T>(&self, f: impl FnOnce(&[Entry<'_>], &Shown<'_>) -> T) -> T {
+    fn view<T>(&self, cx: &App, f: impl FnOnce(&[Entry<'_>], &Shown<'_>) -> T) -> T {
         let open = |k: Key| self.open.contains(&k);
-        let out_open = |_: Key, id: &str| self.outputs_open.contains(&id.to_owned());
-        let out_full = |_: Key, id: &str| self.outputs_full.contains(&id.to_owned());
+        let out_open = |key, id: &str| self.outputs_open.contains(&self.tool_key(key, id));
+        let out_full = |key, id: &str| self.outputs_full.contains(&self.tool_key(key, id));
+        let tool_inputs = |key, calls: &[ToolEntry]| self.tool_inputs(key, calls, cx);
         let tree = |key: Key, text: &str| {
             self.markdown
                 .peek(&key)
@@ -543,45 +549,50 @@ impl RunScreen {
             open: &open,
             output_open: &out_open,
             output_full: &out_full,
+            tool_inputs: &tool_inputs,
             tree: &tree,
         };
         f(&selection::reading(&self.rows, &open), &shown)
     }
 
     /// What ⌘C copies: the selected text in order, with a blank line between entries.
-    pub(crate) fn selected_text(&self) -> Option<String> {
+    pub(crate) fn selected_text(&self, cx: &App) -> Option<String> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
-        let text = self.view(|entries, shown| selection::copy_text(&sel, entries, shown));
+        let text = self.view(cx, |entries, shown| {
+            selection::copy_text(&sel, entries, shown)
+        });
         (!text.is_empty()).then_some(text)
     }
 
     /// The markdown source of the selection, as the owner wrote it.
-    fn selected_source(&self) -> Option<String> {
+    fn selected_source(&self, cx: &App) -> Option<String> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
-        let text = self.view(|entries, shown| anchor::source_of(&sel, entries, shown));
+        let text = self.view(cx, |entries, shown| anchor::source_of(&sel, entries, shown));
         (!text.is_empty()).then_some(text)
     }
 
     /// The entries and source ranges the selection covers (TRANSCRIPT-2.13): what a later
     /// comments item anchors to.
     #[allow(dead_code)]
-    pub(crate) fn selection_anchors(&self) -> Vec<selection::Anchor> {
+    pub(crate) fn selection_anchors(&self, cx: &App) -> Vec<selection::Anchor> {
         let Some(sel) = self.select.current.filter(|s| !s.is_empty()) else {
             return Vec::new();
         };
-        self.view(|entries, shown| selection::anchors(&sel, entries, shown))
+        self.view(cx, |entries, shown| {
+            selection::anchors(&sel, entries, shown)
+        })
     }
 
     /// ⌘C in the transcript.
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text() {
+        if let Some(text) = self.selected_text(cx) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
     /// "Copy as Markdown": the selection's source bytes on the clipboard.
     pub(super) fn copy_markdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_source() {
+        if let Some(text) = self.selected_source(cx) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
