@@ -157,6 +157,25 @@ fn hex(color: gpui::Hsla) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+/// The pie slice colours, in order. [`theme_key`] hashes these too, so a drawing is redone when
+/// any of them changes.
+fn slice_colors(theme: &Theme) -> [gpui::Hsla; 12] {
+    [
+        theme.accent,
+        theme.warning,
+        theme.ansi[4],
+        theme.danger,
+        theme.ansi[5],
+        theme.success,
+        theme.ansi[6],
+        theme.ansi[12],
+        theme.ansi[13],
+        theme.ansi[14],
+        theme.ansi[10],
+        theme.ansi[11],
+    ]
+}
+
 /// The Mermaid `init` directive that paints a diagram from the theme's tokens: nodes on the
 /// raised tone, lines muted, labels in the text colour, and the edge-label chips in the card's
 /// own tone so they do not show as grey boxes on a dark card.
@@ -216,20 +235,7 @@ pub(crate) fn init_directive(theme: &Theme) -> String {
     .map(|(name, value): (&str, serde_json::Value)| (name.to_owned(), value))
     .collect();
     // Slices need colours that tell apart: the accent, then hues far from it and from each other.
-    let slices = [
-        theme.accent,
-        theme.warning,
-        theme.ansi[4],
-        theme.danger,
-        theme.ansi[5],
-        theme.success,
-        theme.ansi[6],
-        theme.ansi[12],
-        theme.ansi[13],
-        theme.ansi[14],
-        theme.ansi[10],
-        theme.ansi[11],
-    ];
+    let slices = slice_colors(theme);
     for (n, color) in slices.into_iter().enumerate() {
         vars.insert(format!("pie{}", n + 1), hex(color).into());
     }
@@ -444,7 +450,10 @@ pub(crate) fn theme_key(theme: &Theme) -> u64 {
         theme.text,
         theme.muted,
         theme.faint,
-    ] {
+    ]
+    .into_iter()
+    .chain(slice_colors(theme))
+    {
         bytes_of(color).hash(&mut hasher);
     }
     hasher.finish()
@@ -586,6 +595,40 @@ mod tests {
         assert_ne!(theme_key(&dark()), theme_key(&light));
         // The edge-label chip is the card's own tone, not the default grey.
         assert!(dark_svg.to_lowercase().contains(&hex(dark().surface)));
+    }
+
+    #[test]
+    fn a_colour_the_drawing_reads_changes_its_cache_key() {
+        let base = dark();
+        let other = gpui::hsla(0.123, 0.9, 0.5, 1.0);
+        type Set = fn(&mut Theme, gpui::Hsla);
+        let changes: [(&str, Set); 13] = [
+            ("surface", |t, c| t.surface = c),
+            ("raised", |t, c| t.raised = c),
+            ("canvas", |t, c| t.canvas = c),
+            ("text", |t, c| t.text = c),
+            ("muted", |t, c| t.muted = c),
+            ("faint", |t, c| t.faint = c),
+            ("accent", |t, c| t.accent = c),
+            ("warning", |t, c| t.warning = c),
+            ("danger", |t, c| t.danger = c),
+            ("success", |t, c| t.success = c),
+            ("ansi[4]", |t, c| t.ansi[4] = c),
+            ("ansi[14]", |t, c| t.ansi[14] = c),
+            ("ansi[10]", |t, c| t.ansi[10] = c),
+        ];
+        for (name, change) in changes {
+            let mut theme = dark();
+            change(&mut theme, other);
+            assert_ne!(theme_key(&base), theme_key(&theme), "{name}");
+        }
+        // Everything a slice is painted from is something the drawing reads.
+        let mut theme = dark();
+        theme.accent = other;
+        assert_ne!(
+            render_svg("pie title Pets\n \"Dogs\" : 3\n \"Cats\" : 2\n", &base).unwrap(),
+            render_svg("pie title Pets\n \"Dogs\" : 3\n \"Cats\" : 2\n", &theme).unwrap()
+        );
     }
 
     #[test]

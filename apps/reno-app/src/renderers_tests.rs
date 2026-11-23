@@ -533,7 +533,12 @@ fn the_code_tab_shows_the_source_and_preview_the_drawing(cx: &mut TestAppContext
 
     let bad = "```mermaid\nnot a diagram\n```";
     let (_view, vcx) = probe(cx, bad, Host::preview(), Appearance::Dark);
-    settle(vcx, |vcx| !painted(vcx, "md-diagram-rendering"));
+    // Settled on a positive signal: the code block is painted and the "Rendering" note is gone
+    // (while it draws, the card shows the note and the tabs).
+    settle(vcx, |vcx| {
+        painted(vcx, "Copy code") && !painted(vcx, "md-diagram-rendering")
+    });
+    assert!(!painted(vcx, "md-diagram"), "nothing was drawn");
     assert!(
         !painted(vcx, "diagram-tab-code"),
         "a plain code block has no tabs"

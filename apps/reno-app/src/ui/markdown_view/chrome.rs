@@ -61,6 +61,8 @@ pub(crate) enum DiagramTab {
     Code,
 }
 
+/// The tab each diagram is on, keyed by the hash of its source: two identical diagrams share a
+/// tab, and an edited source is a new key, so it opens on Preview again.
 struct Tabs(Lru<u64, DiagramTab>);
 
 impl gpui::Global for Tabs {}
