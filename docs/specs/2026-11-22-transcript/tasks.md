@@ -860,14 +860,14 @@ and `prefs.rs`
 
 **Depends-on:** Task 5, Task 21
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_new_edit_or_command_opens_inside_its_group_while_live`;
   - `turning_the_settings_off_keeps_them_collapsed`;
   - `the_expand_keys_round_trip_and_a_missing_key_is_on`.
   Run: `cargo test -p reno-app expand` — expect: fails.
-- [ ] **Step 2:** Implement them, and add the keys to `KEYS`. Run: `cargo test -p reno-app` — expect: pass, including the
+- [x] **Step 2:** Implement them, and add the keys to `KEYS`. Run: `cargo test -p reno-app` — expect: pass, including the
   tool-group guard.
-- [ ] **Step 3:** Commit `tools: new edits and commands open in their group; settings to keep them closed`.
+- [x] **Step 3:** Commit `tools: new edits and commands open in their group; settings to keep them closed`.
 
 _Requirements: TRANSCRIPT-13.4, TRANSCRIPT-13.18_
 
