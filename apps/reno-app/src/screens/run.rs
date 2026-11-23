@@ -216,6 +216,16 @@ impl MenuItem {
     }
 }
 
+fn menu_link_allowed(policy: &LinkPolicy, url: &str, cx: &gpui::App) -> bool {
+    match policy.action(url) {
+        LinkAction::Web(_) => true,
+        LinkAction::File(file) => policy
+            .files()
+            .is_some_and(|files| files.resolves(&file.path, cx)),
+        _ => false,
+    }
+}
+
 pub(crate) struct RunScreen {
     store: Entity<Store>,
     /// The thread's latest run when the screen opened: the run the composer, the header and the
@@ -1529,6 +1539,7 @@ impl RunScreen {
     /// The owner moved the view: where it rests now is the place to keep, saved soon. A view at
     /// the tail has no place.
     pub(super) fn note_place(&mut self, cx: &mut Context<Self>) {
+        self.select.menu_target = None;
         self.rechecks = 0;
         let place = self.saved_place();
         self.place_moved = true;
@@ -1719,17 +1730,15 @@ impl RunScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let link = link.filter(|target| {
-            let policy = self.transcript_link_policy(cx);
-            match policy.action(target) {
-                LinkAction::Web(_) => true,
-                LinkAction::File(file) => policy
-                    .files()
-                    .is_some_and(|files| files.resolves(&file.path, cx)),
-                _ => false,
-            }
-        });
+        let link = link.filter(|url| menu_link_allowed(&self.transcript_link_policy(cx), url, cx));
         let following = self.list.is_following_tail();
+        let return_focus = if self.transcript_menu_focus.is_focused(window) {
+            self.transcript_menu
+                .as_ref()
+                .and_then(|menu| menu.return_focus.clone())
+        } else {
+            window.focused(cx)
+        };
         self.transcript_menu = Some(TranscriptMenu {
             at,
             link: link.map(str::to_owned),
@@ -1738,13 +1747,31 @@ impl RunScreen {
             can_scroll_to_top: following || self.scrolled_px() > 0.0,
             can_scroll_to_bottom: !following,
             state: menu::MenuState::default(),
-            return_focus: window.focused(cx),
+            return_focus,
         });
         window.focus(&self.transcript_menu_focus, cx);
         cx.notify();
     }
 
     fn open_transcript_menu_by_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self
+            .select
+            .menu_targets
+            .borrow()
+            .iter()
+            .find(|target| Some(target.id) == self.select.menu_target)
+            .cloned();
+        if let Some(target) = target {
+            self.open_transcript_menu(
+                target.bounds.bottom_left(),
+                target.destination.as_deref(),
+                Some(target.id.reply),
+                window,
+                cx,
+            );
+            self.step_transcript_menu(true, cx);
+            return;
+        }
         let view = self.select.list.get();
         let anchor = self
             .select
@@ -1883,7 +1910,8 @@ impl RunScreen {
         Some(menu::popup(open.at, panel, &dismiss))
     }
 
-    fn focus_run_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_run_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select.menu_target = None;
         let focus = if self.panel_for.is_some() && !self.keep_composer {
             self.approval_focus.clone()
         } else {
@@ -1956,14 +1984,29 @@ impl Render for RunScreen {
             .when(
                 self.transcript_focus.is_focused(window) && window.last_input_was_keyboard(),
                 |transcript| {
-                    transcript.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(theme.accent),
-                    )
+                    transcript
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(theme.accent),
+                        )
+                        .children(self.menu_target_outline(&theme))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(RAIL + 8.0))
+                                .bottom(px(8.0))
+                                .rounded(px(5.0))
+                                .bg(theme.surface)
+                                .px(px(7.0))
+                                .py(px(3.0))
+                                .text_color(theme.muted)
+                                .text_size(px(11.0))
+                                .child("⌥↑/↓ links and replies · ⇧F10 menu"),
+                        )
                 },
             )
             .children(rail)
@@ -2020,6 +2063,7 @@ impl Render for RunScreen {
             .relative()
             .flex()
             .on_action(cx.listener(|this, _: &FocusTranscript, window, cx| {
+                this.select.menu_target = None;
                 window.focus(&this.transcript_focus, cx);
                 cx.notify();
             }))

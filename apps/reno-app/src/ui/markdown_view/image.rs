@@ -305,9 +305,22 @@ fn clickable(body: Stateful<Div>, action: Action, target: &str, markdown: &Host)
     body.cursor_pointer()
         .on_click(move |_, window, cx| policy.run(&action, window, cx))
         .when_some(markdown.link_menu.clone(), |card, menu| {
-            card.on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                menu.open(Some(&target), event, window, cx);
-            })
+            let index = menu.reserve(1);
+            let (track, tracked_target) = (menu.clone(), target.clone());
+            card.relative()
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, _| {
+                            track.paint_target(index, &tracked_target, bounds, window);
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    menu.open(Some(&target), event, window, cx);
+                })
         })
         .into_any_element()
 }

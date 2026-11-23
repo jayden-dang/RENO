@@ -43,6 +43,8 @@ actions!(
         PrevPrompt,
         NextPrompt,
         OpenMenu,
+        PreviousMenuTarget,
+        NextMenuTarget,
         PreviousMenuItem,
         NextMenuItem,
         ChooseMenuItem,

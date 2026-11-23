@@ -7,7 +7,7 @@
 //! selected, and puts the text on the clipboard. Painting never changes a height, so a selection
 //! never makes the list measure again.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -22,7 +22,8 @@ use gpui::{
 
 use super::RunScreen;
 use crate::actions::{
-    End, FocusRunInput, Home, LineDown, LineUp, NextPrompt, OpenMenu, PageDown, PageUp, PrevPrompt,
+    End, FocusRunInput, Home, LineDown, LineUp, NextMenuTarget, NextPrompt, OpenMenu, PageDown,
+    PageUp, PrevPrompt, PreviousMenuTarget,
 };
 use crate::transcript::Key;
 use crate::ui::find as look;
@@ -56,6 +57,8 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-pageup", PrevPrompt, Some(CONTEXT)),
         KeyBinding::new("shift-pagedown", NextPrompt, Some(CONTEXT)),
         KeyBinding::new("shift-f10", OpenMenu, Some(CONTEXT)),
+        KeyBinding::new("alt-up", PreviousMenuTarget, Some(CONTEXT)),
+        KeyBinding::new("alt-down", NextMenuTarget, Some(CONTEXT)),
         KeyBinding::new("tab", FocusRunInput, Some(CONTEXT)),
     ]);
 }
@@ -73,6 +76,8 @@ pub(super) struct Select {
     pub(super) current: Option<Selection>,
     /// The texts painted since the last draw began.
     pub(super) registry: Registry,
+    pub(super) menu_targets: Rc<RefCell<Vec<MenuTarget>>>,
+    pub(super) menu_target: Option<MenuTargetId>,
     /// Where each entry is in reading order.
     pub(super) order: HashMap<Key, usize>,
     drag: Option<Drag>,
@@ -81,6 +86,19 @@ pub(super) struct Select {
     /// How far the list moves each step while the pointer is held past its edge (negative: up).
     scroll: f32,
     task: Option<Task<()>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct MenuTargetId {
+    pub(super) reply: Key,
+    pub(super) link: Option<usize>,
+}
+
+#[derive(Clone)]
+pub(super) struct MenuTarget {
+    pub(super) id: MenuTargetId,
+    pub(super) destination: Option<String>,
+    pub(super) bounds: Bounds<Pixels>,
 }
 
 /// Where a text of a row is, for painting and tracking it.
@@ -556,6 +574,75 @@ impl RunScreen {
         }
     }
 
+    fn step_menu_target(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let policy = self.transcript_link_policy(cx);
+        let targets = self.select.menu_targets.borrow();
+        let mut visible: Vec<_> = targets
+            .iter()
+            .filter(|target| {
+                target
+                    .destination
+                    .as_deref()
+                    .is_none_or(|url| super::menu_link_allowed(&policy, url, cx))
+            })
+            .map(|target| target.id)
+            .collect();
+        visible.sort_unstable_by_key(|id| (self.items.item_of(id.reply), id.link));
+        visible.dedup();
+        let current = visible
+            .iter()
+            .position(|&id| Some(id) == self.select.menu_target);
+        let next = match (current, forward) {
+            (Some(at), true) => visible.get(at + 1).or_else(|| visible.first()),
+            (Some(at), false) => at
+                .checked_sub(1)
+                .and_then(|at| visible.get(at))
+                .or_else(|| visible.last()),
+            (None, true) => visible.first(),
+            (None, false) => visible.last(),
+        };
+        self.select.menu_target = next.copied();
+        cx.notify();
+    }
+
+    pub(super) fn menu_target_outline(&self, theme: &Theme) -> Option<AnyElement> {
+        let selected = self.select.menu_target?;
+        let targets = self.select.menu_targets.clone();
+        let accent = theme.accent;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .debug_selector(move || {
+                    if selected.link.is_some() {
+                        "transcript-context-link"
+                    } else {
+                        "transcript-context-reply"
+                    }
+                    .to_owned()
+                })
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |area, (), window, _| {
+                            if let Some(target) =
+                                targets.borrow().iter().find(|target| target.id == selected)
+                            {
+                                let outline = target.bounds.dilate(px(1.0)).intersect(&area);
+                                window.paint_quad(gpui::outline(
+                                    outline,
+                                    accent,
+                                    gpui::BorderStyle::Solid,
+                                ));
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The transcript's own focus, a node of no size that carries ⌘C; and the layer that
     /// follows the pointer through a drag.
     pub(super) fn select_nodes(&self, cx: &mut Context<Self>) -> [AnyElement; 2] {
@@ -569,6 +656,12 @@ impl RunScreen {
             .on_action(
                 cx.listener(|this, _: &OpenMenu, w, cx| this.open_transcript_menu_by_key(w, cx)),
             )
+            .on_action(cx.listener(|this, _: &PreviousMenuTarget, _, cx| {
+                this.step_menu_target(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextMenuTarget, _, cx| {
+                this.step_menu_target(true, cx);
+            }))
             .on_action(cx.listener(|this, _: &CopyTranscript, _, cx| this.copy_selection(cx)))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.key_page(-1, cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.key_page(1, cx)))
@@ -590,6 +683,7 @@ impl RunScreen {
     /// The registry is emptied before each draw of the list: texts file themselves as they paint.
     pub(super) fn begin_paint(&self) {
         self.select.registry.borrow_mut().clear();
+        self.select.menu_targets.borrow_mut().clear();
     }
 }
 

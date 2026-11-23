@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, Div, MouseDownEvent, Pixels, Point, Role, SharedString, Stateful,
-    Window, anchored, deferred, div, prelude::*, px,
+    Anchor, AnyElement, App, Bounds, Div, MouseDownEvent, Pixels, Point, Role, SharedString,
+    Stateful, Window, anchored, deferred, div, prelude::*, px,
 };
 
 use super::kit;
@@ -16,6 +16,11 @@ use super::theme::Theme;
 pub(crate) type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub(crate) const CONTEXT: &str = "PopupMenu";
+
+pub(crate) fn visible_target(bounds: Bounds<Pixels>, window: &Window) -> Option<Bounds<Pixels>> {
+    let visible = bounds.intersect(&window.content_mask().bounds);
+    (visible.size.width > px(0.0) && visible.size.height > px(0.0)).then_some(visible)
+}
 
 #[derive(Default)]
 pub(crate) struct MenuState {

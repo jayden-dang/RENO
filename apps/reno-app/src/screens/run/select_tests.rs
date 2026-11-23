@@ -911,3 +911,133 @@ fn tab_navigation_between_the_composer_and_transcript_stays_within_the_run(
         "@src/supervisor.rs "
     );
 }
+
+const CONTEXT_LINK: &str = "https://example.com/keyboard";
+const CONTEXT_REPLY: &str = "Read the complete documentation on this subject here: [the keyboard guide](https://example.com/keyboard).";
+
+#[gpui::test]
+fn transcript_menu_replacement_restores_the_original_keyboard_focus(cx: &mut TestAppContext) {
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, CONTEXT_REPLY);
+    let link = on_text(vcx, &screen, "the keyboard guide");
+
+    vcx.simulate_keystrokes("shift-tab shift-f10");
+    draw(vcx);
+    assert!(!vcx.debug_bounds("transcript-menu").unwrap().contains(&link));
+    right_click(vcx, link);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    assert!(recording.opened.borrow().is_empty());
+
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(
+        painted(vcx, "transcript-menu"),
+        "Escape restored transcript focus"
+    );
+
+    vcx.simulate_keystrokes("escape tab");
+    draw(vcx);
+    let viewport = vcx.debug_bounds("transcript").unwrap();
+    right_click(vcx, viewport.origin + point(px(22.0), px(12.0)));
+    assert!(!vcx.debug_bounds("transcript-menu").unwrap().contains(&link));
+    right_click(vcx, link);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(vcx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window)));
+    assert!(recording.opened.borrow().is_empty());
+}
+
+#[gpui::test]
+fn transcript_menu_link_press_dismisses_the_existing_sidebar_popup(cx: &mut TestAppContext) {
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, CONTEXT_REPLY);
+    let thread = store.read_with(vcx, |s, _| {
+        s.thread_of(&run_id(RENDER_RUN)).unwrap().clone()
+    });
+    root.update_in(vcx, |root, window, cx| {
+        root.sidebar_act(
+            crate::ui::sidebar::Act::Menu(thread, Some(point(px(10.0), px(120.0)))),
+            window,
+            cx,
+        );
+    });
+    draw(vcx);
+    assert!(painted(vcx, "sidebar-menu"));
+    let link = on_text(vcx, &screen, "the keyboard guide");
+    assert!(!vcx.debug_bounds("sidebar-menu").unwrap().contains(&link));
+
+    right_click(vcx, link);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    assert!(
+        !painted(vcx, "sidebar-menu"),
+        "the prior popup closes on the outside press"
+    );
+    assert!(recording.opened.borrow().is_empty());
+    choose_menu_row(vcx, "transcript-menu-copy-link");
+    vcx.simulate_click(link, Modifiers::none());
+    draw(vcx);
+    assert_eq!(recording.opened.borrow().as_slice(), [CONTEXT_LINK]);
+}
+
+#[gpui::test]
+fn transcript_menu_keyboard_targets_replies_and_links_from_the_composer(cx: &mut TestAppContext) {
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, CONTEXT_REPLY);
+    assert!(!screen.read_with(vcx, |s, _| s.has_selection()));
+
+    vcx.simulate_keystrokes("shift-tab alt-up");
+    draw(vcx);
+    assert!(
+        painted(vcx, "transcript-context-link"),
+        "the visible link is outlined"
+    );
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    assert!(painted(vcx, "transcript-menu-open"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert_eq!(clipboard(vcx).as_deref(), Some(CONTEXT_LINK));
+    assert!(recording.opened.borrow().is_empty());
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert_eq!(recording.opened.borrow().as_slice(), [CONTEXT_LINK]);
+
+    vcx.simulate_keystrokes("alt-up");
+    draw(vcx);
+    assert!(
+        painted(vcx, "transcript-context-reply"),
+        "the visible reply is outlined"
+    );
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-message"));
+    assert!(!painted(vcx, "transcript-menu-copy-link"));
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert_eq!(clipboard(vcx).as_deref(), Some(CONTEXT_REPLY));
+
+    vcx.simulate_keystrokes("alt-down");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-context-link"));
+    vcx.simulate_keystrokes("home");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-context-link"));
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu"));
+    assert!(!painted(vcx, "transcript-menu-copy-link"));
+}

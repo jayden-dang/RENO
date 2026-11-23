@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use reno_markdown::BlockTree;
 
-use super::select::Spot;
+use super::select::{MenuTarget, MenuTargetId, Spot};
 use super::*;
 use crate::prefs::PREVIEW_LINES;
 use crate::ui::markdown_view::lru::Lru;
@@ -203,6 +203,7 @@ impl RunScreen {
                 let note_screen = screen.clone();
                 let link_screen = screen.clone();
                 let reply = *key;
+                let link_targets = self.select.menu_targets.clone();
                 let host =
                     Host::transcript(Some(self.run_of(*key)), client, Some(self.file_links(cx)))
                         .when_grown(Some(Grew(Rc::new(move |cx| {
@@ -219,13 +220,31 @@ impl RunScreen {
                                 .update(cx, |this, cx| this.reveal_footnote(note, cx))
                                 .ok();
                         })
-                        .on_link_menu(move |target, at, window, cx| {
-                            link_screen
-                                .update(cx, |this, cx| {
-                                    this.open_transcript_menu(at, target, Some(reply), window, cx);
-                                })
-                                .ok();
-                        })
+                        .on_link_menu(
+                            move |target, at, window, cx| {
+                                link_screen
+                                    .update(cx, |this, cx| {
+                                        this.open_transcript_menu(
+                                            at,
+                                            target,
+                                            Some(reply),
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .ok();
+                            },
+                            move |link, target, bounds| {
+                                link_targets.borrow_mut().push(MenuTarget {
+                                    id: MenuTargetId {
+                                        reply,
+                                        link: Some(link),
+                                    },
+                                    destination: Some(target.to_owned()),
+                                    bounds,
+                                });
+                            },
+                        )
                         .while_streaming(streaming)
                         .marked(self.find_marks(*key))
                         .selectable(Some(Rc::new(SelectHost {
@@ -237,6 +256,7 @@ impl RunScreen {
                         })));
                 div()
                     .group(turn_end_group(*key))
+                    .relative()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -263,6 +283,22 @@ impl RunScreen {
                             .child(markdown_view::blocks_with(stream.tree(), theme, host)),
                     )
                     .children(actions)
+                    .child(
+                        gpui::canvas(|_, _, _| (), {
+                            let targets = self.select.menu_targets.clone();
+                            move |bounds, (), window, _| {
+                                if let Some(bounds) = menu::visible_target(bounds, window) {
+                                    targets.borrow_mut().push(MenuTarget {
+                                        id: MenuTargetId { reply, link: None },
+                                        destination: None,
+                                        bounds,
+                                    });
+                                }
+                            }
+                        })
+                        .absolute()
+                        .inset_0(),
+                    )
                     .into_any_element()
             }
             Row::Reasoning { key, text } => self.reasoning(theme, *key, text, cx),

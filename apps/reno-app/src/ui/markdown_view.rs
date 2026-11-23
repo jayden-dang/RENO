@@ -9,7 +9,7 @@
 //! only `http`, `https` and `mailto` URLs open, and a link whose URL is still streaming never
 //! does.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -145,9 +145,14 @@ impl std::fmt::Debug for FootnoteNavigation {
 }
 
 type OpenLinkMenu = dyn Fn(Option<&str>, Point<Pixels>, &mut Window, &mut App);
+type TrackLink = dyn Fn(usize, &str, Bounds<Pixels>);
 
 #[derive(Clone)]
-struct LinkMenu(Rc<OpenLinkMenu>);
+struct LinkMenu {
+    open: Rc<OpenLinkMenu>,
+    track: Rc<TrackLink>,
+    next: Rc<Cell<usize>>,
+}
 
 impl std::fmt::Debug for LinkMenu {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,7 +169,19 @@ impl LinkMenu {
         cx: &mut App,
     ) {
         cx.stop_propagation();
-        (self.0)(target, event.position, window, cx);
+        (self.open)(target, event.position, window, cx);
+    }
+
+    fn reserve(&self, count: usize) -> usize {
+        let start = self.next.get();
+        self.next.set(start + count);
+        start
+    }
+
+    fn paint_target(&self, index: usize, target: &str, bounds: Bounds<Pixels>, window: &Window) {
+        if let Some(bounds) = super::menu::visible_target(bounds, window) {
+            (self.track)(index, target, bounds);
+        }
     }
 }
 
@@ -269,8 +286,13 @@ impl Host {
     pub(crate) fn on_link_menu(
         mut self,
         open: impl Fn(Option<&str>, Point<Pixels>, &mut Window, &mut App) + 'static,
+        track: impl Fn(usize, &str, Bounds<Pixels>) + 'static,
     ) -> Self {
-        self.link_menu = Some(LinkMenu(Rc::new(open)));
+        self.link_menu = Some(LinkMenu {
+            open: Rc::new(open),
+            track: Rc::new(track),
+            next: Rc::default(),
+        });
         self
     }
 
@@ -1450,25 +1472,7 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
                     None => {}
                 });
             if let Some((menu, targets)) = targets {
-                let layout = layout.clone();
-                div()
-                    .child(text)
-                    .capture_any_mouse_down(move |event, window, cx| {
-                        if event.button == MouseButton::Right {
-                            let target =
-                                layout
-                                    .index_for_position(event.position)
-                                    .ok()
-                                    .and_then(|ix| {
-                                        targets.iter().find_map(|(r, target)| {
-                                            r.contains(&ix).then_some(target.as_str())
-                                        })
-                                    });
-                            // InteractiveText accepts mouse presses from every button.
-                            menu.open(target, event, window, cx);
-                        }
-                    })
-                    .into_any_element()
+                inline_link_menu(text, layout.clone(), menu, targets)
             } else {
                 text.into_any_element()
             }
@@ -1479,6 +1483,65 @@ fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyEl
     } else {
         Overlays::new(element, layout, overlays).into_any_element()
     }
+}
+
+fn inline_link_menu(
+    text: InteractiveText,
+    layout: gpui::TextLayout,
+    menu: LinkMenu,
+    targets: Vec<(Range<usize>, String)>,
+) -> AnyElement {
+    let first = menu.reserve(targets.len());
+    let targets = Rc::new(targets);
+    let painted = {
+        let (menu, layout, targets) = (menu.clone(), layout.clone(), targets.clone());
+        gpui::canvas(
+            |_, _, _| (),
+            move |_, (), window, _| {
+                for (i, (range, target)) in targets.iter().enumerate() {
+                    if let Some(bounds) = link_bounds(&layout, range) {
+                        menu.paint_target(first + i, target, bounds, window);
+                    }
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+    };
+    div()
+        .relative()
+        .child(text)
+        .child(painted)
+        // Bubble from the top of the text after the popups' outside-press handlers run.
+        .child(div().absolute().inset_0().on_mouse_down(
+            MouseButton::Right,
+            move |event, window, cx| {
+                let target = layout
+                    .index_for_position(event.position)
+                    .ok()
+                    .and_then(|ix| {
+                        targets.iter().find_map(|(range, target)| {
+                            range.contains(&ix).then_some(target.as_str())
+                        })
+                    });
+                menu.open(target, event, window, cx);
+            },
+        ))
+        .into_any_element()
+}
+
+fn link_bounds(layout: &gpui::TextLayout, range: &Range<usize>) -> Option<Bounds<Pixels>> {
+    let start = layout.position_for_index(range.start)?;
+    let end = layout.position_for_index(range.end)?;
+    let (left, right) = if start.y == end.y {
+        (start.x.min(end.x), start.x.max(end.x))
+    } else {
+        (layout.bounds().left(), layout.bounds().right())
+    };
+    Some(Bounds::from_corners(
+        gpui::point(left, start.y),
+        gpui::point(right, end.y + layout.line_height()),
+    ))
 }
 
 /// Whether a link may be opened from the Files tab's preview: web and mail links only. Anything
