@@ -95,8 +95,8 @@ claims more than a green run verified (`ExecutorDescriptor::cli_verified`, see
 
 ## Reno's own harness and the bot's computer
 
-Reno's own harness is an existing agent harness that a driver starts and gates like any other
-executor; which one is settled by a spike. What makes it Reno's is the gate (ARCH-18): the driver
+Reno's own harness is Pi (ADR-0002), run as the `reno` executor (ADR-0003): a driver starts it
+and gates it like any other executor. What makes it Reno's is the gate (ARCH-18): the driver
 loads Reno's gate into the harness, checks that it loaded before the first prompt, and the gate
 sends every tool call to the kernel's policy before the call runs. A call the policy denies, or
 cannot judge because the gate or the daemon is unreachable, does not run. The policy, the approval

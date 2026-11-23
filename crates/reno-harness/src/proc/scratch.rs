@@ -38,28 +38,39 @@ impl ScratchDir {
     /// only aids debugging; the pid and a process-local counter keep concurrent
     /// runs of the same adapter apart.
     pub(crate) fn new(label: &str) -> std::io::Result<Self> {
+        Self::new_in(&std::env::temp_dir(), label)
+    }
+
+    /// Like [`Self::new`], under `base` instead of the process's temp directory.
+    pub(crate) fn new_in(base: &Path, label: &str) -> std::io::Result<Self> {
         let label: String = label
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
         loop {
-            let path = std::env::temp_dir().join(format!(
+            let path = base.join(format!(
                 "reno-{label}-{}-{}",
                 std::process::id(),
                 NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
             ));
-            let mut builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            match builder.create(&path) {
-                Ok(()) => return Ok(Self { path }),
+            match Self::at(path) {
+                Ok(dir) => return Ok(dir),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Create the directory `path` itself, owner-only. It fails when the path exists.
+    pub(crate) fn at(path: PathBuf) -> std::io::Result<Self> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Self { path })
     }
 
     pub(crate) fn path(&self) -> &Path {

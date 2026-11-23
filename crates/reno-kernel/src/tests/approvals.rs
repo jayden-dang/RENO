@@ -1893,3 +1893,788 @@ async fn full_access_under_a_narrower_sandbox_is_never_allowed_by_its_mode_excep
         [rule("builtin:full-access"), ResolvedBy::Human]
     );
 }
+
+// ---- gate-shaped subjects on the `reno` executor --------------------------------------------
+//
+// The ladder judges a subject, not an executor: what Pi's gate raises is answered as a mock's
+// `NeedsApproval` is. The subjects below have the shape `subject()` gives a gate call: a
+// lower-case Pi tool, the paths as Pi will open them, and `raw` holding the call as sent.
+
+/// The action classes copy `action_class` in `reno-harness`'s `wire/pi/subject.rs` (it is crate-private):
+/// keep the two in step.
+pub(super) fn gate_call(
+    tool: &str,
+    call_id: &str,
+    input: serde_json::Value,
+    paths: &[&str],
+) -> ApprovalSubject {
+    let action = match tool {
+        "bash" | "powershell" => ActionClass::Command,
+        "read" | "grep" | "find" | "ls" => ActionClass::Read,
+        "edit" | "write" => ActionClass::Edit,
+        t if t.starts_with("mcp__") => ActionClass::McpTool,
+        _ => ActionClass::Other,
+    };
+    let is_path_tool = matches!(action, ActionClass::Edit | ActionClass::Read);
+    ApprovalSubject {
+        action,
+        tool: tool.into(),
+        command: (action == ActionClass::Command)
+            .then(|| input["command"].as_str().map(str::to_owned))
+            .flatten(),
+        paths: if is_path_tool {
+            paths.iter().map(Into::into).collect()
+        } else {
+            Vec::new()
+        },
+        raw: serde_json::json!({
+            "toolName": tool,
+            "toolCallId": call_id,
+            "parentToolCallId": null,
+            "input": input,
+        }),
+    }
+}
+
+pub(super) fn gate_bash(call_id: &str, line: &str) -> ApprovalSubject {
+    gate_call("bash", call_id, serde_json::json!({ "command": line }), &[])
+}
+
+pub(super) fn gate_edit(call_id: &str, path: &str) -> ApprovalSubject {
+    gate_call(
+        "edit",
+        call_id,
+        serde_json::json!({ "path": path, "edits": [] }),
+        &[path],
+    )
+}
+
+/// The two access modes a `reno` run can have, as a bot's definition says them.
+pub(super) const MODES: [(&str, &str); 2] = [
+    ("supervised", ""),
+    ("full_access", "access = \"full_access\""),
+];
+
+fn reno_defs(policy_text: &str, bot_extra: &str) -> Vec<DefFile> {
+    vec![
+        file(
+            DefKind::Bot,
+            "keeper",
+            &format!(
+                "name = \"keeper\"\ninstructions = \"work\"\nexecutors = [\"reno\"]\n{bot_extra}\n"
+            ),
+        ),
+        policy(policy_text),
+    ]
+}
+
+/// A kernel whose bot `keeper` runs on `reno` (a mock under that name), with `bot_extra` added
+/// to its definition.
+pub(super) async fn reno_rig(policy_text: &str, bot_extra: &str, steps: Vec<MockStep>) -> Rig {
+    let mock = MockExecutor::new(id("reno")).with_steps(steps);
+    let port = FakePort::with(reno_defs(policy_text, bot_extra));
+    let fx = Fx::with_definitions(
+        config(1),
+        registry(std::slice::from_ref(&mock)),
+        setup(&port),
+    )
+    .await;
+    Rig { fx, port, mock }
+}
+
+const GATE_POLICY: &str = r#"
+default = "ask"
+[[rules]]
+note = "no force push"
+effect = "deny"
+match = { action = "command", command = "git push --force*" }
+[[rules]]
+note = "cargo is fine"
+effect = "allow"
+match = { action = "command", command = "cargo *" }
+[[rules]]
+note = "pushing needs the owner"
+effect = "ask"
+match = { action = "command", command = "git push*" }
+[[rules]]
+note = "the report waits for the owner"
+effect = "ask"
+match = { action = "mcp_tool", tool = "mcp__reno__report" }
+"#;
+
+#[derive(Clone, Copy, Debug)]
+enum Want {
+    /// Denied at once by the rule of this name, with this message.
+    Refused(&'static str, &'static str),
+    /// Allowed at once, by the rule of this name, with a journal pair.
+    Allowed(&'static str),
+    /// Allowed at once, on record in the approval history only.
+    Recorded(&'static str),
+    /// Held for the owner, who then approves it.
+    Asked,
+}
+
+fn gate_rows() -> Vec<(&'static str, ApprovalSubject, Want, Want)> {
+    let full_access = Want::Allowed("builtin:full-access");
+    let rest = |name, subject| (name, subject, Want::Asked, full_access);
+    vec![
+        (
+            "a policy deny",
+            gate_bash("c1", "git push --force origin main"),
+            Want::Refused("no force push", "denied by policy: no force push"),
+            Want::Refused("no force push", "denied by policy: no force push"),
+        ),
+        (
+            "a policy allow",
+            gate_bash("c1", "cargo test"),
+            Want::Allowed("cargo is fine"),
+            Want::Allowed("cargo is fine"),
+        ),
+        (
+            "an ask rule",
+            gate_bash("c1", "git push origin main"),
+            Want::Asked,
+            Want::Asked,
+        ),
+        (
+            "Reno's own report, even where an ask rule names it",
+            gate_call(
+                "mcp__reno__report",
+                "c1",
+                serde_json::json!({ "summary": "done" }),
+                &[],
+            ),
+            Want::Recorded("builtin:reno-mcp"),
+            Want::Recorded("builtin:reno-mcp"),
+        ),
+        rest("a command no rule names", gate_bash("c1", "ls -la")),
+        rest(
+            "a read",
+            gate_call(
+                "read",
+                "c1",
+                serde_json::json!({ "path": "README.md" }),
+                &["README.md"],
+            ),
+        ),
+        rest("an edit", gate_edit("c1", "src/lib.rs")),
+        rest(
+            "a tool of no known kind",
+            gate_call(
+                "web_search",
+                "c1",
+                serde_json::json!({ "query": "rust" }),
+                &[],
+            ),
+        ),
+        rest(
+            "another server's tool",
+            gate_call(
+                "mcp__github__create_issue",
+                "c1",
+                serde_json::json!({}),
+                &[],
+            ),
+        ),
+        rest(
+            "a look-alike of Reno's server",
+            gate_call("mcp__reno__rm_everything", "c1", serde_json::json!({}), &[]),
+        ),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ladder_answers_each_kind_of_gate_call_in_both_access_modes() {
+    for (mode, extra) in MODES {
+        for (name, subject, supervised, full_access) in gate_rows() {
+            let want = if mode == "supervised" {
+                supervised
+            } else {
+                full_access
+            };
+            let label = format!("{name} at {mode}");
+            let rig = reno_rig(GATE_POLICY, extra, script(vec![("r1", subject.clone())])).await;
+            let run = rig.run_as("keeper").await;
+            let by_human = matches!(want, Want::Asked);
+            if by_human {
+                let pending = rig.pending().await;
+                assert_eq!(pending.subject, subject, "{label}");
+                rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+                rig.fx
+                    .kernel
+                    .decide(&pending.id, ApprovalDecision::ApproveOnce)
+                    .await
+                    .unwrap();
+            }
+            rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+            assert!(
+                rig.fx.kernel.pending_approvals().await.unwrap().is_empty(),
+                "{label}"
+            );
+            let journal = rig.fx.journal_with_done(&run).await;
+            let history = rig.history(&run).await;
+            assert_eq!(history.len(), 1, "{label}");
+            assert_eq!(history[0].subject, subject, "{label}: kept verbatim");
+            assert_eq!(history[0].request_id, "r1", "{label}");
+            let kept = &history[0].subject.raw;
+            assert_eq!(kept["toolCallId"], "c1", "{label}");
+            match want {
+                Want::Refused(by, message) => {
+                    assert_eq!(rig.decisions(), [Decision::Deny], "{label}");
+                    assert_eq!(
+                        rig.mock.log().answers[0].answer,
+                        Answer::Decision(Decision::Deny, Some(message.into())),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        resolved(&journal),
+                        [(
+                            "r1".into(),
+                            ApprovalOutcome::Denied,
+                            rule(by),
+                            Some(message.into())
+                        )],
+                        "{label}"
+                    );
+                    assert_eq!(history[0].status, ApprovalStatus::Denied, "{label}");
+                    assert_eq!(history[0].decided_by, Some(rule(by)), "{label}");
+                }
+                Want::Allowed(by) => {
+                    assert_eq!(rig.decisions(), [Decision::Allow], "{label}");
+                    assert_eq!(
+                        resolved(&journal),
+                        [("r1".into(), ApprovalOutcome::Approved, rule(by), None)],
+                        "{label}"
+                    );
+                    assert_eq!(history[0].decided_by, Some(rule(by)), "{label}");
+                }
+                Want::Recorded(by) => {
+                    assert_eq!(rig.decisions(), [Decision::Allow], "{label}");
+                    assert!(
+                        !journal.iter().any(|(_, event)| matches!(
+                            event,
+                            ExecEvent::NeedsApproval { .. } | ExecEvent::ApprovalResolved { .. }
+                        )),
+                        "{label}: no journal pair: {journal:?}"
+                    );
+                    assert_eq!(history[0].status, ApprovalStatus::Approved, "{label}");
+                    assert_eq!(history[0].decided_by, Some(rule(by)), "{label}");
+                    assert_eq!(
+                        history[0].subject_digest.as_deref(),
+                        Some(subject.digest().as_str()),
+                        "{label}"
+                    );
+                }
+                Want::Asked => {
+                    assert_eq!(rig.decisions(), [Decision::Allow], "{label}");
+                    assert_eq!(
+                        resolved(&journal),
+                        [(
+                            "r1".into(),
+                            ApprovalOutcome::Approved,
+                            ResolvedBy::Human,
+                            None
+                        )],
+                        "{label}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+const ASK_EVERY_COMMAND: &str = r#"
+default = "ask"
+[[rules]]
+note = "the owner decides commands"
+effect = "ask"
+match = { action = "command", command = "*" }
+"#;
+
+/// Every access mode keeps what an owner's refusal and a remembered answer decided.
+mod remembered {
+    use reno_proto::{Remember, RememberScope};
+
+    use super::*;
+    use crate::tests::until;
+
+    fn remember_for_bot() -> Option<Remember> {
+        Some(Remember {
+            scope: RememberScope::Bot,
+            expires_in_secs: None,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repeat_denial_refuses_a_retry_with_a_new_call_id_unasked() {
+        for (mode, extra) in MODES {
+            let rig = reno_rig(
+                GATE_POLICY,
+                extra,
+                script(vec![
+                    ("r1", gate_bash("c1", "git push origin main")),
+                    ("r2", gate_bash("c2", "git push origin main")),
+                ]),
+            )
+            .await;
+            let run = rig.run_as("keeper").await;
+            let pending = rig.pending().await;
+            rig.fx
+                .kernel
+                .decide(&pending.id, ApprovalDecision::Deny)
+                .await
+                .unwrap();
+            rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+
+            assert_eq!(rig.decisions(), [Decision::Deny, Decision::Deny], "{mode}");
+            let journal = rig.fx.journal_with_done(&run).await;
+            let by: Vec<_> = resolved(&journal).into_iter().map(|r| r.2).collect();
+            assert_eq!(by, [ResolvedBy::Human, ResolvedBy::RepeatDenial], "{mode}");
+            assert!(rig.fx.kernel.pending_approvals().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_standing_deny_refuses_and_a_standing_allow_allows_in_a_later_run() {
+        for (mode, extra) in MODES {
+            for (decision, outcome, answered) in [
+                (
+                    ApprovalDecision::Deny,
+                    ApprovalOutcome::Denied,
+                    Decision::Deny,
+                ),
+                (
+                    ApprovalDecision::ApproveOnce,
+                    ApprovalOutcome::Approved,
+                    Decision::Allow,
+                ),
+            ] {
+                let rig = reno_rig(
+                    GATE_POLICY,
+                    extra,
+                    script(vec![("r1", gate_bash("c1", "git push origin main"))]),
+                )
+                .await;
+                let first = rig.run_as("keeper").await;
+                let pending = rig.pending().await;
+                rig.fx
+                    .kernel
+                    .decide_remembering(&pending.id, decision, None, remember_for_bot())
+                    .await
+                    .unwrap();
+                rig.fx.wait_status(&first, RunStatus::Succeeded).await;
+                let rules = rig.fx.kernel.list_rules(true).await.unwrap();
+                assert_eq!(rules.len(), 1, "{mode}");
+                let name = format!("standing:{}", rules[0].id);
+
+                let later = rig.run_as("keeper").await;
+                rig.fx.wait_status(&later, RunStatus::Succeeded).await;
+                assert!(rig.fx.kernel.pending_approvals().await.unwrap().is_empty());
+                assert_eq!(rig.decisions(), [answered, answered], "{mode}");
+                let journal = rig.fx.journal_with_done(&later).await;
+                let [(_, got, by, _)] = &resolved(&journal)[..] else {
+                    panic!("{mode}: one resolution expected");
+                };
+                assert_eq!((*got, by), (outcome, &rule(&name)), "{mode}");
+            }
+        }
+    }
+
+    /// Remember the owner's answer to the one call, then load `later` as the policy and run again.
+    async fn later_run(
+        extra: &str,
+        later: &str,
+        subject: ApprovalSubject,
+        decision: ApprovalDecision,
+    ) -> (Rig, RunId) {
+        let rig = reno_rig(ASK_EVERY_COMMAND, extra, script(vec![("r1", subject)])).await;
+        let first = rig.run_as("keeper").await;
+        let pending = rig.pending().await;
+        rig.fx
+            .kernel
+            .decide_remembering(&pending.id, decision, None, remember_for_bot())
+            .await
+            .unwrap();
+        rig.fx.wait_status(&first, RunStatus::Succeeded).await;
+        let version = || {
+            rig.fx
+                .kernel
+                .current_defs()
+                .version_of(DefKind::Policy, "policy")
+                .map(|v| v.version)
+        };
+        let before = version();
+        rig.port.set(reno_defs(later, extra));
+        rig.port.touch_and_wait().await;
+        until(async || (version() > before).then_some(())).await;
+        let again = rig.run_as("keeper").await;
+        rig.fx.wait_status(&again, RunStatus::Succeeded).await;
+        (rig, again)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_deny_added_later_beats_a_standing_allow() {
+        for (mode, extra) in MODES {
+            let (rig, run) = later_run(
+                extra,
+                GATE_POLICY,
+                gate_bash("c1", "git push --force origin main"),
+                ApprovalDecision::ApproveOnce,
+            )
+            .await;
+            let journal = rig.fx.journal_with_done(&run).await;
+            let [(_, got, by, _)] = &resolved(&journal)[..] else {
+                panic!("{mode}: one resolution expected");
+            };
+            assert_eq!(
+                (*got, by),
+                (ApprovalOutcome::Denied, &rule("no force push")),
+                "{mode}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_standing_deny_beats_a_policy_allow_added_later() {
+        for (mode, extra) in MODES {
+            let (rig, run) = later_run(
+                extra,
+                GATE_POLICY,
+                gate_bash("c1", "cargo test"),
+                ApprovalDecision::Deny,
+            )
+            .await;
+            let rules = rig.fx.kernel.list_rules(true).await.unwrap();
+            let name = format!("standing:{}", rules[0].id);
+            let journal = rig.fx.journal_with_done(&run).await;
+            let [(_, got, by, _)] = &resolved(&journal)[..] else {
+                panic!("{mode}: one resolution expected");
+            };
+            assert_eq!(
+                (*got, by),
+                (ApprovalOutcome::Denied, &rule(&name)),
+                "{mode}"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_gate_call_expires_as_denied_in_both_modes_and_stays_denied() {
+    for (mode, extra) in MODES {
+        let rig = reno_rig(
+            GATE_POLICY,
+            extra,
+            script(vec![
+                ("r1", gate_bash("c1", "git push origin main")),
+                ("r2", gate_bash("c2", "git push origin main")),
+            ]),
+        )
+        .await;
+        let run = rig.run_as("keeper").await;
+        let pending = rig.pending().await;
+        rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+        assert!(rig.decisions().is_empty(), "{mode}: held");
+
+        rig.fx.clock.advance(30 * 60 * 1000);
+        advance(Duration::from_secs(30 * 60)).await;
+        rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+
+        assert_eq!(rig.decisions(), [Decision::Deny, Decision::Deny], "{mode}");
+        let history = rig.history(&run).await;
+        let expired = history
+            .iter()
+            .find(|record| record.id == pending.id)
+            .expect("the held request is on record");
+        assert_eq!(expired.status, ApprovalStatus::Expired, "{mode}");
+        assert_eq!(expired.decided_by, Some(ResolvedBy::Expired), "{mode}");
+        let journal = rig.fx.journal_with_done(&run).await;
+        let by: Vec<_> = resolved(&journal).into_iter().map(|r| r.2).collect();
+        assert_eq!(
+            by,
+            [ResolvedBy::Expired, ResolvedBy::RepeatDenial],
+            "{mode}"
+        );
+        assert!(rig.fx.kernel.pending_approvals().await.unwrap().is_empty());
+    }
+}
+
+/// The answer the harness got, and the decided approvals on record at that moment.
+type Told = (Answer, Vec<reno_store::StoredApproval>);
+
+/// An executor that asks once and, when it is told the answer, looks at the store: what the
+/// approval history held at the moment the harness was told.
+///
+/// The store answers a read after the write queued before it, so this shows the decision whole on
+/// record when Pi is told; it cannot tell a write that lands a moment after the answer.
+struct Observing {
+    base: MockExecutor,
+    store: Arc<std::sync::OnceLock<Store>>,
+    subject: ApprovalSubject,
+    seen: Arc<std::sync::Mutex<Vec<Told>>>,
+}
+
+#[async_trait::async_trait]
+impl reno_harness::exec::Executor for Observing {
+    fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
+        self.base.descriptor()
+    }
+
+    async fn probe(&self) -> reno_proto::HealthProbe {
+        self.base.probe().await
+    }
+
+    async fn start(
+        &self,
+        _spec: reno_proto::ExecSpec,
+        controls: reno_harness::exec::ExecControls,
+    ) -> Result<futures::stream::BoxStream<'static, ExecEvent>, reno_harness::exec::ExecError> {
+        use futures::StreamExt as _;
+        let (store, seen, subject) = (
+            Arc::clone(&self.store),
+            Arc::clone(&self.seen),
+            self.subject.clone(),
+        );
+        Ok(
+            futures::stream::unfold((0_u8, controls), move |(step, mut controls)| {
+                let (store, seen, subject) = (store.clone(), seen.clone(), subject.clone());
+                async move {
+                    let event = match step {
+                        0 => ExecEvent::Started {
+                            session: reno_proto::SessionRef("s".into()),
+                            model: "mock-1".into(),
+                        },
+                        1 => ExecEvent::NeedsApproval {
+                            request_id: "r1".into(),
+                            subject,
+                        },
+                        2 => {
+                            let answer = controls.answers.recv().await?;
+                            let held = store
+                                .get()
+                                .expect("the store is set before a run starts")
+                                .approval_history(None, 10)
+                                .await
+                                .unwrap();
+                            seen.lock().unwrap().push((answer.answer, held));
+                            ExecEvent::Text {
+                                text: "after".into(),
+                            }
+                        }
+                        3 => ExecEvent::Done {
+                            stop: reno_proto::StopReason::Completed,
+                            result: None,
+                            diagnostic: None,
+                            reason: None,
+                        },
+                        _ => return None,
+                    };
+                    Some((event, (step + 1, controls)))
+                }
+            })
+            .boxed(),
+        )
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_decision_is_on_record_before_the_harness_is_told_and_then_journaled() {
+    // How each decision comes about: a rule at once, the owner, the deadline.
+    for how in ["policy deny", "policy allow", "owner", "deadline"] {
+        let (subject, policy_text) = match how {
+            "policy deny" => (gate_bash("c1", "git push --force origin main"), GATE_POLICY),
+            "policy allow" => (gate_bash("c1", "cargo test"), GATE_POLICY),
+            _ => (gate_bash("c1", "git push origin main"), GATE_POLICY),
+        };
+        let store = Arc::new(std::sync::OnceLock::new());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observing = Observing {
+            base: MockExecutor::new(id("reno")),
+            store: Arc::clone(&store),
+            subject: subject.clone(),
+            seen: Arc::clone(&seen),
+        };
+        let port = FakePort::with(reno_defs(policy_text, ""));
+        let fx = Fx::with_definitions(
+            config(1),
+            ExecutorRegistry::new().with(Arc::new(observing)),
+            setup(&port),
+        )
+        .await;
+        store.set(fx.store.clone()).unwrap();
+        let run = fx
+            .kernel
+            .submit_for_bot("keeper", "go", None, WORKTREE.into(), None)
+            .await
+            .unwrap();
+        match how {
+            "owner" => {
+                let held = until(async || {
+                    fx.kernel
+                        .pending_approvals()
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                })
+                .await;
+                fx.kernel
+                    .decide(&held.id, ApprovalDecision::ApproveOnce)
+                    .await
+                    .unwrap();
+            }
+            "deadline" => {
+                until(async || {
+                    (!fx.kernel.pending_approvals().await.unwrap().is_empty()).then_some(())
+                })
+                .await;
+                fx.clock.advance(30 * 60 * 1000);
+                advance(Duration::from_secs(30 * 60)).await;
+            }
+            _ => {}
+        }
+        fx.wait_status(&run, RunStatus::Succeeded).await;
+
+        let seen = seen.lock().unwrap().clone();
+        let [(answer, on_record)] = &seen[..] else {
+            panic!("{how}: the harness was told once: {seen:?}");
+        };
+        let [row] = &on_record[..] else {
+            panic!("{how}: the decision was not on record when the harness was told");
+        };
+        assert_eq!(row.request_id, "r1", "{how}");
+        assert_eq!(row.subject, subject, "{how}");
+        let (status, by, told, message) = match how {
+            "policy deny" => (
+                ApprovalStatus::Denied,
+                rule("no force push"),
+                Decision::Deny,
+                Some("denied by policy: no force push"),
+            ),
+            "policy allow" => (
+                ApprovalStatus::Approved,
+                rule("cargo is fine"),
+                Decision::Allow,
+                None,
+            ),
+            "owner" => (
+                ApprovalStatus::Approved,
+                ResolvedBy::Human,
+                Decision::Allow,
+                None,
+            ),
+            _ => (
+                ApprovalStatus::Expired,
+                ResolvedBy::Expired,
+                Decision::Deny,
+                None,
+            ),
+        };
+        assert_eq!(row.status, status, "{how}");
+        assert_eq!(row.decided_by, Some(by.clone()), "{how}");
+        assert_eq!(
+            *answer,
+            Answer::Decision(told, message.map(str::to_owned)),
+            "{how}"
+        );
+
+        // The journal has the request, then its resolution, then the harness's next event.
+        let journal = fx.journal_with_done(&run).await;
+        let kinds: Vec<&str> = journal
+            .iter()
+            .map(|(_, event)| match event {
+                ExecEvent::Started { .. } => "started",
+                ExecEvent::NeedsApproval { .. } => "needs_approval",
+                ExecEvent::ApprovalResolved { .. } => "resolved",
+                ExecEvent::Text { .. } => "text",
+                ExecEvent::Done { .. } => "done",
+                other => panic!("{how}: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["started", "needs_approval", "resolved", "text", "done"],
+            "{how}"
+        );
+        assert_eq!(resolved(&journal)[0].2, by, "{how}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bots_max_wall_time_still_stops_a_reno_run_held_on_a_question() {
+    use crate::db::Armed;
+
+    for (mode, extra) in MODES {
+        let extra = format!("{extra}\n[budget]\nmax_wall_time = \"1m\"");
+        let rig = reno_rig(
+            GATE_POLICY,
+            &extra,
+            script(vec![("r1", gate_bash("c1", "git push origin main"))]),
+        )
+        .await;
+        let run = rig.run_as("keeper").await;
+        rig.pending().await;
+        rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+        rig.fx.wait_armed(Armed::WallTime, 0).await;
+
+        advance(Duration::from_secs(59)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            rig.fx.status(&run).await,
+            RunStatus::WaitingApproval,
+            "{mode}: not yet"
+        );
+        advance(Duration::from_secs(2)).await;
+        rig.fx.wait_status(&run, RunStatus::Interrupted).await;
+
+        let journal = rig.fx.journal_with_done(&run).await;
+        let Some((_, ExecEvent::Done { stop, reason, .. })) = journal.last() else {
+            panic!("{mode}: no Done: {journal:?}");
+        };
+        assert_eq!(*stop, StopReason::Interrupted, "{mode}");
+        let budget = reason.as_ref().and_then(reno_proto::StopDetail::budget);
+        let budget = budget.expect("the reason is a budget stop");
+        assert_eq!(
+            (budget.kind, budget.limit),
+            (reno_proto::BudgetKind::WallTime, 60_000),
+            "{mode}"
+        );
+        assert!(
+            rig.fx.kernel.pending_approvals().await.unwrap().is_empty(),
+            "{mode}: the held question is closed with the run"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reno_run_with_no_bot_has_the_kernels_default_wall_time() {
+    use crate::db::Armed;
+
+    let cfg = KernelConfig {
+        default_wall_time: Duration::from_secs(30),
+        ..config(1)
+    };
+    let mock =
+        MockExecutor::new(id("reno")).with_steps([MockStep::Sleep(Duration::from_secs(3600))]);
+    let fx = Fx::new(cfg, registry(std::slice::from_ref(&mock))).await;
+    let run = fx
+        .kernel
+        .submit("long", id("reno"), WORKTREE.into(), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    fx.wait_armed(Armed::WallTime, 0).await;
+    advance(Duration::from_secs(31)).await;
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    let journal = fx.journal_with_done(&run).await;
+    let Some((_, ExecEvent::Done { reason, .. })) = journal.last() else {
+        panic!("no Done: {journal:?}");
+    };
+    let budget = reason
+        .as_ref()
+        .and_then(reno_proto::StopDetail::budget)
+        .unwrap();
+    assert_eq!(budget.limit, 30_000);
+}

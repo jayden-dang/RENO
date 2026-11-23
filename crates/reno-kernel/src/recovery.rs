@@ -19,6 +19,8 @@
 //! 4. **Journals, state to journal.** A run that is terminal, or interrupted, gets a `Done` in
 //!    its journal if the journal does not already end in one, with the stop reason its status
 //!    implies.
+//!    Then each executor is asked, and awaited, to keep only what the runs that may still resume
+//!    need (`failed`, `interrupted`, and `queued` with a session).
 //! 5. **Resume.** Each `interrupted` run nobody has judged yet (one the previous start left
 //!    behind at its shutdown, or step 2 just made) is decided by `resume::judge_auto`: queued
 //!    again, with a `Resumed` in its journal, or left with the reason stored.
@@ -96,10 +98,8 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
     // revoked, and the link's files are removed.
     crate::agent::revoke_orphans(shared).await?;
 
-    let ended: Vec<(RunId, ExecEvent)> = shared
-        .db
-        .list_runs(None)
-        .await?
+    let settled = shared.db.list_runs(None).await?;
+    let ended: Vec<(RunId, ExecEvent)> = settled
         .iter()
         .filter(|row| row.status.is_terminal() || row.status == RunStatus::Interrupted)
         .map(|row| (row.id.clone(), repair_done(row.status, row.stop.clone())))
@@ -122,6 +122,8 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         tracing::error!(%error, "journal repair task failed");
         0
     });
+
+    retain_resumable(shared, settled).await?;
 
     // How long each run had been at it is read from the rows as they were before this recovery
     // wrote its own transitions, which would otherwise count the time the daemon was down.
@@ -158,6 +160,33 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         tracing::info!(?report, "recovery finished");
     }
     Ok(report)
+}
+
+/// Tells each executor which runs may still be resumed, and waits for it: whatever an executor
+/// kept for any other run is dropped before a run is re-queued or claimed, so no run made after
+/// this can lose what it keeps.
+async fn retain_resumable(shared: &Shared, rows: Vec<RunRecord>) -> Result<()> {
+    let keep: std::collections::HashSet<RunId> = rows
+        .into_iter()
+        .filter(|row| match row.status {
+            RunStatus::Failed | RunStatus::Interrupted => true,
+            RunStatus::Queued => row.session_ref.is_some(),
+            RunStatus::Leased
+            | RunStatus::Running
+            | RunStatus::WaitingInput
+            | RunStatus::WaitingApproval
+            | RunStatus::Evaluating
+            | RunStatus::Succeeded
+            | RunStatus::Cancelled => false,
+        })
+        .map(|row| row.id)
+        .collect();
+    for id in shared.executors.ids() {
+        if let Some(executor) = shared.executors.get(&id) {
+            executor.retain_runs(&keep).await;
+        }
+    }
+    Ok(())
 }
 
 /// Expires every pending approval, for the moment no supervisor is left to answer them (start-up

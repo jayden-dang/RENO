@@ -8,14 +8,19 @@
 //! | Flag | Why |
 //! |---|---|
 //! | `--mode rpc --no-themes` | the RPC protocol, without loading a theme nobody sees |
-//! | `--no-extensions --no-skills --no-prompt-templates --no-mcp` | isolation from the owner's personal tools: their extensions, skills, prompt templates and `mcp.json` servers (unless `inherit_user_config`). Checked on Pi 1.5.0 with `get_commands`: 0 commands with the flags, the owner's whole skill list without. |
+//! | `--no-extensions --no-skills --no-prompt-templates --no-mcp` | isolation from the owner's personal tools: their extensions, skills, prompt templates and `mcp.json` servers (unless `inherit_user_config`); `--no-mcp` is dropped when `builtins` is set. Checked on Pi 1.5.0 with `get_commands`: 0 commands with the flags, the owner's whole skill list without. |
 //! | `--extension <file>` | Reno's MCP bridge; still loaded under `--no-extensions`, which only stops discovery |
+//! | `--no-approve` | a Reno attempt: the working folder's `.pi/` resources are ignored |
+//! | `--session-dir <dir>` | a Reno attempt: the run's own session directory, the same for every attempt |
+//! | `-e builtin:mcp -e builtin:codemode --tools +codemode` | a Reno attempt: Pi's own MCP and codemode, named, and codemode switched on (Pi registers it inactive) |
+//! | `--extension <gate>` | a Reno attempt: the gate, always the last one |
 //! | `--session-id <id>` | resume: opens the session of the working directory with that id, or starts one with it (Pi prints a warning to stderr) |
 //! | `--append-system-prompt <file>` | the bot's standing instructions (Pi reads the file) |
 //!
 //! Not set: `--no-session` (a run's transcript is what a later resume opens), `--approve` (project
 //! trust is the owner's decision, and RPC mode cannot ask: untrusted project resources are
-//! skipped), `--no-context-files` (a project's `AGENTS.md` is part of the task).
+//! skipped), `--no-context-files` (a project's `AGENTS.md` is part of the task). `--no-approve` is
+//! set only for a Reno attempt.
 
 use std::path::Path;
 
@@ -30,21 +35,31 @@ pub(crate) struct Launch<'a> {
     pub(crate) instructions: Option<&'a Path>,
     /// The MCP bridge extension.
     pub(crate) bridge: Option<&'a Path>,
+    /// Where Pi keeps the run's session, instead of its default under the agent directory.
+    pub(crate) session_dir: Option<&'a Path>,
+    /// Load Pi's own MCP and codemode extensions, by name, and give the model codemode. Also
+    /// stops passing `--no-mcp`: the agent directory holds no `mcp.json`, so no server loads.
+    pub(crate) builtins: bool,
+    /// Ignore the working folder's `.pi/` resources.
+    pub(crate) no_approve: bool,
+    /// The gate extension, loaded after every other one.
+    pub(crate) gate: Option<&'a Path>,
 }
 
 /// The arguments for `launch`, after the program.
 pub(crate) fn args(launch: Launch<'_>) -> Vec<String> {
     let mut args: Vec<String> = ["--mode", "rpc", "--no-themes"].map(String::from).into();
     if launch.isolate {
-        args.extend(
-            [
-                "--no-extensions",
-                "--no-skills",
-                "--no-prompt-templates",
-                "--no-mcp",
-            ]
-            .map(String::from),
-        );
+        args.extend(["--no-extensions", "--no-skills", "--no-prompt-templates"].map(String::from));
+        if !launch.builtins {
+            args.push("--no-mcp".into());
+        }
+    }
+    if launch.no_approve {
+        args.push("--no-approve".into());
+    }
+    if let Some(dir) = launch.session_dir {
+        args.extend(["--session-dir".into(), dir.display().to_string()]);
     }
     if let Some(id) = launch.resume {
         args.extend(["--session-id".into(), id.into()]);
@@ -52,7 +67,23 @@ pub(crate) fn args(launch: Launch<'_>) -> Vec<String> {
     if let Some(file) = launch.instructions {
         args.extend(["--append-system-prompt".into(), file.display().to_string()]);
     }
+    if launch.builtins {
+        args.extend(
+            [
+                "-e",
+                "builtin:mcp",
+                "-e",
+                "builtin:codemode",
+                "--tools",
+                "+codemode",
+            ]
+            .map(String::from),
+        );
+    }
     if let Some(file) = launch.bridge {
+        args.extend(["--extension".into(), file.display().to_string()]);
+    }
+    if let Some(file) = launch.gate {
         args.extend(["--extension".into(), file.display().to_string()]);
     }
     args
@@ -92,6 +123,7 @@ mod tests {
             isolate: true,
             instructions: Some(&instructions),
             bridge: Some(&bridge),
+            ..Launch::default()
         });
         assert_eq!(
             all,
@@ -114,12 +146,99 @@ mod tests {
     }
 
     #[test]
+    fn a_reno_attempt_names_every_extension_and_loads_the_gate_last() {
+        let instructions = PathBuf::from("/s/.reno/instructions.md");
+        let bridge = PathBuf::from("/s/.reno/reno-mcp.mjs");
+        let gate = PathBuf::from("/s/.reno/gate.mjs");
+        let sessions = PathBuf::from("/data/.reno/pi-sessions/run_1");
+        let all = args(Launch {
+            resume: Some("abc-1"),
+            isolate: true,
+            instructions: Some(&instructions),
+            bridge: Some(&bridge),
+            session_dir: Some(&sessions),
+            builtins: true,
+            no_approve: true,
+            gate: Some(&gate),
+        });
+        assert_eq!(
+            all,
+            [
+                "--mode",
+                "rpc",
+                "--no-themes",
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-approve",
+                "--session-dir",
+                "/data/.reno/pi-sessions/run_1",
+                "--session-id",
+                "abc-1",
+                "--append-system-prompt",
+                "/s/.reno/instructions.md",
+                "-e",
+                "builtin:mcp",
+                "-e",
+                "builtin:codemode",
+                "--tools",
+                "+codemode",
+                "--extension",
+                "/s/.reno/reno-mcp.mjs",
+                "--extension",
+                "/s/.reno/gate.mjs"
+            ]
+        );
+        assert!(!all.iter().any(|f| f == "--no-mcp"));
+    }
+
+    #[test]
+    fn a_reno_attempt_without_a_bridge_still_ends_with_the_gate() {
+        let gate = PathBuf::from("/s/.reno/gate.mjs");
+        let all = args(Launch {
+            isolate: true,
+            builtins: true,
+            no_approve: true,
+            gate: Some(&gate),
+            ..Launch::default()
+        });
+        let extensions: Vec<_> = all
+            .windows(2)
+            .filter(|pair| pair[0] == "--extension")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(extensions, ["/s/.reno/gate.mjs"]);
+        assert_eq!(all.last().map(String::as_str), Some("/s/.reno/gate.mjs"));
+    }
+
+    #[test]
+    fn the_owners_command_line_has_no_session_dir_no_builtins_and_no_gate() {
+        let all = args(Launch {
+            isolate: true,
+            ..Launch::default()
+        });
+        assert_eq!(
+            all,
+            [
+                "--mode",
+                "rpc",
+                "--no-themes",
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-mcp"
+            ]
+        );
+    }
+
+    #[test]
     fn no_flag_ever_trusts_a_project_or_hides_one_from_pi() {
         let flags = args(Launch {
             resume: Some("x"),
             isolate: true,
             instructions: Some(Path::new("/i")),
             bridge: Some(Path::new("/b")),
+            ..Launch::default()
         });
         for refused in [
             "--approve",

@@ -719,3 +719,190 @@ async fn a_trigger_fired_run_asks_for_its_bots_model() {
         Some("mock-1")
     );
 }
+
+// ---- the Reno harness and a bot that inherits the owner's config ------------------------------
+
+fn reno_fake() -> Fake {
+    let fake = Fake::new("reno").access(&[AccessMode::Supervised, AccessMode::FullAccess]);
+    let mut descriptor = fake.inner.descriptor();
+    descriptor.caps.sandbox_levels = vec![reno_proto::SandboxLevel::Unrestricted];
+    Fake {
+        inner: fake.inner.with_descriptor(descriptor),
+        ..fake
+    }
+}
+
+const INHERITS: &str =
+    "bot keeper sets inherit_user_config = true, which the Reno harness never loads";
+
+#[tokio::test(start_paused = true)]
+async fn a_bot_that_inherits_the_owners_config_skips_reno_for_the_next_executor() {
+    let reno = reno_fake();
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(
+        &[&reno, &codex],
+        "keeper",
+        &["reno", "codex"],
+        "inherit_user_config = true",
+    )
+    .await;
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    let decision = routing_of(&fx, &run).await;
+    assert_eq!(decision.chosen, Some(id("codex")));
+    let rejection = decision
+        .rejected
+        .iter()
+        .find(|r| r.executor == id("reno"))
+        .expect("reno rejected");
+    assert_eq!(
+        rejection.reason,
+        RejectReason::Excluded {
+            why: INHERITS.to_owned()
+        }
+    );
+    assert_eq!((reno.starts(), codex.starts()), (0, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bot_that_inherits_the_owners_config_and_lists_only_reno_fails_without_use_a_bot_advice()
+{
+    let reno = reno_fake();
+    let fx = fx_with_bot(&[&reno], "keeper", &["reno"], "inherit_user_config = true").await;
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Failed).await;
+
+    let why = diagnostic_of(&fx, &run).await;
+    assert!(
+        why.contains("no executor this bot lists can take the task")
+            && why.contains("inherit_user_config"),
+        "{why}"
+    );
+    assert!(
+        !why.contains("use a bot") && !why.contains("name an executor"),
+        "{why}"
+    );
+    assert_eq!(reno.starts(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn naming_reno_for_a_bot_that_inherits_the_owners_config_is_refused_the_same_way() {
+    let reno = reno_fake();
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(
+        &[&reno, &codex],
+        "keeper",
+        &["reno", "codex"],
+        "inherit_user_config = true",
+    )
+    .await;
+
+    let preview = fx
+        .kernel
+        .preview_route(
+            &TaskRequest::new("go", PathBuf::from("/work"))
+                .bot("keeper")
+                .executor(id("reno")),
+        )
+        .unwrap();
+    assert_eq!(preview.chosen, None);
+    assert_eq!(
+        preview.rejected[0].reason,
+        RejectReason::Excluded {
+            why: INHERITS.to_owned()
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn reno_is_ineligible_for_a_bot_that_wants_more_than_it_declares() {
+    let reno = reno_fake();
+    let codex = Fake::new("codex");
+    for (extra, expected) in [
+        (
+            "access = \"auto_accept_edits\"",
+            RejectReason::AccessNotOffered {
+                requested: AccessMode::AutoAcceptEdits,
+                offered: vec![AccessMode::Supervised, AccessMode::FullAccess],
+            },
+        ),
+        (
+            "sandbox = \"read_only\"",
+            RejectReason::SandboxNotEnforced {
+                requested: reno_proto::SandboxLevel::ReadOnly,
+                offered: vec![reno_proto::SandboxLevel::Unrestricted],
+            },
+        ),
+    ] {
+        let fx = fx_with_bot(&[&reno, &codex], "keeper", &["reno", "codex"], extra).await;
+        let preview = fx
+            .kernel
+            .preview_route(&TaskRequest::new("go", PathBuf::from("/work")).bot("keeper"))
+            .unwrap();
+        let rejection = preview
+            .rejected
+            .iter()
+            .find(|r| r.executor == id("reno"))
+            .expect("reno rejected");
+        assert_eq!(rejection.reason, expected, "{extra}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reno_that_declines_for_an_account_reason_still_falls_back_to_the_next_listed_executor() {
+    let reno = reno_fake().refusing(Refusal::NotSignedIn);
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(&[&reno, &codex], "keeper", &["reno", "codex"], "").await;
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(routing_of(&fx, &run).await.chosen, Some(id("codex")));
+    assert_eq!((reno.starts(), codex.starts()), (1, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reno_run_that_cannot_arm_fails_and_is_never_handed_to_the_next_executor() {
+    let reno = reno_fake();
+    let reno = Fake {
+        inner: reno.inner.with_steps([MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Error,
+            result: None,
+            diagnostic: Some("Reno's gate did not arm: the gate did not say hello in time".into()),
+            reason: None,
+        })]),
+        ..reno
+    };
+    let pi = Fake::new("pi");
+    let fx = fx_with_bot(&[&reno, &pi], "keeper", &["reno", "pi"], "").await;
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Failed).await;
+
+    let decision = routing_of(&fx, &run).await;
+    assert!(decision.fallbacks.is_empty(), "{:?}", decision.fallbacks);
+    assert_eq!(decision.chosen, Some(id("reno")));
+    assert_eq!((reno.starts(), pi.starts()), (1, 0));
+    assert!(
+        diagnostic_of(&fx, &run).await.contains("did not arm"),
+        "the run says why it failed"
+    );
+}

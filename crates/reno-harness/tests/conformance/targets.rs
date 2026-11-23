@@ -681,6 +681,117 @@ pub(crate) fn pi_target() -> Target {
     .with_plan(plan)
 }
 
+// -- Reno harness (Pi behind Reno's gate) -----------------------------------------------------
+
+/// Every scenario of the Reno harness is a bot's run whose fake plays the gate.
+fn bot(scenario: Scenario) -> Scenario {
+    scenario.env("RENO_BOT", "keeper").env("FAKE_PI_GATE", "ok")
+}
+
+/// Pi with Reno's gate over its fake `pi --mode rpc`. The gate asks for every tool call, so it
+/// claims supervised and full access, and the approval cases run against the calls the fake makes
+/// through the gate. It runs bots only, which never inherit the owner's config, so that case has
+/// nothing to show.
+pub(crate) fn reno_target() -> Target {
+    let sessions = std::env::temp_dir().join(format!(
+        "reno-conformance-reno-sessions-{}",
+        std::process::id()
+    ));
+    let executor = PiExecutor::reno(sessions).with_executable(fixture("fake-pi.py"));
+    let plan = Plan {
+        lifecycle: Some(
+            bot(Scenario::new("scenario:conf-happy"))
+                .expect(Expect::TextContains("conf-hello".into()))
+                .expect(Expect::ResultContains("conf-hello".into()))
+                .expect(Expect::Tool {
+                    name: "bash".into(),
+                    class: ActionClass::Command,
+                })
+                .expect(Expect::Tool {
+                    name: "edit".into(),
+                    class: ActionClass::Edit,
+                }),
+        ),
+        approval: Some(ApprovalPlan {
+            scenario: bot(Scenario::new("scenario:approval-subjects"))
+                .access(AccessMode::Supervised)
+                .expect(Expect::ApprovalClass(ActionClass::Command))
+                .expect(Expect::ApprovalClass(ActionClass::Edit))
+                .expect(Expect::ApprovalClass(ActionClass::McpTool))
+                .expect(Expect::ApprovalClass(ActionClass::Read))
+                .expect(Expect::ApprovalClass(ActionClass::Other)),
+            on_allow: vec![Expect::ResultContains(
+                "bash=allow edit=allow mcp=allow read=allow other=allow".into(),
+            )],
+            on_deny: vec![Expect::ResultContains(
+                "bash=deny:blocked edit=deny:blocked mcp=deny:blocked read=deny:blocked other=deny:blocked"
+                    .into(),
+            )],
+            on_deny_message: vec![Expect::ResultContains(format!(
+                "bash=deny:{DENY_MESSAGE} edit=deny:{DENY_MESSAGE}"
+            ))],
+        }),
+        input: Some(
+            bot(Scenario::new("scenario:conf-question"))
+                .expect(Expect::TextContains("answered:second".into())),
+        ),
+        steer: Some(
+            bot(Scenario::new("scenario:steer")).expect(Expect::TextContains("steered".into())),
+        ),
+        cancel: Some(bot(Scenario::new("scenario:interrupt"))),
+        crash: Some(bot(Scenario::new("scenario:conf-crash"))),
+        resume: Some(
+            bot(Scenario::new("scenario:resumed"))
+                .resume("th-conf")
+                .expect(Expect::SessionIs("th-conf".into()))
+                .expect(Expect::TextContains("back again".into())),
+        ),
+        mcp: Some(
+            bot(Scenario::new("scenario:mcp-config"))
+                .mcp(vec![
+                    McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/reno".into(),
+                        args: vec!["mcp".into()],
+                        env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
+                    },
+                    McpServerSpec {
+                        name: "plugin-focus".into(),
+                        command: "/opt/focus/server".into(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                ])
+                .expect(Expect::TextContains(
+                    "mcp configured:reno,plugin-focus".into(),
+                )),
+        ),
+        output_schema: None,
+        mode_runs: Vec::new(),
+        unknown_frames: Some(UnknownFramePlan {
+            scenario: bot(Scenario::new("scenario:conf-unknown"))
+                .expect(Expect::ResultContains("unknown-done".into())),
+            keys: vec![
+                "type:agent_teleported".into(),
+                "message_update:audio_delta".into(),
+            ],
+        }),
+        user_config: None,
+    };
+    Target::new(
+        "reno",
+        Arc::new(executor),
+        Profile {
+            deny_message_on_wire: true,
+            refuses_inherited_config: true,
+            ..Profile::driver()
+        },
+        cwd(),
+        Limits::fake(),
+    )
+    .with_plan(plan)
+}
+
 // -- Muse Code ----------------------------------------------------------------------------------
 
 /// Muse over its fake `muse serve`. It claims full access only (no Muse mode is known to ask

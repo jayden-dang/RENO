@@ -833,10 +833,17 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                 .iter()
                 .any(|r| r.executor == current && matches!(r.reason, RejectReason::Excluded { .. }))
     }) {
-        let why = format!(
-            "no default executor can take the task ({}); {NAME_ONE}",
-            left_out.explain_verbose()
-        );
+        let why = if row.bot.is_some() {
+            format!(
+                "no executor this bot lists can take the task ({})",
+                left_out.explain_verbose()
+            )
+        } else {
+            format!(
+                "no default executor can take the task ({}); {NAME_ONE}",
+                left_out.explain_verbose()
+            )
+        };
         let account = Some(StartFailure::NoEligibleExecutor);
         let refusal = StartRefusal::NoEligibleExecutor;
         return fail_start(shared, &run_id, fence, why, refusal, account, cmd_rx, slot).await;

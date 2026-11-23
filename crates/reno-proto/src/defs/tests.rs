@@ -335,6 +335,25 @@ fn the_acp_agents_a_daemon_always_has_are_built_in() {
 }
 
 #[test]
+fn a_bot_may_list_the_reno_executor_online_and_offline() {
+    let text = bot_with("").replace("[\"codex\"]", "[\"reno\", \"pi\"]");
+    assert!(bot_errors(&text).is_empty());
+    let ctx = ValidationContext::offline([]);
+    assert!(load_set(&[file(DefKind::Bot, "keeper", &text)], &ctx).is_ok());
+}
+
+#[test]
+fn every_other_built_in_executor_still_validates() {
+    for id in BUILTIN_EXECUTORS {
+        let text = bot_with("").replace("[\"codex\"]", &format!("[\"{id}\"]"));
+        assert!(bot_errors(&text).is_empty(), "{id}");
+    }
+    for id in ["mock", "claude-code", "codex", "pi", "acp.devin"] {
+        assert!(BUILTIN_EXECUTORS.contains(&id), "{id}");
+    }
+}
+
+#[test]
 fn an_offline_context_takes_any_registry_agent_but_not_any_name() {
     let accepted = bot_with("").replace("[\"codex\"]", "[\"acp.gemini\"]");
     let ctx = ValidationContext::offline([]);
@@ -1541,4 +1560,12 @@ fn a_blank_or_malformed_model_is_refused() {
         );
     }
     assert!(bot_errors(&bot_with("model = \"gpt-5.5-codex\"")).is_empty());
+}
+
+#[test]
+fn readme_says_reno_has_a_harness_of_its_own_on_your_api_keys() {
+    let readme = include_str!("../../../../README.md");
+    assert!(!readme.contains("It never runs a model itself"));
+    assert!(readme.contains("a harness of its own for bots"));
+    assert!(readme.contains("API keys"));
 }

@@ -118,6 +118,12 @@ impl Cx<'_> {
             CaseId::UserConfig if !caps.isolates_user_config => {
                 Some("claims no isolation from the owner's personal config")
             }
+            CaseId::UserConfig
+                if self.target.profile.refuses_inherited_config
+                    && self.target.plan.user_config.is_none() =>
+            {
+                Some("refuses a run that inherits the owner's config, so there is none to compare")
+            }
             CaseId::UnknownFrames if !self.target.profile.counts_unknown_frames => {
                 Some("does not count unrecognised frames")
             }
@@ -501,6 +507,13 @@ impl Cx<'_> {
     }
 
     async fn user_config(&mut self) -> CaseResultOf {
+        if self.target.profile.refuses_inherited_config {
+            return Err(Failure::Broken(
+                "the target refuses a run that inherits the owner's config, yet plans a user-config \
+                 scenario that needs one: drop the plan or the refusal"
+                    .into(),
+            ));
+        }
         let plan = self.need(&self.target.plan.user_config, "user-config")?;
         for (inherit, expect) in [(false, &plan.isolated), (true, &plan.inherited)] {
             if expect.is_empty() {
@@ -779,7 +792,7 @@ impl Cx<'_> {
             claims.push(("approvals (allow)".into(), CaseId::ApprovalAllow));
             claims.push(("approvals (deny)".into(), CaseId::ApprovalDeny));
         }
-        if caps.isolates_user_config {
+        if caps.isolates_user_config && !self.target.profile.refuses_inherited_config {
             claims.push(("user-config isolation".into(), CaseId::UserConfig));
         }
         if !caps.models.is_empty() {

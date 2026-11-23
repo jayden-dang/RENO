@@ -120,6 +120,10 @@ human-readable form.
   and `acp.<registry id>` for each agent added from the ACP registry (never one that would take
   the id of an executor Reno drives itself). `RENO_NO_HARNESSES=1` skips that lookup, so tests
   never touch a real harness.
+- `pi` and `reno` both run the installed Pi CLI. `pi` is Pi as it is: it asks nothing before a tool
+  call and takes full access only. `reno` is Reno's own harness for bots: it loads a gate extension
+  into Pi, asks Reno before every tool call, and takes supervised access as well. A `reno` run
+  that cannot arm its gate fails rather than running ungated.
 
 ## Shutdown
 

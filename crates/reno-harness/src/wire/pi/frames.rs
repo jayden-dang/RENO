@@ -31,6 +31,24 @@ pub(crate) fn get_state() -> Value {
     json!({ "type": "get_state" })
 }
 
+/// `{"type":"get_commands"}`: the extension commands, prompt templates and skills Pi has loaded.
+pub(crate) fn get_commands() -> Value {
+    json!({ "type": "get_commands" })
+}
+
+/// Whether the `data` of a `get_commands` reply lists the extension command `name`: an entry
+/// named `name` whose `source` is `extension`, so a skill or prompt template of that name does
+/// not count.
+pub(crate) fn lists_extension_command(data: &Value, name: &str) -> bool {
+    data.get("commands")
+        .and_then(Value::as_array)
+        .is_some_and(|commands| {
+            commands.iter().any(|command| {
+                string(command, "name") == name && string(command, "source") == "extension"
+            })
+        })
+}
+
 /// `{"type":"get_available_models"}`: the models of every provider Pi holds a credential for.
 pub(crate) fn get_available_models() -> Value {
     json!({ "type": "get_available_models" })
@@ -224,6 +242,33 @@ impl State {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_extension_command_of_that_name_is_listed() {
+        let data = json!({ "commands": [
+            { "name": "skill:reno-gate", "source": "skill" },
+            { "name": "reno-gate", "source": "prompt" },
+            { "name": "reno-gate-2", "source": "extension" },
+            { "name": "reno-gate", "description": "Reno's gate on tool calls", "source": "extension", "sourceInfo": {} },
+        ] });
+        assert!(lists_extension_command(&data, "reno-gate"));
+        assert!(!lists_extension_command(&data, "other"));
+        for lookalike in [
+            json!({ "commands": [{ "name": "skill:reno-gate", "source": "skill" }] }),
+            json!({ "commands": [{ "name": "reno-gate", "source": "prompt" }] }),
+            json!({ "commands": [{ "name": "reno-gate" }] }),
+            json!({ "commands": [{ "source": "extension" }] }),
+            json!({ "commands": [] }),
+            json!({ "commands": "reno-gate" }),
+            json!({}),
+            Value::Null,
+        ] {
+            assert!(
+                !lists_extension_command(&lookalike, "reno-gate"),
+                "{lookalike}"
+            );
+        }
+    }
 
     #[test]
     fn the_settings_writing_commands_are_named_and_the_session_scoped_ones_are_not() {

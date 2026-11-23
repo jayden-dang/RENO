@@ -169,7 +169,7 @@ expression: protocol_schema()
           "type": "boolean"
         },
         "inherit_user_config": {
-          "description": "Let this bot's runs load the owner's personal configuration for their harness. Off by\ndefault: a run is isolated from it, so the owner's own hooks, plugins, memory and\ninstructions do not reach the bot. Only executors that declare\n`isolates_user_config` (Claude Code, Codex) can isolate; the others load it either way,\nand say so on their descriptor. Reno's own MCP server and its policy apply in both modes.",
+          "description": "Let this bot's runs load the owner's personal configuration for their harness. Off by\ndefault: a run is isolated from it, so the owner's own hooks, plugins, memory and\ninstructions do not reach the bot. Only executors that declare\n`isolates_user_config` can isolate: Claude Code, Codex, Cursor, Pi (`pi`) and Reno's own\nharness (`reno`), which never loads it: routing leaves `reno` out for a bot that sets it,\nand a run sent to it anyway (a named executor, or a resumed run) is refused when it\nstarts. Muse Code, opencode, the ACP agents and `mock` load it either way, and say so on\ntheir descriptor. Reno's own MCP server and its policy apply in both modes.",
           "type": "boolean"
         },
         "instructions": {

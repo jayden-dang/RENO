@@ -7,5 +7,6 @@
 
 mod acp_hardening;
 mod claude_availability;
+mod pi_gate;
 mod pi_mcp;
 mod run_env;

@@ -1517,7 +1517,7 @@ pub(crate) fn plan_route(
     task_effort: Option<Effort>,
     model_options: &BTreeMap<String, String>,
 ) -> Result<Planned> {
-    let (access, sandbox, preference, pin, bot_model, bot_effort) = match bot {
+    let (access, sandbox, preference, pin, bot_model, bot_effort, inherit_user_config) = match bot {
         Some(name) => {
             let current = shared.current_defs();
             let def = current
@@ -1542,6 +1542,7 @@ pub(crate) fn plan_route(
                 Some(pin),
                 def.model.clone(),
                 def.effort,
+                def.inherit_user_config,
             )
         }
         None => (
@@ -1551,6 +1552,7 @@ pub(crate) fn plan_route(
             None,
             None,
             None,
+            false,
         ),
     };
     // Precedence: the task's own model, then the bot's; the executor's default is "none".
@@ -1583,6 +1585,22 @@ pub(crate) fn plan_route(
             .collect(),
         _ => Vec::new(),
     };
+    let reno: Option<ExecutorId> = reno_harness::pi::RENO_EXECUTOR_ID.parse().ok();
+    let unfit_config: Vec<(ExecutorId, String)> = match (&preference, reno) {
+        (Some(bot), Some(reno))
+            if inherit_user_config
+                && (bot.executors.contains(&reno) || explicit.as_ref() == Some(&reno)) =>
+        {
+            vec![(
+                reno,
+                format!(
+                    "bot {} sets inherit_user_config = true, which the Reno harness never loads",
+                    bot.name
+                ),
+            )]
+        }
+        _ => Vec::new(),
+    };
     let mut decision = router::route(
         &RouteRequest {
             access,
@@ -1591,6 +1609,7 @@ pub(crate) fn plan_route(
             bot: preference.clone(),
             exclude: Vec::new(),
             unfit_effort,
+            unfit_config,
             defaults: shared.config.default_executors.clone(),
         },
         &candidates,

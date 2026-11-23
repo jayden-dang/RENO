@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reno_proto::{
-    CleanItem, CleanOutcome, CleanTarget, RunId, SandboxLevel, TermId, ThreadStatus,
+    CleanItem, CleanOutcome, CleanTarget, RunId, RunStatus, SandboxLevel, TermId, ThreadStatus,
     WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::RunRecord;
@@ -184,7 +184,28 @@ pub(crate) async fn run_ended(shared: &Arc<Shared>, run: &RunId) {
         }
         task.thread_idle.notify_one();
     });
+    let (task, id) = (Arc::clone(shared), run.clone());
+    shared.spawn(async move { tell_executor_closed(&task, &id).await });
     close_if_unattended(shared, run).await;
+}
+
+/// A run that ended `succeeded` or `cancelled` can never resume: its executor may let go of what
+/// it kept for the run. `failed` and `interrupted` runs may still be resumed, so they are not
+/// told. Never fails the caller: a problem is logged.
+async fn tell_executor_closed(shared: &Shared, run: &RunId) {
+    let row = match shared.run_record(run).await {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%run, %error, "could not read the run that ended");
+            return;
+        }
+    };
+    if !matches!(row.status, RunStatus::Succeeded | RunStatus::Cancelled) {
+        return;
+    }
+    if let Some(executor) = shared.executors.get(&row.executor) {
+        executor.run_closed(run).await;
+    }
 }
 
 /// A run a trigger started is not a conversation: nobody sends a follow-up to a nightly job, and

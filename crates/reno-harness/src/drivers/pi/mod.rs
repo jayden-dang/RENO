@@ -30,12 +30,15 @@
 //!   `set_auto_compaction`, `set_auto_retry`, `cycle_model` and `cycle_thinking_level` write
 //!   `~/.pi/agent/settings.json`. The writer refuses them ([`rpc::Client::send`]) and a test
 //!   drives a run to prove none is sent. `set_model` and `set_thinking_level` stay in the session
-//!   transcript. The MCP bridge, the instructions and every file a flag names live in a scratch
+//!   transcript. A Reno run's writer also refuses the host `bash` command, which Pi runs without
+//!   its tool hook. The MCP bridge, the instructions and every file a flag names live in a scratch
 //!   directory of the run.
 //! - Extension dialogs (`select`, `confirm`, `input`, `editor`) become `NeedsInput`, answered
 //!   through `ExecHandle::answer_input`. One that is declined, that Pi gives up on, or that is
-//!   open when the run ends is dismissed. Pi has no tool-approval protocol: this executor honours
-//!   full access only, like Grok and Devin, and refuses any other mode before spawning.
+//!   open when the run ends is dismissed. Pi can block each tool call through an extension, and
+//!   Reno uses that only for `reno`, whose gate extension asks Reno before every call. `pi` has no
+//!   approval of its own and asks nothing: it honours full access only, like Grok and Devin, and
+//!   refuses any other mode before spawning.
 //! - Isolation from the owner's personal tools (ARCH-15): unless `inherit_user_config`, Pi is
 //!   started with `--no-extensions --no-skills --no-prompt-templates --no-mcp`. Not covered: the
 //!   owner's settings and credentials (they are how Pi signs in), the global context file
@@ -44,7 +47,7 @@
 //! - Process records: the Pi a run spawns is reported through `ExecControls::processes` at
 //!   once. The short-lived probe Pi is bounded by its own timeout and reaped before it returns.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
@@ -54,8 +57,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, HealthProbe,
-    ModelCatalog, ModelInfo, SandboxLevel, SessionRef, SignedIn, Steering, StopReason, VersionGate,
-    VersionRange,
+    ModelCatalog, ModelInfo, RunId, SandboxLevel, SessionRef, SignedIn, Steering, StopReason,
+    VersionGate, VersionRange,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -76,10 +79,58 @@ use crate::wire::pi::frames::{self, Disposition, Reply, State, string};
 use crate::wire::pi::known;
 use crate::wire::pi::launch::{self, Launch};
 use crate::wire::pi::normalize::Normalizer;
+use crate::wire::pi::subject::subject;
 use crate::{HarnessError, HarnessId};
 
+#[cfg(unix)]
+mod gate;
 mod mcp;
 mod rpc;
+
+/// Off unix no gate is ever armed (`start` refuses a Reno run first); this only lets the one
+/// code path of the driver compile.
+#[cfg(not(unix))]
+mod gate {
+    use std::time::Duration;
+
+    use serde_json::Value;
+
+    use crate::exec::Decision;
+
+    #[derive(Debug)]
+    pub(super) struct GateHost;
+
+    pub(super) struct GateCall {
+        pub(super) id: u64,
+        pub(super) tool: String,
+        pub(super) call_id: String,
+        pub(super) parent: Option<String>,
+        pub(super) input: Value,
+        pub(super) over_bound: bool,
+    }
+
+    impl GateHost {
+        pub(super) async fn next(&mut self) -> Option<GateCall> {
+            None
+        }
+
+        pub(super) fn decide(&mut self, _id: u64, _decision: Decision, _reason: Option<String>) {}
+
+        pub(super) fn is_live(&self) -> bool {
+            false
+        }
+
+        pub(super) fn lost_because(&self) -> &'static str {
+            super::GATE_CLOSED
+        }
+
+        pub(super) async fn close(&mut self, _grace: Duration) {}
+    }
+}
+
+use gate::{GateCall, GateHost};
+
+const GATE_CLOSED: &str = "the gate's connection closed";
 
 /// The oldest Pi this driver runs. Checked: 1.5.0 only (see the module docs). A Pi older than
 /// this is refused before a run instead of failing in the middle of one.
@@ -95,10 +146,62 @@ const CONTRACT_VERSION: u32 = 1;
 /// The id this executor registers under.
 pub const EXECUTOR_ID: &str = "pi";
 
+/// The id of the Reno-governed flavor of this driver.
+pub const RENO_EXECUTOR_ID: &str = "reno";
+
 static ID: LazyLock<ExecutorId> = LazyLock::new(|| match EXECUTOR_ID.parse() {
     Ok(id) => id,
     Err(error) => unreachable!("{EXECUTOR_ID} is a valid executor id: {error}"),
 });
+
+static RENO_ID: LazyLock<ExecutorId> = LazyLock::new(|| match RENO_EXECUTOR_ID.parse() {
+    Ok(id) => id,
+    Err(error) => unreachable!("{RENO_EXECUTOR_ID} is a valid executor id: {error}"),
+});
+
+/// Who governs the tool calls of a run: Pi's own behavior for the owner (`pi`), or Reno (`reno`).
+#[derive(Debug, Clone)]
+enum Flavor {
+    Owner,
+    Reno { sessions_root: PathBuf },
+}
+
+impl Flavor {
+    fn id(&self) -> &ExecutorId {
+        match self {
+            Self::Owner => &ID,
+            Self::Reno { .. } => &RENO_ID,
+        }
+    }
+
+    fn access_modes(&self) -> Vec<AccessMode> {
+        match self {
+            Self::Owner => vec![AccessMode::FullAccess],
+            Self::Reno { .. } => vec![AccessMode::Supervised, AccessMode::FullAccess],
+        }
+    }
+
+    fn is_reno(&self) -> bool {
+        matches!(self, Self::Reno { .. })
+    }
+
+    fn sessions_root(&self) -> Option<&Path> {
+        match self {
+            Self::Owner => None,
+            Self::Reno { sessions_root } => Some(sessions_root),
+        }
+    }
+
+    fn child_env(&self) -> crate::child_env::DriverEnv {
+        match self {
+            Self::Owner => crate::child_env::PI,
+            Self::Reno { .. } => crate::child_env::RENO,
+        }
+    }
+}
+
+/// How long arming a run's gate may take, unless tuned. It sits inside [`STARTUP_BUDGET`].
+const ARMING_BUDGET: Duration = Duration::from_secs(30);
 
 /// What the stream carries before the consumer reads.
 const EVENT_CAPACITY: usize = 256;
@@ -117,6 +220,18 @@ const MAX_OPEN_DIALOGS: usize = 16;
 
 /// Frames kept while the startup queries run, to be handled once the run has started.
 const MAX_BACKLOG: usize = 512;
+
+/// The request id of a gate call is this and the gate's own id for it.
+const GATE_REQUEST_PREFIX: &str = "gate-";
+
+/// What the gate tells Pi's tool when a call is denied because the run stopped.
+const RUN_STOPPED: &str = "Reno stopped the run before it decided this call.";
+
+/// What a gate call whose command or path is not text is told.
+const UNREADABLE_CALL: &str = "Reno could not read this call.";
+
+/// What a gate call is told when the child has no home to expand its paths against.
+const UNJUDGEABLE_CALL: &str = "Reno could not judge this call: Pi has no usable home directory.";
 
 /// The Pi CLI to launch: `PI_EXECUTABLE`, then our own PATH, the login-shell PATH and the known
 /// install locations. Resolved per call: cheap after the snapshot is cached.
@@ -187,17 +302,26 @@ fn is_default_model(model: Option<&str>) -> bool {
     model.is_none_or(|m| m.is_empty() || m == "default")
 }
 
-/// The Pi executor. Construct with [`PiExecutor::new`]; tests point it at a fake Pi with
+/// The Pi executor. Construct with [`PiExecutor::new`] (the owner's `pi`) or
+/// [`PiExecutor::reno`] (the `reno` executor); tests point it at a fake Pi with
 /// [`PiExecutor::with_executable`].
+///
+/// `reno` runs the same CLI, and a run on it sends its first prompt only once its gate is armed:
+/// Pi lists the gate's command and the gate has said hello with the attempt's nonce. A run that
+/// cannot arm ends failed, never ungated.
 ///
 /// # Access modes
 ///
-/// Pi asks for no approval before a tool call, so there is nothing for Reno to decide: the
+/// For `reno`: the gate extension asks Reno before every tool call, so a run may be supervised or
+/// full access, and the unrestricted sandbox only.
+///
+/// For `pi`: Pi asks for no approval before a tool call, so there is nothing for Reno to decide: the
 /// executor honours [`AccessMode::FullAccess`] and the unrestricted sandbox only, and `start`
 /// refuses anything else before spawning (ARCH-15), like Grok and Devin. Pi's own tool allowlist
 /// (`--tools read,grep,find,ls`) would make a read-only mode, but it also applies to the tools of
 /// MCP servers and extensions, and has not been checked to hold; it is not claimed.
 pub struct PiExecutor {
+    flavor: Flavor,
     executable: Option<PathBuf>,
     /// Grace between asking Pi to abort and ending it.
     interrupt_grace: Duration,
@@ -209,7 +333,13 @@ pub struct PiExecutor {
     models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
     /// How long `probe` lets its short-lived Pi take in all.
     probe_budget: Duration,
+    /// How long arming a run's gate may take.
+    arming_budget: Duration,
     tracker: TaskTracker,
+    /// Each Reno run's latest attempt: `true` once the attempt is over and its Pi is gone. What
+    /// lets `run_closed` wait for it. Holds only attempts still running: finished ones are
+    /// dropped as the next one starts.
+    attempts: Arc<Mutex<HashMap<RunId, tokio::sync::watch::Receiver<bool>>>>,
     unknown: UnknownFrames,
 }
 
@@ -224,13 +354,16 @@ impl std::fmt::Debug for PiExecutor {
 impl Default for PiExecutor {
     fn default() -> Self {
         Self {
+            flavor: Flavor::Owner,
             executable: None,
             interrupt_grace: Duration::from_secs(5),
             kill_grace: Duration::from_secs(3),
             cli_version: Arc::new(Mutex::new(None)),
             models: Arc::new(Mutex::new(None)),
             probe_budget: probe::WIRE_BUDGET,
+            arming_budget: ARMING_BUDGET,
             tracker: TaskTracker::new(),
+            attempts: Arc::default(),
             unknown: UnknownFrames::new(),
         }
     }
@@ -241,6 +374,16 @@ impl PiExecutor {
     /// location.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The `reno` executor: the same Pi CLI, governed by Reno. Each run keeps its Pi sessions
+    /// under `sessions_root`, until it is closed (`run_closed`) or a start-up sweep finds it
+    /// can never resume (`retain_runs`).
+    pub fn reno(sessions_root: PathBuf) -> Self {
+        Self {
+            flavor: Flavor::Reno { sessions_root },
+            ..Self::default()
+        }
     }
 
     /// Use a fixed CLI binary instead of PATH and known-location resolution.
@@ -265,9 +408,31 @@ impl PiExecutor {
         self
     }
 
+    /// Bound how long arming a run's gate may take (tests shrink it; default 30 s).
+    #[must_use]
+    pub fn with_arming_budget(mut self, budget: Duration) -> Self {
+        self.arming_budget = budget;
+        self
+    }
+
     /// Whether the CLI can be launched now.
     pub fn installed(&self) -> bool {
         resolve_executable(self.executable.as_deref()).is_ok()
+    }
+
+    /// Runs the attempt on the tracker and remembers when it is over, for `run_closed`.
+    fn spawn_attempt(&self, run: Run) {
+        let id = run.spec.run_id.clone();
+        let (over, watching) = tokio::sync::watch::channel(false);
+        {
+            let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+            attempts.retain(|_, watching| !*watching.borrow() && watching.has_changed().is_ok());
+            attempts.insert(id, watching);
+        }
+        self.tracker.spawn(async move {
+            run.drive().await;
+            over.send_replace(true);
+        });
     }
 
     /// The models Pi lists, and so whether it holds a credential for any provider
@@ -337,7 +502,10 @@ impl PiExecutor {
 #[async_trait]
 impl Executor for PiExecutor {
     fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
-        crate::exec::maintenance::declaration(&HarnessId::Pi)
+        match self.flavor {
+            Flavor::Owner => crate::exec::maintenance::declaration(&HarnessId::Pi),
+            Flavor::Reno { .. } => None,
+        }
     }
 
     fn descriptor(&self) -> ExecutorDescriptor {
@@ -353,7 +521,7 @@ impl Executor for PiExecutor {
             .clone()
             .unwrap_or_else(default_models);
         ExecutorDescriptor {
-            id: ID.clone(),
+            id: self.flavor.id().clone(),
             contract_version: CONTRACT_VERSION,
             adapter_version: match cli {
                 Some(cli) => format!(
@@ -373,8 +541,9 @@ impl Executor for PiExecutor {
                 // A steering message lands after the current assistant turn's tool calls.
                 steering: Steering::StepBoundary,
                 resume: true,
-                // Pi asks nothing before a tool call: full access, unrestricted, or refused.
-                access_modes: vec![AccessMode::FullAccess],
+                // `pi` asks nothing before a tool call: full access, unrestricted, or refused.
+                // `reno` also takes supervised: Reno decides each call.
+                access_modes: self.flavor.access_modes(),
                 sandbox_levels: vec![SandboxLevel::Unrestricted],
                 mcp_injection: true,
                 structured_output: false,
@@ -383,7 +552,7 @@ impl Executor for PiExecutor {
                 plan_mode: false,
                 models,
                 model_switch: false,
-                // Enforced at launch: see the module docs for what it leaves.
+                // Both flavors: enforced at launch, see the module docs for what it leaves.
                 isolates_user_config: true,
                 model_aliases: vec![],
             },
@@ -435,8 +604,10 @@ impl Executor for PiExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
         );
-        let (signed_in, models) = if matches!(version_gate, VersionGate::TooOld { .. }) {
-            // A Pi this old is not launched.
+        let owner = !self.flavor.is_reno();
+        let (signed_in, models) = if !owner || matches!(version_gate, VersionGate::TooOld { .. }) {
+            // A Pi this old is not launched, and the owner's credentials are never read for
+            // `reno`: its models are the curated ones.
             (SignedIn::Unknown, fallback())
         } else {
             match self.query_models(&exe, self.probe_budget).await {
@@ -469,8 +640,28 @@ impl Executor for PiExecutor {
         controls: ExecControls,
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
-        require_access(spec.access, &[AccessMode::FullAccess])?;
+        require_access(spec.access, &self.flavor.access_modes())?;
         require_sandbox(spec.sandbox, &[SandboxLevel::Unrestricted])?;
+        if self.flavor.is_reno() {
+            if !spec.env.contains_key("RENO_BOT") {
+                return Err(ExecError::InvalidSpec(
+                    "the Reno harness runs bots only; this run has no bot".into(),
+                ));
+            }
+            if spec.inherit_user_config {
+                return Err(ExecError::InvalidSpec(
+                    "the Reno harness runs bots only, and never loads the owner's config; \
+                     the bot sets inherit_user_config = true"
+                        .into(),
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        if self.flavor.is_reno() {
+            return Err(ExecError::InvalidSpec(
+                "the Reno harness needs Unix sockets and cannot run on this platform".into(),
+            ));
+        }
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }
@@ -511,9 +702,9 @@ impl Executor for PiExecutor {
             ..
         } = controls;
 
-        let launched = launch_pi(&self.tracker, &exe, &spec, &processes).await;
-        let pi = match launched {
-            Ok(pi) => pi,
+        let launched = launch_pi(&self.tracker, &exe, &spec, &processes, &self.flavor).await;
+        let (pi, gate) = match launched {
+            Ok(launched) => launched,
             // Any failure to launch is a failed run, not an ineligible executor.
             Err(error) => {
                 let diagnostic = crate::redact_secrets(&error.to_string());
@@ -532,6 +723,9 @@ impl Executor for PiExecutor {
         let (event_tx, event_rx) = mpsc::channel::<ExecEvent>(EVENT_CAPACITY);
         let run = Run {
             pi,
+            gate,
+            gated: self.flavor.is_reno(),
+            arming_budget: self.arming_budget,
             spec,
             event_tx,
             steering,
@@ -541,12 +735,55 @@ impl Executor for PiExecutor {
             kill_grace: self.kill_grace,
             unknown: self.unknown.clone(),
         };
-        self.tracker.spawn(run.drive());
+        match &self.flavor {
+            Flavor::Owner => {
+                self.tracker.spawn(run.drive());
+            }
+            Flavor::Reno { .. } => self.spawn_attempt(run),
+        }
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|event| (event, rx))
         })
         .boxed())
+    }
+
+    async fn run_closed(&self, run: &RunId) {
+        let Some(sessions_root) = self.flavor.sessions_root() else {
+            return;
+        };
+        let watching = self
+            .attempts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(run);
+        if let Some(mut watching) = watching {
+            // An attempt that was dropped with its task counts as over.
+            let _ = watching.wait_for(|over| *over).await;
+        }
+        let (root, name) = (sessions_root.to_path_buf(), run.to_string());
+        let removed = tokio::task::spawn_blocking(move || remove_session_dir(&root, &name)).await;
+        match removed {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(target: "reno_harness::pi", %run, %error, "could not remove the run's session");
+            }
+            Err(error) => {
+                tracing::warn!(target: "reno_harness::pi", %run, %error, "the session removal task failed");
+            }
+        }
+    }
+
+    async fn retain_runs(&self, keep: &HashSet<RunId>) {
+        let Some(sessions_root) = self.flavor.sessions_root() else {
+            return;
+        };
+        let root = sessions_root.to_path_buf();
+        let keep: HashSet<String> = keep.iter().map(ToString::to_string).collect();
+        if let Err(error) = tokio::task::spawn_blocking(move || sweep_sessions(&root, &keep)).await
+        {
+            tracing::warn!(target: "reno_harness::pi", %error, "the session sweep task failed");
+        }
     }
 
     async fn shutdown(&self) {
@@ -571,6 +808,11 @@ struct Pi {
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// The run's scratch directory: the bridge, its config and the instructions. Removed with it.
     _scratch: Option<ScratchDir>,
+    /// What a Reno attempt keeps beside them: the gate, its socket path and key, and Pi's agent
+    /// directory. They go with the process.
+    gate_files: Option<GateFiles>,
+    /// The `HOME` the child was given, which Pi expands `~` against.
+    home: Option<PathBuf>,
     /// When the process was seen to have exited; frames it left behind are still read until then.
     exit_deadline: Option<Instant>,
 }
@@ -608,6 +850,14 @@ impl Pi {
         }
     }
 
+    /// Whether a credential file is in this attempt's agent directory. An attempt with no agent
+    /// directory of its own cannot be vouched for, so it counts.
+    fn holds_credential(&self) -> bool {
+        self.gate_files
+            .as_ref()
+            .is_none_or(|files| stored_credential(&files.agent))
+    }
+
     /// What to say when Pi went away under a run: its exit status and last stderr lines.
     async fn crash_report(&mut self) -> String {
         self.stderr_tail.wait_closed().await;
@@ -620,39 +870,383 @@ impl Pi {
     }
 }
 
+/// The gate extension: loaded after every other extension of a Reno attempt.
+const GATE: &str = include_str!("gate.mjs");
+
+/// The command the gate extension registers, which Pi must list before a prompt.
+const GATE_COMMAND: &str = "reno-gate";
+
+/// Provider variables named in the reason a bot's run has no model.
+const PROVIDER_KEY_HINT: [&str; 4] = [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+
+/// What Pi keeps a stored login in, inside its agent directory.
+const AUTH_FILE: &str = "auth.json";
+
+/// The largest `auth.json` that can be empty: Pi writes `{}`, and anything longer is a login.
+const MAX_AUTH_BYTES: u64 = 4096;
+
+const CREDENTIAL_APPEARED: &str =
+    "a credential file appeared in the run's Pi agent directory (auth.json)";
+
+/// Whether the agent directory's `auth.json` holds a credential: anything but a missing file or an
+/// empty JSON object. Fail closed: a file that cannot be read, is not plain or small, or is not
+/// JSON counts. It opens without following a link and without blocking, so a link or a pipe the
+/// run planted there is judged, not read.
+fn stored_credential(agent: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(agent.join(AUTH_FILE))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        let plain_and_small = file
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_AUTH_BYTES);
+        let mut bytes = Vec::new();
+        if !plain_and_small || file.take(MAX_AUTH_BYTES).read_to_end(&mut bytes).is_err() {
+            return true;
+        }
+        !matches!(
+            serde_json::from_slice::<Value>(&bytes),
+            Ok(Value::Object(fields)) if fields.is_empty()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = agent;
+        true
+    }
+}
+
+/// The longest path a Unix socket address holds on macOS (`sun_path`), the NUL included.
+const SUN_PATH_MAX: usize = 104;
+
+fn fits_sun_path(path: &Path) -> bool {
+    path.as_os_str().len() < SUN_PATH_MAX
+}
+
+/// What one attempt of a Reno run owns on disk besides its scratch directory. Every attempt gets
+/// its own, so no file an earlier one could reach is reused.
+struct GateFiles {
+    /// `<scratch>/.reno`: every file the attempt writes is under it.
+    dir: PathBuf,
+    gate: PathBuf,
+    /// Pi's agent directory for this attempt; it holds no `mcp.json` and no credentials.
+    agent: PathBuf,
+    socket: PathBuf,
+    nonce: String,
+    /// Owns the short directory holding the socket when `<scratch>` is too long for one.
+    _socket_dir: Option<ScratchDir>,
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        builder.mode(0o700);
+        builder.create(path)?;
+        // set_permissions follows a link: a link planted at the path would have its target
+        // changed instead.
+        if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(std::io::Error::other(format!(
+                "{} is a symbolic link, not a directory",
+                path.display()
+            )));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    builder.create(path)
+}
+
+/// A fresh scratch directory under `temp` with the `.reno` layout of one attempt. The socket sits
+/// in it, unless that path would not fit a socket address: then it goes to a short owner-only
+/// directory under `/tmp`, and fails the attempt when even that does not fit.
+fn lay_out(temp: &Path) -> std::io::Result<(ScratchDir, GateFiles)> {
+    let scratch = ScratchDir::new_in(temp, "pi")?;
+    let dir = scratch.path().join(".reno");
+    let agent = dir.join("agent");
+    create_private_dir(&agent)?;
+    let mut socket = dir.join("gate.sock");
+    let mut socket_dir = None;
+    if !fits_sun_path(&socket) {
+        let short = ScratchDir::at(
+            PathBuf::from("/tmp").join(format!("reno-gate-{}", uuid::Uuid::new_v4())),
+        )?;
+        let reno = short.path().join(".reno");
+        create_private_dir(&reno)?;
+        socket = reno.join("gate.sock");
+        if !fits_sun_path(&socket) {
+            return Err(std::io::Error::other(format!(
+                "the gate socket path {} is too long for a socket address",
+                socket.display()
+            )));
+        }
+        socket_dir = Some(short);
+    }
+    let gate = mcp::write_private(&dir, "gate.mjs", GATE.as_bytes())?;
+    Ok((
+        scratch,
+        GateFiles {
+            dir,
+            gate,
+            agent,
+            socket,
+            nonce: uuid::Uuid::new_v4().to_string(),
+            _socket_dir: socket_dir,
+        },
+    ))
+}
+
+/// The run's session directory under `root`, owner-only, created when it is missing. The same
+/// for every attempt of the run. A `root` that exists as a link or as anything but a directory is
+/// refused, so nothing is created through it.
+fn open_session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
+    let dir = session_dir(root, run)?;
+    match std::fs::symlink_metadata(root) {
+        Ok(found) if found.is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(format!(
+                "the sessions directory {} is a link or not a directory",
+                root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Where the run's session lives under `root`: only a single plain name can be one.
+fn session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
+    let mut parts = Path::new(run).components();
+    let one_name = matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !one_name {
+        return Err(std::io::Error::other(format!(
+            "{run:?} cannot name a session directory"
+        )));
+    }
+    Ok(root.join(run))
+}
+
+/// Whether `root` itself is a directory and not a link to one. A sessions root that is not is
+/// never removed from, so nothing outside the place Reno made goes; one that exists and is not a
+/// directory is said so in the log.
+fn is_real_dir(root: &Path) -> bool {
+    match std::fs::symlink_metadata(root) {
+        Ok(found) if found.is_dir() => true,
+        Ok(_) => {
+            tracing::warn!(
+                target: "reno_harness::pi",
+                root = %root.display(),
+                "the sessions directory is a link or not a directory: no session is removed from it"
+            );
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+/// Removes the run's session directory. A link there is removed itself and never followed, so
+/// nothing outside `root` goes; a `root` that is itself a link is left alone. What is neither a
+/// directory nor a link is left alone, as the sweep does. Already gone is done.
+fn remove_session_dir(root: &Path, run: &str) -> std::io::Result<()> {
+    let dir = session_dir(root, run)?;
+    if !is_real_dir(root) {
+        return Ok(());
+    }
+    let removed = match std::fs::symlink_metadata(&dir) {
+        Ok(found) if found.is_dir() => std::fs::remove_dir_all(&dir),
+        Ok(found) if found.is_symlink() => std::fs::remove_file(&dir),
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Removes every session directory (or link) under `root` that names a run and is not in `keep`.
+/// Only the entries of a `root` that is a real directory are touched, and none is followed: what
+/// is not a directory or a link, or does not have a run's name, is left alone. Each removal is
+/// logged, and so is each entry that cannot be read or removed; one failure does not stop the
+/// others.
+fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
+    if !is_real_dir(root) {
+        return;
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(target: "reno_harness::pi", %error, "could not list the sessions");
+            }
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    target: "reno_harness::pi",
+                    %error,
+                    "could not read a session entry",
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(run) = name.to_str().filter(|name| name.parse::<RunId>().is_ok()) else {
+            continue;
+        };
+        if keep.contains(run) {
+            continue;
+        }
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                tracing::warn!(
+                    target: "reno_harness::pi",
+                    run,
+                    %error,
+                    "could not tell what a session entry is",
+                );
+                continue;
+            }
+        };
+        let removed = if kind.is_dir() {
+            std::fs::remove_dir_all(entry.path())
+        } else if kind.is_symlink() {
+            std::fs::remove_file(entry.path())
+        } else {
+            continue;
+        };
+        match removed {
+            Ok(()) => {
+                tracing::info!(
+                    target: "reno_harness::pi",
+                    run,
+                    "removed a session no run can resume",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "reno_harness::pi",
+                    run,
+                    %error,
+                    "could not remove an unneeded session",
+                );
+            }
+        }
+    }
+}
+
+/// Cloud credential files a Reno attempt points at missing paths.
+const BLANKED_CREDENTIALS: [&str; 3] = [
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+];
+
+fn child_driver_env(flavor: &Flavor) -> crate::child_env::DriverEnv {
+    flavor.child_env()
+}
+
 async fn launch_pi(
     tracker: &TaskTracker,
     exe: &Path,
     spec: &ExecSpec,
     processes: &ProcessSink,
-) -> Result<Pi, std::io::Error> {
-    let scratch = ScratchDir::new("pi")?;
+    flavor: &Flavor,
+) -> Result<(Pi, Option<GateHost>), std::io::Error> {
+    let reno = flavor.is_reno();
+    let (scratch, gate, session) = match flavor {
+        Flavor::Owner => (ScratchDir::new("pi")?, None, None),
+        Flavor::Reno { sessions_root } => {
+            let session = open_session_dir(sessions_root, spec.run_id.as_ref())?;
+            let (scratch, gate) = lay_out(&std::env::temp_dir())?;
+            (scratch, Some(gate), Some(session))
+        }
+    };
+    let files = gate
+        .as_ref()
+        .map_or(scratch.path(), |gate| gate.dir.as_path());
     let instructions = match spec
         .instructions
         .as_deref()
         .filter(|i| !i.trim().is_empty())
     {
         Some(text) => Some(mcp::write_private(
-            scratch.path(),
+            files,
             "instructions.md",
             text.as_bytes(),
         )?),
         None => None,
     };
-    let bridge = mcp::install(scratch.path(), &spec.mcp)?;
+    let bridge = mcp::install(files, &spec.mcp)?;
+    // Listening before Pi exists, so its gate's connection at start-up finds the socket.
+    let host = gate
+        .as_ref()
+        .map(|gate| bind_gate(gate, tracker))
+        .transpose()?;
     let mut cmd = Command::new(exe);
-    crate::child_env::restrict(&mut cmd, crate::child_env::PI);
+    crate::child_env::restrict(&mut cmd, child_driver_env(flavor));
+    if let Some(gate) = &gate {
+        // Missing paths, so no ambient cloud credential file is read; a bot secret of the same
+        // name is applied next and wins.
+        for name in BLANKED_CREDENTIALS {
+            cmd.env(name, gate.agent.join(name.to_ascii_lowercase()));
+        }
+    }
     cmd.args(launch::args(Launch {
         resume: spec.resume.as_ref().map(|s| s.0.as_str()),
-        isolate: !spec.inherit_user_config,
+        isolate: reno || !spec.inherit_user_config,
         instructions: instructions.as_deref(),
         bridge: bridge.as_ref().map(|b| b.extension.as_path()),
+        session_dir: session.as_deref(),
+        builtins: reno,
+        no_approve: reno,
+        gate: gate.as_ref().map(|gate| gate.gate.as_path()),
     }));
     crate::compose_child_path(&mut cmd, exe);
     // The allowlisted environment of the run (the bot's secrets, Reno's `RENO_*` run variables).
     crate::apply_run_env(&mut cmd, &spec.env);
     if let Some(bridge) = &bridge {
         cmd.env(mcp::CONFIG_ENV, &bridge.config);
+    }
+    // Last, so a secret of the same name cannot override them.
+    if let Some(gate) = &gate {
+        cmd.env("PI_CODING_AGENT_DIR", &gate.agent)
+            .env("RENO_GATE_SOCKET", &gate.socket)
+            .env("RENO_GATE_NONCE", &gate.nonce);
+    }
+    // What Pi expands `~` against: the child's own `HOME`, a bot secret named so included.
+    let home = child_home(&cmd);
+    if reno && home.is_none() {
+        return Err(std::io::Error::other(
+            "the Reno harness needs an absolute HOME in Pi's environment (none, or a blank or \
+             relative one was set), to judge the paths its calls open",
+        ));
     }
     if !spec.cwd.as_os_str().is_empty() {
         cmd.current_dir(&spec.cwd);
@@ -690,14 +1284,46 @@ async fn launch_pi(
             tail.close();
         })
     });
-    Ok(Pi {
+    let mut transport = rpc::Transport::new(stdin, stdout);
+    if reno {
+        transport.client = transport.client.clone().refusing_host_bash();
+    }
+    let pi = Pi {
         child,
-        transport: rpc::Transport::new(stdin, stdout),
+        transport,
         stderr_tail,
         stderr_task,
         _scratch: Some(scratch),
+        gate_files: gate,
+        home,
         exit_deadline: None,
-    })
+    };
+    Ok((pi, host))
+}
+
+/// The `HOME` `cmd` will run with, when it is an absolute path: a blank or relative one cannot
+/// say where `~` is.
+fn child_home(cmd: &Command) -> Option<PathBuf> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "HOME")
+        .and_then(|(_, value)| value)
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+}
+
+fn bind_gate(files: &GateFiles, tracker: &TaskTracker) -> std::io::Result<GateHost> {
+    #[cfg(unix)]
+    {
+        GateHost::bind(&files.socket, &files.nonce, tracker)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (files, tracker);
+        Err(std::io::Error::other(
+            "the Reno gate needs Unix sockets and cannot run on this platform",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +1346,11 @@ enum Pending {
 
 struct Run {
     pi: Pi,
+    /// The attempt's gate socket; `Some` for every Reno attempt.
+    gate: Option<GateHost>,
+    /// A Reno attempt: nothing is prompted until its gate is armed.
+    gated: bool,
+    arming_budget: Duration,
     spec: ExecSpec,
     event_tx: mpsc::Sender<ExecEvent>,
     steering: mpsc::Receiver<String>,
@@ -774,6 +1405,22 @@ impl Run {
     /// Ask Pi for its model and thinking level and its state; say what the run starts as.
     async fn start_up(&mut self) -> Startup {
         let mut backlog = Vec::new();
+        if let Err(why) = self.arm(&mut backlog).await {
+            tracing::warn!(
+                target: "reno_harness::pi",
+                run = %self.spec.run_id,
+                "Reno's gate did not arm: {why}"
+            );
+            return Startup::Failed(format!("Reno's gate did not arm: {why}"));
+        }
+        if self.gated && self.pi.holds_credential() {
+            tracing::warn!(
+                target: "reno_harness::pi",
+                run = %self.spec.run_id,
+                "{CREDENTIAL_APPEARED}: the attempt fails before any prompt"
+            );
+            return Startup::Failed(CREDENTIAL_APPEARED.into());
+        }
         match self.set_up(&mut backlog).await {
             Ok(state) => {
                 let started = ExecEvent::Started {
@@ -809,13 +1456,56 @@ impl Run {
         }
     }
 
+    /// Before any prompt, a Reno attempt needs two things: Pi lists the gate's command, and the
+    /// gate says hello on the attempt's socket with its nonce. Each is awaited as an event, both
+    /// within the arming budget. The listener is gone afterwards, so no later connection exists.
+    async fn arm(&mut self, backlog: &mut Vec<Value>) -> Result<(), String> {
+        if !self.gated {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            let Some(mut gate) = self.gate.take() else {
+                return Err("the attempt has no gate socket".into());
+            };
+            let budget = self.arming_budget;
+            let hello = async { gate.arm(budget).await.map_err(|error| error.to_string()) };
+            let listed = async {
+                let reply =
+                    tokio::time::timeout(budget, self.query(frames::get_commands(), backlog))
+                        .await
+                        .map_err(|_| format!("Pi did not list its commands within {budget:?}"))??;
+                if frames::lists_extension_command(&reply, GATE_COMMAND) {
+                    Ok(())
+                } else {
+                    Err(format!("Pi does not list the {GATE_COMMAND} command"))
+                }
+            };
+            let armed = tokio::try_join!(hello, listed).map(|((), ())| ());
+            self.gate = Some(gate);
+            armed
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backlog, self.arming_budget);
+            Err("the Reno gate needs Unix sockets and cannot run on this platform".into())
+        }
+    }
+
     async fn set_up(&mut self, backlog: &mut Vec<Value>) -> Result<State, String> {
-        if !is_default_model(self.spec.model.as_deref()) {
-            let wanted = self.spec.model.clone().unwrap_or_default();
+        let default_model = is_default_model(self.spec.model.as_deref());
+        if !default_model || self.gated {
             let models = self.query(frames::get_available_models(), backlog).await?;
-            let (provider, id) = catalog::resolve_model(&models, &wanted)?;
-            self.query(frames::set_model(&provider, &id), backlog)
-                .await?;
+            if default_model {
+                if catalog::model_infos(&models).is_empty() {
+                    return Err(self.no_model_reason());
+                }
+            } else {
+                let wanted = self.spec.model.clone().unwrap_or_default();
+                let (provider, id) = catalog::resolve_model(&models, &wanted)?;
+                self.query(frames::set_model(&provider, &id), backlog)
+                    .await?;
+            }
         }
         if let Some(level) = catalog::level_for(self.spec.effort, &self.spec.model_options) {
             self.query(frames::set_thinking_level(level), backlog)
@@ -830,6 +1520,28 @@ impl Run {
             return Err("Pi resumed a different session".into());
         }
         Ok(state)
+    }
+
+    /// Why a bot's run has no model: the names of its secrets (never their values) and the
+    /// variables Pi reads provider keys from.
+    fn no_model_reason(&self) -> String {
+        let secrets: Vec<&str> = self
+            .spec
+            .env
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !name.starts_with("RENO_"))
+            .collect();
+        let secrets = if secrets.is_empty() {
+            "none".to_owned()
+        } else {
+            secrets.join(", ")
+        };
+        format!(
+            "Pi has no model from this bot's secrets ({secrets}); Pi reads provider keys such \
+             as {}",
+            PROVIDER_KEY_HINT.join(", ")
+        )
     }
 
     /// One command and its reply. A frame that is not the reply is kept for the run, except a
@@ -872,6 +1584,12 @@ impl Run {
     /// close its stdin (its own orderly shutdown), give it a moment, then SIGTERM and SIGKILL to
     /// the process group and the descendants traced.
     async fn teardown(&mut self) {
+        // Denials still queued reach the gate first; then the connection closes, and the gate
+        // blocks any call Pi makes while it winds down.
+        if let Some(mut gate) = self.gate.take() {
+            gate.close(self.kill_grace.min(Duration::from_secs(1)))
+                .await;
+        }
         #[cfg(unix)]
         let tree = match self.pi.child.id() {
             Some(pid) => crate::process::descendants(pid).await,
@@ -899,6 +1617,15 @@ struct Player<'a> {
     pending: HashMap<String, Pending>,
     /// Dialogs open on a person.
     dialogs: OpenRequests<(), Dialog>,
+    /// Gate calls open on the ladder.
+    calls: OpenRequests<GatePayload, ()>,
+    /// The tool calls Pi has started and not finished: a gate call is raised only once its
+    /// `Tool` event has gone out, because the gate's socket and Pi's stdout race.
+    running: HashSet<String>,
+    /// A gate call whose `Tool` event has not come yet.
+    parked: Option<GateCall>,
+    /// The gate's connection is being read.
+    watching: bool,
     /// When Pi gives up on each open dialog by itself.
     deadlines: Vec<(Instant, String)>,
     /// Pi is running something for this run: it said it started or queued a prompt, or an
@@ -909,6 +1636,8 @@ struct Player<'a> {
     /// The task prompt was refused.
     refused: Option<String>,
     interrupted: bool,
+    /// A credential file showed up in Pi's agent directory: the run is over.
+    credential: bool,
     /// The last barrier found Pi busy with no settle guaranteed to follow: look again when a
     /// compaction or retry ends.
     recheck: bool,
@@ -919,20 +1648,39 @@ struct Player<'a> {
 
 type Ended = (StopReason, Option<String>, Option<String>);
 
+/// What a gate request keeps to be answered with: the gate's id for the call.
+struct GatePayload {
+    id: u64,
+}
+
+/// The gate's next call. Never ready when the attempt has no gate.
+async fn gate_next(gate: Option<&mut GateHost>) -> Option<GateCall> {
+    match gate {
+        Some(gate) => gate.next().await,
+        None => std::future::pending().await,
+    }
+}
+
 impl<'a> Player<'a> {
     fn new(run: &'a mut Run, state: State) -> Self {
         let mut norm = Normalizer::new();
         norm.set_window(state.context_window);
+        let watching = run.gate.as_ref().is_some_and(GateHost::is_live);
         Self {
             run,
             norm,
             pending: HashMap::new(),
             dialogs: OpenRequests::new(),
+            calls: OpenRequests::new(),
+            running: HashSet::new(),
+            parked: None,
+            watching,
             deadlines: Vec::new(),
             open: false,
             answered: false,
             refused: None,
             interrupted: false,
+            credential: false,
             recheck: false,
             barrier_deadline: None,
             steering_open: true,
@@ -997,8 +1745,20 @@ impl<'a> Player<'a> {
                     Some(answer) => self.answer(answer),
                     None => self.answers_open = false,
                 },
+                call = gate_next(self.run.gate.as_mut()), if self.reading_gate() => {
+                    match call {
+                        None => return self.lost_watch().await,
+                        Some(call) if call.over_bound => return self.flooded(),
+                        Some(call) => {
+                            if self.hold(call).await.is_err() {
+                                return self.gone().await;
+                            }
+                        }
+                    }
+                }
                 () = expiry => self.expire().await,
                 () = barrier => {
+                    self.dismiss_all();
                     return (
                         StopReason::Error,
                         None,
@@ -1010,7 +1770,9 @@ impl<'a> Player<'a> {
                 }
                 () = self.run.cancel.cancelled(), if !self.interrupted => {
                     self.interrupt().await;
-                    return self.dismiss_all_and(self.norm.ending(true)).await;
+                    self.dismiss_all();
+                    let ending = self.norm.ending(true);
+                    return (ending.stop, ending.result, ending.diagnostic);
                 }
                 () = self.run.event_tx.closed() => {
                     self.dismiss_all();
@@ -1023,8 +1785,13 @@ impl<'a> Player<'a> {
     /// Whether the run is over, and how. Over means Pi answered the prompt, has nothing running
     /// for it, owes no other reply and has no steering message waiting to be handed over.
     fn ended(&mut self) -> Option<Ended> {
-        if let Some(why) = &self.refused {
-            return Some((StopReason::Error, None, Some(why.clone())));
+        if self.credential {
+            self.dismiss_all();
+            return Some((StopReason::Error, None, Some(CREDENTIAL_APPEARED.into())));
+        }
+        if let Some(why) = self.refused.clone() {
+            self.dismiss_all();
+            return Some((StopReason::Error, None, Some(why)));
         }
         let waiting = self
             .pending
@@ -1064,11 +1831,6 @@ impl<'a> Player<'a> {
         (StopReason::Error, None, Some(diagnostic))
     }
 
-    async fn dismiss_all_and(&mut self, ending: crate::wire::pi::normalize::Ending) -> Ended {
-        self.dismiss_all();
-        (ending.stop, ending.result, ending.diagnostic)
-    }
-
     fn steer(&mut self, text: &str) {
         match self.client().request(frames::steer(text)) {
             Ok(id) => {
@@ -1090,9 +1852,20 @@ impl<'a> Player<'a> {
         }
     }
 
-    /// A dialog's answer from a person.
+    /// An answer: the ladder's decision on a gate call, or a dialog's answer from a person.
     fn answer(&mut self, answer: ExecAnswer) {
         let request_id = answer.request_id.clone();
+        if request_id.starts_with(GATE_REQUEST_PREFIX) {
+            match self.calls.resolve(answer) {
+                Resolved::Decision(GatePayload { id }, decision, message) => {
+                    self.decide_call(id, decision, message);
+                }
+                _ => {
+                    tracing::debug!(target: "reno_harness::pi", "answer for {request_id} matches no open call");
+                }
+            }
+            return;
+        }
         match self.dialogs.resolve(answer) {
             Resolved::Input(dialog, answers) => {
                 self.deadlines.retain(|(_, id)| *id != request_id);
@@ -1116,6 +1889,152 @@ impl<'a> Player<'a> {
                 let _ = self.client().send(dialog::dismissed(&dialog));
             }
         }
+        // Nothing is left open on the ladder: each gate call still waiting is denied, once.
+        let why = self.why_stopped();
+        for (_, open) in self.calls.drain() {
+            if let crate::exec::Open::Approval(GatePayload { id }) = open {
+                self.decide_call(id, crate::exec::Decision::Deny, Some(why.into()));
+            }
+        }
+        if let Some(call) = self.parked.take() {
+            self.decide_call(call.id, crate::exec::Decision::Deny, Some(why.into()));
+        }
+    }
+
+    /// What a call still open when the run ends is told: a run a credential ended says so.
+    fn why_stopped(&self) -> &'static str {
+        if self.credential {
+            CREDENTIAL_APPEARED
+        } else {
+            RUN_STOPPED
+        }
+    }
+
+    /// Whether the gate's socket is read: not while a call waits for its `Tool` event, so at most
+    /// one call is ever parked.
+    fn reading_gate(&self) -> bool {
+        self.watching && self.parked.is_none()
+    }
+
+    fn decide_call(&mut self, id: u64, decision: crate::exec::Decision, reason: Option<String>) {
+        if let Some(gate) = self.run.gate.as_mut() {
+            gate.decide(id, decision, reason);
+        }
+    }
+
+    /// A call from the gate: raised to the ladder once Pi's `Tool` event for it has gone out,
+    /// which Pi emits before it asks the gate.
+    async fn hold(&mut self, call: GateCall) -> Result<(), ()> {
+        if self.running.contains(&call.call_id) {
+            self.raise(call).await
+        } else {
+            self.parked = Some(call);
+            Ok(())
+        }
+    }
+
+    async fn raise(&mut self, call: GateCall) -> Result<(), ()> {
+        if self.run.pi.holds_credential() {
+            self.credential = true;
+            tracing::warn!(
+                target: "reno_harness::pi",
+                run = %self.run.spec.run_id,
+                "{CREDENTIAL_APPEARED}: the run ends"
+            );
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(CREDENTIAL_APPEARED.into()),
+            );
+            return Ok(());
+        }
+        let Some(home) = self.run.pi.home.as_deref() else {
+            // A call whose paths cannot be judged is not run.
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(UNJUDGEABLE_CALL.into()),
+            );
+            return Ok(());
+        };
+        let Some(subject) = subject(
+            &call.tool,
+            &call.call_id,
+            call.parent.as_deref(),
+            &call.input,
+            home,
+        ) else {
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(UNREADABLE_CALL.into()),
+            );
+            return Ok(());
+        };
+        let request_id = format!("{GATE_REQUEST_PREFIX}{}", call.id);
+        self.calls
+            .open_approval(request_id.clone(), GatePayload { id: call.id });
+        let ask = ExecEvent::NeedsApproval {
+            request_id,
+            subject,
+        };
+        if self.emit(ask).await {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Raise the call that was waiting for its `Tool` event, if that has come.
+    async fn release_parked(&mut self) -> Result<(), ()> {
+        match self.parked.take() {
+            Some(call) if self.running.contains(&call.call_id) => self.raise(call).await,
+            other => {
+                self.parked = other;
+                Ok(())
+            }
+        }
+    }
+
+    /// The gate's connection is gone while the run goes on.
+    async fn lost_watch(&mut self) -> Ended {
+        if self.run.pi.exit_deadline.is_some()
+            || self.run.pi.child.try_wait().ok().flatten().is_some()
+        {
+            return self.gone().await;
+        }
+        self.dismiss_all();
+        if self.interrupted {
+            return (StopReason::Interrupted, None, None);
+        }
+        let because = self
+            .run
+            .gate
+            .as_ref()
+            .map_or(GATE_CLOSED, GateHost::lost_because);
+        let why = format!("Reno lost its watch over the run: {because}");
+        tracing::warn!(target: "reno_harness::pi", run = %self.run.spec.run_id, "{why}");
+        (StopReason::Error, None, Some(why))
+    }
+
+    /// The gate left more calls unanswered than it may: the extra one is denied and the
+    /// connection is closed with the run's end.
+    fn flooded(&mut self) -> Ended {
+        tracing::warn!(
+            target: "reno_harness::pi",
+            run = %self.run.spec.run_id,
+            "the gate left too many calls unanswered: the run ends"
+        );
+        self.dismiss_all();
+        (
+            StopReason::Error,
+            None,
+            Some(
+                "Reno's gate left too many calls unanswered; Reno denied the extra call and \
+                 closed the gate"
+                    .into(),
+            ),
+        )
     }
 
     fn next_deadline(&self) -> Option<Instant> {
@@ -1156,13 +2075,25 @@ impl<'a> Player<'a> {
         let grace = self.run.interrupt_grace;
         let _ = tokio::time::timeout(grace, async {
             while self.pending.values().any(|p| *p == Pending::Abort) || self.open {
-                match self.run.pi.next_frame().await {
-                    Ok(frame) => {
-                        if self.frame(frame).await.is_err() {
-                            break;
+                tokio::select! {
+                    frame = self.run.pi.next_frame() => match frame {
+                        Ok(frame) => {
+                            if self.frame(frame).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                    Err(_) => break,
+                        Err(_) => break,
+                    },
+                    // A call made while the run is being stopped is denied, never raised.
+                    call = gate_next(self.run.gate.as_mut()), if self.watching => match call {
+                        Some(call) if !call.over_bound => self.decide_call(
+                            call.id,
+                            crate::exec::Decision::Deny,
+                            Some(RUN_STOPPED.into()),
+                        ),
+                        Some(_) => {}
+                        None => self.watching = false,
+                    },
                 }
             }
         })
@@ -1184,10 +2115,20 @@ impl<'a> Player<'a> {
             self.run.unknown.note(&kind);
         }
         for event in events {
+            match &event {
+                ExecEvent::Tool { id, .. } => {
+                    self.running.insert(id.clone());
+                }
+                ExecEvent::ToolResult { id, .. } => {
+                    self.running.remove(id);
+                }
+                _ => {}
+            }
             if !self.emit(event).await {
                 return Err(());
             }
         }
+        self.release_parked().await?;
         match kind {
             "agent_start" => self.open = true,
             "agent_settled" => {
@@ -1271,7 +2212,10 @@ impl<'a> Player<'a> {
                 return Ok(());
             }
         };
-        if self.dialogs.len() >= MAX_OPEN_DIALOGS || self.interrupted {
+        if self.dialogs.len() >= MAX_OPEN_DIALOGS
+            || self.interrupted
+            || dialog.request_id.starts_with(GATE_REQUEST_PREFIX)
+        {
             let _ = self.client().send(dialog::dismissed(&dialog));
             return Ok(());
         }
@@ -1313,6 +2257,23 @@ mod tests {
     }
 
     #[test]
+    fn the_childs_home_is_the_last_one_set_and_none_when_blank_relative_or_missing() {
+        let mut cmd = Command::new("pi");
+        cmd.env_clear();
+        assert_eq!(child_home(&cmd), None);
+        cmd.env("HOME", "");
+        assert_eq!(child_home(&cmd), None);
+        cmd.env("HOME", "relative/home");
+        assert_eq!(child_home(&cmd), None);
+        cmd.env("HOME", "/Users/daemon");
+        assert_eq!(child_home(&cmd), Some(PathBuf::from("/Users/daemon")));
+        cmd.env("HOME", "/bots/own");
+        assert_eq!(child_home(&cmd), Some(PathBuf::from("/bots/own")));
+        cmd.env_remove("HOME");
+        assert_eq!(child_home(&cmd), None);
+    }
+
+    #[test]
     fn the_default_model_is_no_model() {
         assert!(is_default_model(None));
         assert!(is_default_model(Some("")));
@@ -1329,5 +2290,896 @@ mod tests {
         assert!(caps.resume && caps.mcp_injection && caps.deterministic_turn_end);
         assert!(!caps.structured_output && !caps.plan_mode && !caps.model_switch);
         assert!(caps.live_effort.is_none() && caps.live_model_options.is_none());
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod reno_attempt {
+        use std::os::unix::fs::PermissionsExt;
+
+        use reno_proto::{McpServerSpec, RunId};
+
+        use super::super::*;
+
+        fn fake() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("fake-pi.py")
+        }
+
+        struct Bench {
+            dir: tempfile::TempDir,
+        }
+
+        impl Bench {
+            fn new() -> Self {
+                Self {
+                    dir: tempfile::tempdir().unwrap(),
+                }
+            }
+
+            fn log(&self) -> PathBuf {
+                self.dir.path().join("fake-pi.log")
+            }
+
+            fn flavor(&self) -> Flavor {
+                Flavor::Reno {
+                    sessions_root: self.dir.path().join("data/.reno/pi-sessions"),
+                }
+            }
+
+            fn spec(&self, suffix: &str) -> ExecSpec {
+                ExecSpec {
+                    run_id: RunId::from_suffix(suffix).unwrap(),
+                    prompt: "hello".into(),
+                    cwd: self.dir.path().to_path_buf(),
+                    model: None,
+                    instructions: Some("Be brief.".into()),
+                    effort: None,
+                    model_options: Default::default(),
+                    access: AccessMode::Supervised,
+                    sandbox: SandboxLevel::Unrestricted,
+                    resume: None,
+                    mcp: vec![McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/mcp".into(),
+                        args: vec![],
+                        env: Default::default(),
+                    }],
+                    env: [("FAKE_PI_LOG".to_owned(), self.log().display().to_string())].into(),
+                    output_schema: None,
+                    inherit_user_config: false,
+                }
+            }
+
+            async fn launch(&self, spec: &ExecSpec, flavor: &Flavor) -> Pi {
+                let (controls, _handle) = ExecControls::new(4);
+                let (pi, _host) = launch_pi(
+                    &TaskTracker::new(),
+                    &fake(),
+                    spec,
+                    &controls.processes,
+                    flavor,
+                )
+                .await
+                .unwrap();
+                pi
+            }
+
+            /// Let the fake exit, so everything it logged as it started is written.
+            async fn finish(&self, mut pi: Pi) {
+                pi.transport.close_input();
+                pi.child.wait().await.unwrap();
+            }
+
+            /// What each fake logged as it started, oldest first.
+            fn starts(&self) -> Vec<serde_json::Value> {
+                std::fs::read_to_string(self.log())
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.contains("\"argv\""))
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect()
+            }
+
+            /// What the only fake started in this bench logged, once it has exited.
+            async fn started(&self, pi: Pi) -> serde_json::Value {
+                self.finish(pi).await;
+                let mut starts = self.starts();
+                assert_eq!(starts.len(), 1);
+                starts.remove(0)
+            }
+        }
+
+        fn mode(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        fn files_under(dir: &Path) -> Vec<PathBuf> {
+            let mut found = Vec::new();
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    found.extend(files_under(&path));
+                }
+                found.push(path);
+            }
+            found
+        }
+
+        fn argv_value(argv: &[String], flag: &str) -> String {
+            let at = argv.iter().position(|a| a == flag).unwrap();
+            argv[at + 1].clone()
+        }
+
+        #[tokio::test]
+        async fn a_reno_attempt_writes_every_file_under_a_reno_component() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            let reno = scratch.join(".reno");
+            for name in [
+                "gate.mjs",
+                "reno-mcp.mjs",
+                "mcp-servers.json",
+                "instructions.md",
+            ] {
+                assert!(reno.join(name).is_file(), "{name}");
+            }
+            assert!(reno.join("agent").is_dir());
+            for file in files_under(&scratch) {
+                assert!(
+                    file.strip_prefix(&scratch).unwrap().starts_with(".reno"),
+                    "{}",
+                    file.display()
+                );
+            }
+            assert_eq!(mode(&reno), 0o700);
+            assert_eq!(mode(&reno.join("agent")), 0o700);
+            assert_eq!(mode(&reno.join("gate.mjs")), 0o600);
+            bench.started(pi).await;
+        }
+
+        #[tokio::test]
+        async fn the_child_is_told_where_everything_is() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let reno = pi._scratch.as_ref().unwrap().path().join(".reno");
+            let gate = pi.gate_files.as_ref().unwrap();
+            assert_eq!(gate.socket.file_name().unwrap(), "gate.sock");
+            assert_eq!(gate.socket.parent().unwrap().file_name().unwrap(), ".reno");
+            let socket = gate.socket.display().to_string();
+            let nonce = gate.nonce.clone();
+            let started = bench.started(pi).await;
+            let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+            assert_eq!(
+                argv.last().unwrap(),
+                &reno.join("gate.mjs").display().to_string()
+            );
+            assert_eq!(
+                argv_value(&argv, "--session-dir"),
+                bench
+                    .dir
+                    .path()
+                    .join("data/.reno/pi-sessions/run_01HZX9")
+                    .display()
+                    .to_string()
+            );
+            assert!(argv.contains(&"--no-approve".to_owned()));
+            assert!(!argv.contains(&"--no-mcp".to_owned()));
+            assert_eq!(started["gate_socket"], socket);
+            assert_eq!(started["gate_nonce_len"], nonce.len());
+            assert_eq!(
+                started["agent_dir"],
+                reno.join("agent").display().to_string()
+            );
+            for extension in started["extensions"].as_object().unwrap().values() {
+                assert_eq!(extension, true);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_bot_secret_cannot_override_the_gates_socket_or_nonce() {
+            let bench = Bench::new();
+            let spec = with_env(
+                bench.spec("01HZX9"),
+                &[
+                    ("RENO_GATE_SOCKET", "/tmp/not-the-gate.sock"),
+                    ("RENO_GATE_NONCE", "not-the-nonce"),
+                ],
+            );
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let gate = pi.gate_files.as_ref().unwrap();
+            let socket = gate.socket.display().to_string();
+            let nonce = gate.nonce.clone();
+            let started = bench.started(pi).await;
+            assert_eq!(started["gate_socket"], socket);
+            assert_eq!(started["gate_nonce"], nonce);
+        }
+
+        #[tokio::test]
+        async fn the_session_dir_is_the_runs_own_and_private() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let session = bench.dir.path().join("data/.reno/pi-sessions/run_01HZX9");
+            assert!(session.is_dir());
+            assert_eq!(mode(&session), 0o700);
+            assert!(
+                !pi._scratch
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .join("sessions")
+                    .exists()
+            );
+            bench.started(pi).await;
+        }
+
+        #[tokio::test]
+        async fn a_session_dir_that_exists_is_made_private() {
+            let bench = Bench::new();
+            let session = bench.dir.path().join("data/.reno/pi-sessions/run_01HZX9");
+            std::fs::create_dir_all(&session).unwrap();
+            std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            assert_eq!(mode(&session), 0o700);
+            bench.started(pi).await;
+        }
+
+        #[test]
+        fn a_run_id_that_is_not_one_path_component_gets_no_session_dir() {
+            assert!(open_session_dir(Path::new("/data/s"), "../x").is_err());
+            assert!(open_session_dir(Path::new("/data/s"), "a/b").is_err());
+            assert!(open_session_dir(Path::new("/data/s"), "").is_err());
+            assert!(open_session_dir(Path::new("/data/s"), ".").is_err());
+        }
+
+        #[tokio::test]
+        async fn a_second_attempt_of_the_same_run_starts_afresh_but_keeps_the_session() {
+            let bench = Bench::new();
+            let spec = bench.spec("01HZX9");
+            let first = bench.launch(&spec, &bench.flavor()).await;
+            let second = bench.launch(&spec, &bench.flavor()).await;
+            let (a, b) = (
+                first.gate_files.as_ref().unwrap(),
+                second.gate_files.as_ref().unwrap(),
+            );
+            assert_ne!(
+                first._scratch.as_ref().unwrap().path(),
+                second._scratch.as_ref().unwrap().path()
+            );
+            assert_ne!(a.gate, b.gate);
+            assert_ne!(a.agent, b.agent);
+            assert_ne!(a.socket, b.socket);
+            assert_ne!(a.nonce, b.nonce);
+            bench.finish(first).await;
+            bench.finish(second).await;
+            let starts = bench.starts();
+            assert_eq!(starts.len(), 2);
+            let argvs: Vec<Vec<String>> = starts
+                .iter()
+                .map(|started| serde_json::from_value(started["argv"].clone()).unwrap())
+                .collect();
+            assert_eq!(
+                argv_value(&argvs[0], "--session-dir"),
+                argv_value(&argvs[1], "--session-dir")
+            );
+            assert_ne!(argvs[0].last(), argvs[1].last());
+            assert_ne!(starts[0]["gate_socket"], starts[1]["gate_socket"]);
+            assert_ne!(starts[0]["agent_dir"], starts[1]["agent_dir"]);
+        }
+
+        #[test]
+        fn a_private_directory_is_not_made_of_a_symbolic_link() {
+            let base = tempfile::tempdir().unwrap();
+            let target = base.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let link = base.path().join("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let error = create_private_dir(&link).unwrap_err();
+            assert!(error.to_string().contains("symbolic link"), "{error}");
+            assert_eq!(mode(&target), 0o755, "the link's target was left alone");
+            let fresh = base.path().join("fresh/inner");
+            create_private_dir(&fresh).unwrap();
+            assert_eq!(mode(&fresh), 0o700);
+        }
+
+        #[test]
+        fn the_provider_variables_the_no_model_reason_names_are_ones_pi_reads() {
+            for name in PROVIDER_KEY_HINT {
+                assert!(crate::child_env::PI.names.contains(&name), "{name}");
+            }
+        }
+
+        #[test]
+        fn a_long_temp_dir_moves_only_the_socket_to_a_short_private_path() {
+            let base = tempfile::tempdir().unwrap();
+            let mut long = base.path().to_path_buf();
+            while long.as_os_str().len() < 90 {
+                long.push("d".repeat(20));
+            }
+            std::fs::create_dir_all(&long).unwrap();
+            let (scratch, gate) = lay_out(&long).unwrap();
+            assert!(scratch.path().starts_with(&long));
+            assert!(gate.dir.starts_with(scratch.path()));
+            assert!(gate.gate.starts_with(&gate.dir));
+            let socket = gate.socket.to_str().unwrap();
+            assert!(socket.starts_with("/tmp/reno-gate-"), "{socket}");
+            assert!(socket.ends_with("/.reno/gate.sock"), "{socket}");
+            assert!(gate.socket.as_os_str().len() < SUN_PATH_MAX);
+            let socket_dir = gate.socket.parent().unwrap().to_path_buf();
+            assert_eq!(mode(&socket_dir), 0o700);
+            assert_eq!(mode(socket_dir.parent().unwrap()), 0o700);
+            drop(gate);
+            assert!(!socket_dir.exists());
+            drop(scratch);
+        }
+
+        #[test]
+        fn a_short_temp_dir_keeps_the_socket_beside_the_gate() {
+            let base = tempfile::Builder::new()
+                .prefix("r")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let (scratch, gate) = lay_out(base.path()).unwrap();
+            assert_eq!(gate.socket, scratch.path().join(".reno/gate.sock"));
+            assert!(gate._socket_dir.is_none());
+        }
+
+        #[test]
+        fn a_socket_path_of_104_bytes_does_not_fit() {
+            let path_of = |len: usize| PathBuf::from("/".to_owned() + &"s".repeat(len - 1));
+            assert!(fits_sun_path(&path_of(103)));
+            assert!(!fits_sun_path(&path_of(104)));
+        }
+
+        #[tokio::test]
+        async fn the_attempts_files_go_when_it_ends_normally() {
+            let bench = Bench::new();
+            let mut pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            assert!(scratch.exists());
+            pi.transport.close_input();
+            pi.child.wait().await.unwrap();
+            drop(pi);
+            assert!(!scratch.exists());
+        }
+
+        #[tokio::test]
+        async fn the_attempts_files_go_when_pi_is_killed() {
+            let bench = Bench::new();
+            let mut pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            crate::shutdown_child(&mut pi.child, Duration::from_millis(300)).await;
+            drop(pi);
+            assert!(!scratch.exists());
+        }
+
+        #[tokio::test]
+        async fn the_session_dir_outlives_the_attempt() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            bench.started(pi).await;
+            assert!(
+                bench
+                    .dir
+                    .path()
+                    .join("data/.reno/pi-sessions/run_01HZX9")
+                    .is_dir()
+            );
+        }
+
+        #[tokio::test]
+        async fn the_owners_attempt_gets_no_reno_layout_and_no_gate_environment() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &Flavor::Owner).await;
+            assert!(pi.gate_files.is_none());
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            assert!(!scratch.join(".reno").exists());
+            assert!(scratch.join("instructions.md").is_file());
+            let started = bench.started(pi).await;
+            let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+            for absent in ["--session-dir", "--no-approve", "--tools", "builtin:mcp"] {
+                assert!(!argv.contains(&absent.to_owned()), "{absent}");
+            }
+            assert!(argv.contains(&"--no-mcp".to_owned()));
+            assert!(started["gate_socket"].is_null());
+            assert!(started["gate_nonce_len"].is_null());
+        }
+
+        #[tokio::test]
+        async fn only_the_reno_attempts_client_refuses_the_host_bash_command() {
+            let bench = Bench::new();
+            let reno = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let error = reno
+                .transport
+                .client
+                .send(serde_json::json!({"type":"bash","command":"id"}))
+                .unwrap_err();
+            assert!(error.to_string().contains("`bash`"), "{error}");
+            let owner = bench.launch(&bench.spec("01HZX8"), &Flavor::Owner).await;
+            for (pi, flavor) in [(&reno, "reno"), (&owner, "pi")] {
+                let refused = pi
+                    .transport
+                    .client
+                    .send(serde_json::json!({"type":"set_auto_compaction","enabled":false}))
+                    .unwrap_err();
+                assert!(
+                    refused.to_string().contains("write Pi's own settings"),
+                    "{flavor}"
+                );
+            }
+            assert!(
+                owner
+                    .transport
+                    .client
+                    .send(serde_json::json!({"type":"bash","command":"id"}))
+                    .is_ok()
+            );
+            bench.finish(reno).await;
+            bench.finish(owner).await;
+        }
+
+        fn agent_with(auth: Option<&str>) -> tempfile::TempDir {
+            let agent = tempfile::tempdir().unwrap();
+            if let Some(content) = auth {
+                std::fs::write(agent.path().join("auth.json"), content).unwrap();
+            }
+            agent
+        }
+
+        #[test]
+        fn a_missing_auth_file_and_an_empty_object_hold_no_credential() {
+            for content in [None, Some("{}"), Some("{}\n"), Some(" {\n}\n")] {
+                let agent = agent_with(content);
+                assert!(!stored_credential(agent.path()), "{content:?}");
+            }
+            assert!(!stored_credential(Path::new("/nonexistent-agent-dir")));
+        }
+
+        #[test]
+        fn any_other_auth_file_is_taken_for_a_credential() {
+            let planted = r#"{"anthropic":{"type":"api_key","key":"sk-planted"}}"#;
+            let big = format!("{{{}}}", " ".repeat(2 * MAX_AUTH_BYTES as usize));
+            for content in [
+                planted,
+                "[]",
+                "null",
+                "0",
+                "",
+                "{not json",
+                r#"{"":null}"#,
+                big.as_str(),
+            ] {
+                let agent = agent_with(Some(content));
+                assert!(stored_credential(agent.path()), "{content:?}");
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn an_auth_file_that_is_not_a_plain_file_is_taken_for_a_credential() {
+            let agent = tempfile::tempdir().unwrap();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let target = elsewhere.path().join("auth.json");
+            std::fs::write(&target, "{}").unwrap();
+            std::os::unix::fs::symlink(&target, agent.path().join("auth.json")).unwrap();
+            assert!(stored_credential(agent.path()), "a link, even to `{{}}`");
+
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("auth.json")).unwrap();
+            assert!(stored_credential(dir.path()), "a directory");
+
+            let fifo = tempfile::tempdir().unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(fifo.path().join("auth.json"))
+                .status()
+                .unwrap();
+            assert!(made.success());
+            assert!(stored_credential(fifo.path()), "a pipe, without blocking");
+        }
+
+        const BOT_KEY: &str = "sk-test-123456";
+
+        fn with_env(mut spec: ExecSpec, pairs: &[(&str, &str)]) -> ExecSpec {
+            for (name, value) in pairs {
+                spec.env.insert((*name).to_owned(), (*value).to_owned());
+            }
+            spec
+        }
+
+        const BLANKS: [&str; 3] = BLANKED_CREDENTIALS;
+
+        #[test]
+        fn a_reno_attempt_is_restricted_to_the_base_set_and_the_owners_to_pis_list() {
+            let reno = Flavor::Reno {
+                sessions_root: PathBuf::from("/unused"),
+            };
+            assert_eq!(child_driver_env(&reno), crate::child_env::RENO);
+            assert_eq!(child_driver_env(&Flavor::Owner), crate::child_env::PI);
+            assert_ne!(crate::child_env::RENO, crate::child_env::PI);
+        }
+
+        #[tokio::test]
+        async fn a_reno_child_sees_only_the_bots_key_its_own_agent_dir_and_three_blanks() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let agent = pi.gate_files.as_ref().unwrap().agent.display().to_string();
+            let started = bench.started(pi).await;
+            let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
+            let blanks: Vec<String> = BLANKS.iter().map(|n| (*n).to_owned()).collect();
+            let mut expected = vec!["OPENAI_API_KEY".to_owned()];
+            expected.extend(blanks);
+            expected.sort();
+            assert_eq!(names, expected);
+            for blank in BLANKS {
+                let fact = &started["credential_env"][blank];
+                assert_eq!(fact["set"], true, "{blank}");
+                assert_eq!(fact["in_agent_dir"], true, "{blank}");
+                assert_eq!(fact["exists"], false, "{blank}");
+            }
+            assert_eq!(started["agent_dir"], agent);
+        }
+
+        #[tokio::test]
+        async fn a_secret_named_like_a_blank_wins_but_one_named_like_the_agent_dir_does_not() {
+            let bench = Bench::new();
+            let spec = with_env(
+                bench.spec("01HZX9"),
+                &[
+                    ("GOOGLE_APPLICATION_CREDENTIALS", "/bots/own/sa.json"),
+                    ("PI_CODING_AGENT_DIR", "/bots/own/agent"),
+                ],
+            );
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let agent = pi.gate_files.as_ref().unwrap().agent.display().to_string();
+            let started = bench.started(pi).await;
+            let google = &started["credential_env"]["GOOGLE_APPLICATION_CREDENTIALS"];
+            assert_eq!(google["in_agent_dir"], false);
+            assert_eq!(google["set"], true);
+            for other in ["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"] {
+                assert_eq!(started["credential_env"][other]["in_agent_dir"], true);
+            }
+            assert_eq!(started["agent_dir"], agent);
+        }
+
+        #[tokio::test]
+        async fn the_bots_key_is_not_on_the_command_line() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let started = bench.started(pi).await;
+            let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+            assert!(argv.iter().all(|arg| !arg.contains(BOT_KEY)), "{argv:?}");
+        }
+
+        #[tokio::test]
+        async fn a_key_the_child_prints_is_scrubbed_from_the_stderr_tail() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let mut pi = bench.launch(&spec, &bench.flavor()).await;
+            pi.transport
+                .client
+                .request(serde_json::json!({"type": "prompt", "message": "scenario:leak-stderr"}))
+                .unwrap();
+            while let Ok(frame) = pi.next_frame().await {
+                if frame["type"] == "agent_settled" {
+                    break;
+                }
+            }
+            pi.transport.close_input();
+            pi.child.wait().await.unwrap();
+            if let Some(task) = pi.stderr_task.take() {
+                task.await.unwrap();
+            }
+            let tail = pi.stderr_tail.snapshot().unwrap();
+            assert!(tail.contains("rejected key"), "{tail}");
+            assert!(!tail.contains(BOT_KEY), "{tail}");
+            assert!(tail.contains("[secret:OPENAI_API_KEY]"), "{tail}");
+        }
+
+        #[tokio::test]
+        async fn the_owners_child_gets_no_blanks_and_no_agent_dir_of_the_attempts() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let pi = bench.launch(&spec, &Flavor::Owner).await;
+            let started = bench.started(pi).await;
+            for blank in BLANKS {
+                assert_eq!(started["credential_env"][blank]["set"], false, "{blank}");
+            }
+            assert_eq!(
+                started["credential_env"]["PI_CODING_AGENT_DIR"]["in_agent_dir"],
+                false
+            );
+            let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
+            assert!(names.contains(&"OPENAI_API_KEY".to_owned()));
+        }
+
+        mod parked {
+            use serde_json::json;
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            use tokio::net::UnixStream;
+
+            use super::*;
+
+            const NONCE: &str = "parked-nonce";
+
+            /// A player over a real (idle) fake Pi, whose gate is a socket the test writes to.
+            struct Rig {
+                _bench: Bench,
+                run: Option<Run>,
+                events: mpsc::Receiver<ExecEvent>,
+                gate: BufReader<UnixStream>,
+            }
+
+            impl Rig {
+                async fn new() -> Self {
+                    let bench = Bench::new();
+                    let spec = bench.spec("01HZX9");
+                    let pi = bench.launch(&spec, &bench.flavor()).await;
+                    let socket = bench.dir.path().join("rig.sock");
+                    let mut host = GateHost::bind(&socket, NONCE, &TaskTracker::new()).unwrap();
+                    let mut client = UnixStream::connect(&socket).await.unwrap();
+                    let hello = format!("{{\"t\":\"hello\",\"nonce\":\"{NONCE}\"}}\n");
+                    client.write_all(hello.as_bytes()).await.unwrap();
+                    host.arm(Duration::from_secs(10)).await.unwrap();
+                    let (event_tx, events) = mpsc::channel(64);
+                    let run = Run {
+                        pi,
+                        gate: Some(host),
+                        gated: true,
+                        arming_budget: Duration::from_secs(10),
+                        spec,
+                        event_tx,
+                        steering: mpsc::channel(1).1,
+                        answers: mpsc::channel(1).1,
+                        cancel: CancellationToken::new(),
+                        interrupt_grace: Duration::from_millis(200),
+                        kill_grace: Duration::from_millis(200),
+                        unknown: UnknownFrames::new(),
+                    };
+                    Self {
+                        _bench: bench,
+                        run: Some(run),
+                        events,
+                        gate: BufReader::new(client),
+                    }
+                }
+
+                fn player(&mut self) -> Player<'_> {
+                    let state = State::parse(&json!({"sessionId": "s"})).unwrap();
+                    Player::new(self.run.as_mut().unwrap(), state)
+                }
+
+                async fn send_call(&mut self, id: u64, call_id: &str) {
+                    let line = format!(
+                        "{{\"t\":\"call\",\"id\":{id},\"toolName\":\"bash\",\
+                         \"toolCallId\":\"{call_id}\",\"parentToolCallId\":null,\
+                         \"input\":{{\"command\":\"touch x\"}}}}\n"
+                    );
+                    self.gate
+                        .get_mut()
+                        .write_all(line.as_bytes())
+                        .await
+                        .unwrap();
+                }
+
+                async fn decision(&mut self) -> Value {
+                    let mut line = String::new();
+                    tokio::time::timeout(Duration::from_secs(10), self.gate.read_line(&mut line))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    serde_json::from_str(&line).unwrap()
+                }
+
+                fn emitted(&mut self) -> Vec<ExecEvent> {
+                    std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+                }
+            }
+
+            fn tool_start(call_id: &str) -> Value {
+                json!({"type": "tool_execution_start", "toolCallId": call_id,
+                       "toolName": "bash", "args": {"command": "touch x"}})
+            }
+
+            async fn next_call(player: &mut Player<'_>) -> GateCall {
+                let gate = player.run.gate.as_mut();
+                tokio::time::timeout(Duration::from_secs(10), gate_next(gate))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+
+            #[tokio::test]
+            async fn a_call_that_comes_before_its_tool_event_is_raised_only_after_it() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                assert!(player.parked.is_some());
+                player.frame(tool_start("other")).await.unwrap();
+                assert!(
+                    player.parked.is_some(),
+                    "another call's start releases nothing"
+                );
+                player.frame(tool_start("c1")).await.unwrap();
+                assert!(player.parked.is_none());
+                let events = rig.emitted();
+                let kinds: Vec<(&str, &str)> = events
+                    .iter()
+                    .map(|event| match event {
+                        ExecEvent::Tool { id, .. } => ("tool", id.as_str()),
+                        ExecEvent::NeedsApproval { request_id, .. } => {
+                            ("approval", request_id.as_str())
+                        }
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    kinds,
+                    [("tool", "other"), ("tool", "c1"), ("approval", "gate-1")]
+                );
+            }
+
+            #[tokio::test]
+            async fn a_call_whose_tool_event_came_first_is_raised_at_once() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                player.frame(tool_start("c1")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                assert!(player.parked.is_none());
+                assert!(matches!(
+                    rig.emitted().last(),
+                    Some(ExecEvent::NeedsApproval { .. })
+                ));
+            }
+
+            #[tokio::test]
+            async fn a_cancel_while_a_call_is_parked_denies_it_and_raises_nothing() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                player.interrupt().await;
+                assert!(player.parked.is_none());
+                // Its start turning up afterwards raises nothing.
+                player.frame(tool_start("c1")).await.unwrap();
+                let decision = rig.decision().await;
+                assert_eq!(decision["id"], 1);
+                assert_eq!(decision["decision"], "deny");
+                assert_eq!(decision["reason"], RUN_STOPPED);
+                assert!(
+                    rig.emitted()
+                        .iter()
+                        .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
+                );
+            }
+
+            #[tokio::test]
+            async fn a_credential_ends_every_open_call_with_the_credential_reason() {
+                let mut rig = Rig::new().await;
+                for (id, call_id) in [(1, "c1"), (2, "c2"), (3, "c3")] {
+                    rig.send_call(id, call_id).await;
+                }
+                let mut player = rig.player();
+                for call_id in ["c1", "c2"] {
+                    player.frame(tool_start(call_id)).await.unwrap();
+                    let call = next_call(&mut player).await;
+                    player.hold(call).await.unwrap();
+                }
+                let agent = player
+                    .run
+                    .pi
+                    .gate_files
+                    .as_ref()
+                    .unwrap()
+                    .agent
+                    .join(AUTH_FILE);
+                std::fs::write(agent, r#"{"anthropic":{"type":"api_key"}}"#).unwrap();
+                player.frame(tool_start("c3")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                let ended = player.ended().unwrap();
+                assert_eq!(ended.2.as_deref(), Some(CREDENTIAL_APPEARED));
+                let mut decided = Vec::new();
+                for _ in 0..3 {
+                    decided.push(rig.decision().await);
+                }
+                decided.sort_by_key(|decision| decision["id"].as_u64());
+                for (n, decision) in decided.iter().enumerate() {
+                    assert_eq!(decision["id"], n as u64 + 1);
+                    assert_eq!(decision["decision"], "deny");
+                    assert_eq!(decision["reason"], CREDENTIAL_APPEARED, "{decision}");
+                }
+            }
+
+            #[tokio::test]
+            async fn a_call_whose_command_is_not_text_is_denied_and_never_raised() {
+                let mut rig = Rig::new().await;
+                let line = "{\"t\":\"call\",\"id\":1,\"toolName\":\"bash\",\
+                            \"toolCallId\":\"c1\",\"parentToolCallId\":null,\
+                            \"input\":{\"command\":7}}\n";
+                rig.gate.get_mut().write_all(line.as_bytes()).await.unwrap();
+                let mut player = rig.player();
+                player.frame(tool_start("c1")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                let decision = rig.decision().await;
+                assert_eq!(decision["decision"], "deny");
+                assert_eq!(decision["reason"], UNREADABLE_CALL);
+                assert!(
+                    rig.emitted()
+                        .iter()
+                        .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
+                );
+            }
+
+            #[tokio::test]
+            async fn a_call_with_no_usable_home_is_denied_with_a_reason_and_never_raised() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                player.run.pi.home = None;
+                player.frame(tool_start("c1")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                let decision = rig.decision().await;
+                assert_eq!(decision["decision"], "deny");
+                assert_eq!(decision["reason"], UNJUDGEABLE_CALL);
+                assert!(
+                    rig.emitted()
+                        .iter()
+                        .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
+                );
+            }
+
+            #[tokio::test]
+            async fn a_gate_line_that_is_too_long_ends_the_run_saying_so() {
+                let mut rig = Rig::new().await;
+                let mut stream =
+                    std::mem::replace(&mut rig.gate, BufReader::new(UnixStream::pair().unwrap().0))
+                        .into_inner();
+                let flood = tokio::spawn(async move {
+                    let _ = stream
+                        .write_all(&vec![b'a'; gate::MAX_CALL_LINE + 100])
+                        .await;
+                });
+                let mut player = rig.player();
+                assert!(gate_next(player.run.gate.as_mut()).await.is_none());
+                let (stop, _, diagnostic) = player.lost_watch().await;
+                assert_eq!(stop, StopReason::Error);
+                assert_eq!(
+                    diagnostic.as_deref(),
+                    Some("Reno lost its watch over the run: the gate sent a line that is too long")
+                );
+                flood.await.unwrap();
+            }
+
+            #[tokio::test]
+            async fn the_gate_is_not_read_while_a_call_is_parked_and_is_again_once_it_is_released()
+            {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                rig.send_call(2, "c2").await;
+                let mut player = rig.player();
+                assert!(player.reading_gate());
+                let first = next_call(&mut player).await;
+                assert_eq!(first.id, 1);
+                player.hold(first).await.unwrap();
+                assert!(!player.reading_gate(), "paused while c1 waits");
+                player.frame(tool_start("c1")).await.unwrap();
+                assert!(player.reading_gate(), "released");
+                let second = next_call(&mut player).await;
+                assert_eq!(second.id, 2);
+            }
+        }
     }
 }

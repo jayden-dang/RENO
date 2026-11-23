@@ -920,3 +920,112 @@ async fn random_chunkings_of_a_secret_never_leak() {
         );
     }
 }
+
+// ---- the `reno` executor --------------------------------------------------------------------
+
+fn reno_bot(extra: &str) -> reno_proto::defs::DefFile {
+    file(
+        DefKind::Bot,
+        "keeper",
+        &format!("name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"reno\"]\n{extra}\n"),
+    )
+}
+
+fn reno_mock(steps: impl IntoIterator<Item = MockStep>) -> MockExecutor {
+    MockExecutor::new(id("reno")).with_steps(steps)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bot_on_reno_with_a_secret_that_is_not_set_is_refused_at_start_naming_it() {
+    let secrets = Arc::new(FakeSecrets::new().with("NPM_TOKEN", OTHER));
+    let m = reno_mock([]);
+    let port = FakePort::with(vec![reno_bot(
+        "secrets = [\"GITHUB_TOKEN\", \"NPM_TOKEN\"]",
+    )]);
+    let fx = Fx::with_definitions(
+        config(1),
+        registry(std::slice::from_ref(&m)),
+        setup(&port).with_secrets(secrets),
+    )
+    .await;
+
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+
+    assert_secret_missing(&fx, &run).await;
+    let why = done_diagnostic(&fx, &run).await;
+    assert!(why.contains("GITHUB_TOKEN"), "{why}");
+    assert!(
+        !why.contains("NPM_TOKEN"),
+        "a set secret is not reported: {why}"
+    );
+    assert!(!why.contains(OTHER), "{why}");
+    assert!(m.log().specs.is_empty(), "nothing was started");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_in_a_gate_calls_arguments_is_journaled_and_recorded_redacted() {
+    let call = |id: &str, input: serde_json::Value| ExecEvent::NeedsApproval {
+        request_id: id.into(),
+        subject: reno_proto::ApprovalSubject {
+            action: ActionClass::Command,
+            tool: "bash".into(),
+            command: input["command"].as_str().map(str::to_owned),
+            paths: Vec::new(),
+            raw: serde_json::json!({
+                "toolName": "bash",
+                "toolCallId": id,
+                "parentToolCallId": null,
+                "input": input,
+            }),
+        },
+    };
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let m = reno_mock([
+        MockStep::Emit(call(
+            "r1",
+            serde_json::json!({ "command": format!("curl -H 'Authorization: token {TOKEN}' https://example.com") }),
+        )),
+        MockStep::AwaitAnswer {
+            request_id: "r1".into(),
+        },
+        MockStep::Emit(call(
+            "r2",
+            serde_json::json!({ "command": "echo hi", "env": { "TOKEN": TOKEN }, "note": [TOKEN] }),
+        )),
+        MockStep::AwaitAnswer {
+            request_id: "r2".into(),
+        },
+    ]);
+    let port = FakePort::with(vec![
+        reno_bot("secrets = [\"GITHUB_TOKEN\"]\naccess = \"full_access\""),
+        file(DefKind::Policy, "policy", "default = \"ask\"\n"),
+    ]);
+    let fx = Fx::with_definitions(
+        config(1),
+        registry(std::slice::from_ref(&m)),
+        setup(&port).with_secrets(secrets),
+    )
+    .await;
+
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    let journal = fx.journal_with_done(&run).await;
+    let shown = serde_json::to_string(&journal).unwrap();
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(
+        shown.matches("[secret:GITHUB_TOKEN]").count() >= 4,
+        "the command and the raw call of each request: {shown}"
+    );
+    let history = fx.kernel.approval_history(Some(&run), None).await.unwrap();
+    assert_eq!(history.len(), 2);
+    let kept = serde_json::to_string(&history).unwrap();
+    assert!(!kept.contains(TOKEN), "{kept}");
+    let events = fx
+        .store
+        .events_since(reno_proto::Seq(0), 100_000)
+        .await
+        .unwrap();
+    assert!(!format!("{events:?}").contains(TOKEN));
+}

@@ -16,7 +16,7 @@ use reno_harness::conformance::{CaseId, Status, Target, TargetReport, render_tab
 
 use targets::{
     claude_target, codex_target, cursor_target, devin_target, grok_target, hermes_target,
-    mock_target, muse_target, opencode_target, pi_target, registry_target,
+    mock_target, muse_target, opencode_target, pi_target, registry_target, reno_target,
 };
 
 async fn run_all(targets: Vec<Target>) -> Vec<TargetReport> {
@@ -51,6 +51,7 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         devin_target(),
         hermes_target(),
         pi_target(),
+        reno_target(),
         muse_target(),
         cursor_target(),
         opencode_target(),
@@ -115,6 +116,12 @@ async fn the_mock_and_every_driver_pass_the_suite() {
             ("deny-message", "skip"),
             ("plan-mode", "skip"),
         ])
+    );
+    // Reno's Pi asks for every tool call in supervised mode, and runs bots only, so the owner's
+    // config never reaches it and there is nothing for the user-config case to show.
+    assert_eq!(
+        labels("reno"),
+        pinned(&[("user-config", "skip"), ("plan-mode", "skip")])
     );
     // Muse claims full access only, like Pi, and does not isolate the owner's tools.
     assert_eq!(
@@ -185,6 +192,13 @@ async fn the_mock_and_every_driver_pass_the_suite() {
     }
     assert_eq!(
         counted("pi").into_iter().collect::<Vec<_>>(),
+        vec![
+            ("message_update:audio_delta".to_owned(), 1),
+            ("type:agent_teleported".to_owned(), 1),
+        ]
+    );
+    assert_eq!(
+        counted("reno").into_iter().collect::<Vec<_>>(),
         vec![
             ("message_update:audio_delta".to_owned(), 1),
             ("type:agent_teleported".to_owned(), 1),
