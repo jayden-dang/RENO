@@ -279,16 +279,23 @@ fn wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways(cx: &mut TestAppC
     })));
     let (_view, vcx) = probe(cx, &text, host, Appearance::Light);
     let line_bounds = || registry.take().last().expect("painted code line").bounds;
-    let scroll_sideways = |vcx: &mut VisualTestContext| {
+    let scroll = |vcx: &mut VisualTestContext, delta| {
         let at = vcx
             .debug_bounds("md-card")
             .expect("painted code block")
             .center();
-        wheel_by(vcx, at, gpui::point(px(-120.0), px(0.0)), false);
+        wheel_by(vcx, at, delta, false);
     };
+    let sideways = gpui::point(px(-120.0), px(0.0));
 
     let unwrapped = line_bounds();
-    scroll_sideways(vcx);
+    scroll(vcx, gpui::point(px(0.0), px(-120.0)));
+    assert_eq!(
+        line_bounds().left(),
+        unwrapped.left(),
+        "vertical wheel input leaves the code's horizontal position fixed"
+    );
+    scroll(vcx, sideways);
     let scrolled = line_bounds();
     assert!(
         scrolled.left() < unwrapped.left(),
@@ -302,7 +309,7 @@ fn wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways(cx: &mut TestAppC
         wrapped.size.height > unwrapped.size.height,
         "the long line wraps onto more rows"
     );
-    scroll_sideways(vcx);
+    scroll(vcx, sideways);
     assert_eq!(
         line_bounds().left(),
         wrapped.left(),
@@ -313,7 +320,7 @@ fn wrap_toggles_long_lines_and_unwrapped_lines_scroll_sideways(cx: &mut TestAppC
     draw(vcx);
     let unwrapped_again = line_bounds();
     assert_eq!(unwrapped_again.size.height, unwrapped.size.height);
-    scroll_sideways(vcx);
+    scroll(vcx, sideways);
     assert!(
         line_bounds().left() < unwrapped_again.left(),
         "unwrapping restores sideways scrolling"
