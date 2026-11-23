@@ -38,7 +38,7 @@ use super::kit::MONO;
 use super::theme::Theme;
 use crate::transcript::Key;
 use crate::vm::anchor::{Prose, footnote_marker, task_box_text};
-use crate::vm::selection::{Selection, Slot};
+use crate::vm::selection::Selection;
 
 pub(crate) mod chrome;
 pub(crate) mod image;
@@ -203,9 +203,8 @@ pub(crate) struct SelectHost {
 impl SelectHost {
     fn selected_at(&self, atom: usize) -> Option<Range<usize>> {
         let (selection, ordinal) = self.selected?;
-        let section = self.anchors.section_at(atom);
-        let source = &self.anchors.sections.get(section)?.source;
-        selection.within_source(ordinal, Slot::prose(section), source)
+        let section = self.anchors.section_at(atom)?;
+        selection.within_source(ordinal, section.slot, &section.source)
     }
 }
 
@@ -682,7 +681,7 @@ fn front_matter(lines: &[(String, Range<usize>)], env: &Env) -> AnyElement {
                         layout,
                         (
                             select.key,
-                            Slot::prose(select.anchors.section_at(atom)),
+                            select.anchors.slot_at(atom),
                             Map::Linear {
                                 base: source.start + cell.start,
                                 len: text.len(),
@@ -1004,7 +1003,7 @@ fn tracked(env: &Env, element: AnyElement, layout: gpui::TextLayout, segs: Vec<S
             layout,
             (
                 select.key,
-                Slot::prose(select.anchors.section_at(segs[0].atom)),
+                select.anchors.slot_at(segs[0].atom),
                 Map::Atoms {
                     atoms: select.anchors.atoms.clone(),
                     segs,

@@ -36,7 +36,9 @@ impl RunScreen {
         }
         // A reply's markdown is parsed when its item is first drawn, not when the row arrives.
         if let Some(Row::Prose { key, text }) = items::row_of(&self.rows, 0, &item) {
-            let (key, len) = (*key, text.len());
+            let key = *key;
+            let text = self.shown_reply(key, text);
+            let len = text.len();
             let live = item.decor.last && self.is_live(cx);
             let tree = Self::parse_reply(&mut self.markdown, &mut self.live_reply, key, text, live);
             self.probe_files(key, len, &tree, cx);

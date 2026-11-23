@@ -29,6 +29,8 @@ pub(crate) enum Kind {
     Step,
     /// The entry's own text: a prompt, a reply, reasoning.
     Whole,
+    /// A span of a footnote, ordered within its definition.
+    NoteSpan(usize),
     /// What a step printed, as far as it is shown.
     Output,
     /// "Output was cut: 482 KB total": no source.
@@ -63,8 +65,14 @@ impl Slot {
     pub(crate) const WHOLE: Self = Self::new(0, Kind::Whole);
     pub(crate) const HEAD: Self = Self::new(0, Kind::Head);
 
-    pub(crate) const fn prose(section: usize) -> Self {
-        Self::new(section, Kind::Whole)
+    pub(crate) const fn prose(from: usize) -> Self {
+        Self::new(from, Kind::Whole)
+    }
+
+    pub(crate) const fn note(note_start: usize, span_start: usize) -> Self {
+        // Source offsets fit below this bit. Hoisted notes sort after all body prose.
+        let hoisted = 1 << (usize::BITS - 1);
+        Self::new(hoisted | note_start, Kind::NoteSpan(span_start))
     }
 }
 
@@ -271,9 +279,8 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
             prose
                 .sections
                 .into_iter()
-                .enumerate()
-                .map(|(ix, section)| Text {
-                    slot: Slot::prose(ix),
+                .map(|section| Text {
+                    slot: section.slot,
                     sourced: true,
                     span: section.source,
                     source: source.clone(),
@@ -604,6 +611,44 @@ mod tests {
 
     fn drag(a: Pos, b: Pos) -> Selection {
         Selection { anchor: a, head: b }
+    }
+
+    #[test]
+    fn revealing_more_prose_keeps_a_hoisted_note_selected_at_its_source_offsets() {
+        let prefix = "Reference[^n].\n\n[^n]: a **bounded** wait\n\n";
+        let before = [prose(2, prefix)];
+        let after = [prose(2, &format!("{prefix}Later prose has arrived."))];
+        let world = World::new();
+        let start = prefix.find("**bounded**").unwrap();
+        let end = start + "**bounded**".len();
+        let selection = world.run(&before, |_, shown| {
+            let slot = texts_of(&before[0], shown)
+                .into_iter()
+                .find(|text| text.span.contains(&start))
+                .unwrap()
+                .slot;
+            drag(
+                Pos {
+                    ordinal: 0,
+                    slot,
+                    off: start,
+                },
+                Pos {
+                    ordinal: 0,
+                    slot,
+                    off: end,
+                },
+            )
+        });
+        assert_eq!(world.copy(&before, selection), "bounded");
+        assert_eq!(world.copy(&after, selection), "bounded");
+        assert_eq!(
+            world.anchors(&before, selection),
+            world.anchors(&after, selection)
+        );
+        world.run(&after, |entries, shown| {
+            assert_eq!(anchor::source_of(&selection, entries, shown), "**bounded**");
+        });
     }
 
     #[test]

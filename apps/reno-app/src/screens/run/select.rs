@@ -25,7 +25,7 @@ use crate::actions::{
     End, FocusRunInput, Home, LineDown, LineUp, NextMenuTarget, NextPrompt, OpenMenu, PageDown,
     PageUp, PrevPrompt, PreviousMenuTarget,
 };
-use crate::transcript::{Key, ToolEntry};
+use crate::transcript::{Key, Row, ToolEntry};
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
 use crate::ui::theme::Theme;
@@ -173,13 +173,13 @@ impl RunScreen {
         let anchors = self.markdown.peek(&key).map(|stream| stream.anchors());
         let at = |off, end| {
             let section = anchors.as_ref().and_then(|prose| {
-                prose.sections.iter().position(|section| {
+                prose.sections.iter().find(|section| {
                     section.source.contains(&off) || (end && section.source.end == off)
                 })
             });
             Pos {
                 ordinal,
-                slot: Slot::prose(section.unwrap_or(0)),
+                slot: section.map_or(Slot::WHOLE, |section| section.slot),
                 off,
             }
         };
@@ -552,7 +552,21 @@ impl RunScreen {
             tool_inputs: &tool_inputs,
             tree: &tree,
         };
-        f(&selection::reading(&self.rows, &open), &shown)
+        let prefix = self.rows.last().and_then(|row| {
+            let Row::Prose { key, text } = row else {
+                return None;
+            };
+            let shown = self.shown_reply(*key, text);
+            (shown.len() < text.len()).then(|| Row::Prose {
+                key: *key,
+                text: shown.to_owned(),
+            })
+        });
+        let mut entries = selection::reading(&self.rows, &open);
+        if let (Some(last), Some(prefix)) = (entries.last_mut(), prefix.as_ref()) {
+            last.row = prefix;
+        }
+        f(&entries, &shown)
     }
 
     /// What ⌘C copies: the selected text in order, with a blank line between entries.

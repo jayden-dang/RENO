@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
@@ -72,6 +72,18 @@ pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.
 const CHANGES_EVERY: Duration = Duration::from_secs(1);
+
+/// Leave one tick for the phase of a timer already running when a delta arrives.
+const REVEAL_EVERY: Duration = Duration::from_millis(16);
+const REVEAL_WINDOW: Duration = Duration::from_millis(184);
+/// Put the first few characters on screen as soon as a new reply starts.
+const REVEAL_FIRST_BYTES: usize = 32;
+
+struct StreamReveal {
+    key: Key,
+    shown: usize,
+    deadline: Instant,
+}
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
@@ -267,6 +279,9 @@ pub(crate) struct RunScreen {
     /// first drawn. The oldest go when the thread is long; the reply still arriving never does.
     markdown: Lru<Key, Streaming>,
     live_reply: Option<Key>,
+    reveal: Option<StreamReveal>,
+    reveal_through: Option<Seq>,
+    reveal_task: Option<Task<()>>,
     /// Folds, tool groups, reasoning rows and long messages that are open: the owner's, and those
     /// find opened (which it closes again).
     open: Opens<Key>,
@@ -424,7 +439,9 @@ impl RunScreen {
                 screen.update(cx, |this, cx| this.note_place(cx)).ok();
             });
         });
-        let tool_events = output::ToolEvents::from_loaded(store.read(cx).state().transcript(&run));
+        let loaded_transcript = store.read(cx).state().transcript(&run);
+        let tool_events = output::ToolEvents::from_loaded(loaded_transcript);
+        let reveal_through = loaded_transcript.and_then(|transcript| transcript.highest);
         let mut screen = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 this.refresh(cx);
@@ -452,6 +469,9 @@ impl RunScreen {
             facts: Facts::default(),
             markdown: Lru::new(PARSED_REPLIES, usize::MAX),
             live_reply: None,
+            reveal: None,
+            reveal_through,
+            reveal_task: None,
             open: Opens::default(),
             streaming_open: None,
             reasoning_shut: HashSet::new(),
@@ -876,9 +896,11 @@ impl RunScreen {
             .approvals_for(&self.run)
             .cloned()
             .collect();
+        let previous = self.tail_reply();
         if !self.advance_latest(routing.clone(), &pending, cx) {
             self.rebuild_rows(routing, &pending, cx);
         }
+        self.track_reply_reveal(previous, cx);
         self.expand_new_tools(cx);
         self.track_streaming_reasoning(cx);
         self.sync_visuals(cx);
@@ -888,6 +910,131 @@ impl RunScreen {
         self.follow_place();
         self.follow_changes(cx);
         self.follow_thread(cx);
+    }
+
+    fn tail_reply(&self) -> Option<(Key, usize)> {
+        match self.rows.last()? {
+            Row::Prose { key, text } if self.run_of(*key) == self.run => Some((*key, text.len())),
+            _ => None,
+        }
+    }
+
+    fn track_reply_reveal(&mut self, previous: Option<(Key, usize)>, cx: &mut Context<Self>) {
+        let received_delta = self
+            .store
+            .read(cx)
+            .state()
+            .transcript(&self.run)
+            .is_some_and(|journal| {
+                let after = journal
+                    .events
+                    .partition_point(|(seq, _)| Some(*seq) <= self.reveal_through);
+                self.reveal_through = journal.highest;
+                journal.events[after..]
+                    .iter()
+                    .any(|(_, event)| matches!(event, reno_proto::ExecEvent::Text { .. }))
+            });
+        let Some((key, received)) = self.tail_reply().filter(|_| self.is_live(cx)) else {
+            self.finish_reply_reveal();
+            return;
+        };
+        if cx.reduce_motion() {
+            self.finish_reply_reveal();
+            return;
+        }
+        let local = |key: Key| key.order().map_or(key.0, |(_, seq)| seq);
+        if let Some(reveal) = &mut self.reveal {
+            if local(reveal.key) == local(key) {
+                reveal.key = key;
+            } else {
+                self.finish_reply_reveal();
+            }
+        }
+        let previous = previous.filter(|(old, _)| local(*old) == local(key));
+        let before = previous.map_or(0, |(_, len)| len);
+        if received < before {
+            self.finish_reply_reveal();
+        }
+        if !received_delta || received <= before {
+            return;
+        }
+        let deadline = cx.background_executor().now() + REVEAL_WINDOW;
+        let shown = if let Some(reveal) = &self.reveal {
+            reveal.shown
+        } else if previous.is_some() {
+            before
+        } else if let Some(Row::Prose { text, .. }) = self.rows.last() {
+            text.floor_char_boundary(REVEAL_FIRST_BYTES.min(received))
+        } else {
+            return;
+        };
+        if shown >= received {
+            return;
+        }
+        self.reveal = Some(StreamReveal {
+            key,
+            shown,
+            deadline,
+        });
+        if self.reveal_task.is_none() {
+            self.reveal_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(REVEAL_EVERY).await;
+                    if !this.update(cx, Self::reveal_tick).unwrap_or(false) {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn reveal_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(reveal), Some(Row::Prose { key, text })) =
+            (self.reveal.as_mut(), self.rows.last())
+        else {
+            self.finish_reply_reveal();
+            return false;
+        };
+        let remaining = reveal
+            .deadline
+            .saturating_duration_since(cx.background_executor().now());
+        let frames = remaining.as_millis().div_ceil(REVEAL_EVERY.as_millis()) as usize + 1;
+        if cx.reduce_motion() || reveal.key != *key || frames == 1 {
+            self.finish_reply_reveal();
+            cx.notify();
+            return false;
+        }
+        let step = text.len().saturating_sub(reveal.shown).div_ceil(frames);
+        reveal.shown = text.ceil_char_boundary(reveal.shown.saturating_add(step));
+        if reveal.shown == text.len() {
+            self.finish_reply_reveal();
+            cx.notify();
+            return false;
+        }
+        let key = *key;
+        self.remeasure(key);
+        cx.notify();
+        true
+    }
+
+    fn finish_reply_reveal(&mut self) {
+        self.reveal_task = None;
+        if let Some(reveal) = self.reveal.take() {
+            self.remeasure(reveal.key);
+        }
+    }
+
+    fn shown_reply<'a>(&self, key: Key, text: &'a str) -> &'a str {
+        self.reveal
+            .as_ref()
+            .filter(|reveal| reveal.key == key)
+            .and_then(|reveal| text.get(..reveal.shown))
+            .unwrap_or(text)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reveal_pending(&self) -> bool {
+        self.reveal_task.is_some()
     }
 
     /// Chips under the transcript's agent text change those rows' height: measure the prose rows
@@ -1844,12 +1991,16 @@ impl RunScreen {
             MenuItem::Copy => self.copy_selection(cx),
             MenuItem::CopyAsMarkdown => self.copy_markdown(cx),
             MenuItem::CopyMessage => {
-                if let Some(Row::Prose { text, .. }) = menu
+                if let Some(Row::Prose { key, text }) = menu
                     .reply
                     .and_then(|key| self.items.item_of(key))
                     .and_then(|ix| self.items.row(&self.rows, ix))
                 {
-                    output::copy(cx, text.clone(), "Message copied");
+                    output::copy(
+                        cx,
+                        self.shown_reply(*key, text).to_owned(),
+                        "Message copied",
+                    );
                 }
             }
             MenuItem::ScrollToTop => self.key_home(cx),
@@ -1936,6 +2087,9 @@ impl Render for RunScreen {
         }
         self.remeasure_settled(cx);
         self.follow_thinking_setting(cx);
+        if cx.reduce_motion() {
+            self.finish_reply_reveal();
+        }
         self.recheck_view(window, cx);
         // The texts file themselves again as the list paints them.
         self.begin_paint();
