@@ -676,13 +676,13 @@ enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, str
 
 **Depends-on:** Task 14, Task 16
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `right_click_offers_open_copy_link_copy_copy_as_markdown_copy_message_and_scroll_as_they_apply`;
   - `shift_f10_opens_it_and_arrows_and_enter_pick`.
   Run: `cargo test -p reno-app menu` — expect: fails.
-- [ ] **Step 2:** Implement the menu, and `MenuState` in `ui/menu.rs`. Run: `cargo test -p reno-app` — expect: pass,
+- [x] **Step 2:** Implement the menu, and `MenuState` in `ui/menu.rs`. Run: `cargo test -p reno-app` — expect: pass,
   with the sidebar menu tests unchanged.
-- [ ] **Step 3:** Commit `transcript: a context menu with Open, Copy Link, Copy, Copy as Markdown and Copy Message`.
+- [x] **Step 3:** Commit `transcript: a context menu with Open, Copy Link, Copy, Copy as Markdown and Copy Message`.
 
 _Requirements: TRANSCRIPT-8.3_
 
