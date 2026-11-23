@@ -1,9 +1,5 @@
-//! The MOCKED agent-posted-visuals contract (ROAD-33): an image or a diagram an agent posts into
-//! a run, shown in the transcript after the entry it was posted with. The real daemon sends none
-//! of this yet, so nothing but the fake daemon implements [`VisualDesk`]; the app reads visuals
-//! only through this one seam (`Store::run_visuals`). The real contract replaces the trait's
-//! implementation (and, when the wire types exist, these structs); no app screen changes. No
-//! protocol or daemon change lives here.
+//! The mocked visuals contract: images or diagrams an agent posts into a run and images returned
+//! by tool calls. The fake daemon implements [`VisualDesk`]; the app reads it through `Store`.
 
 use reno_proto::{RunId, Seq};
 
@@ -36,9 +32,11 @@ pub struct Visual {
     pub kind: VisualKind,
 }
 
-/// The seam: the visuals a run posted.
+/// The posted visuals and tool-result images of a run.
 pub trait VisualDesk: Send + Sync {
     /// The run's visuals in the order they were posted (and so by `after`). Empty when the run
     /// posted none.
     fn visuals(&self, run: &RunId) -> Vec<Visual>;
+
+    fn tool_images(&self, run: &RunId, call: &str) -> Vec<VisualImage>;
 }

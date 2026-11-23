@@ -39,6 +39,7 @@ pub(crate) struct Capabilities {
     /// Images and diagrams an agent posts into a run (ROAD-33: the fake's mocked visual desk, see
     /// `reno_client::visuals`). Without it the transcript shows none and no placeholder.
     pub(crate) agent_visuals: bool,
+    pub(crate) tool_images: bool,
 }
 
 /// One row of the "+" menu.
@@ -92,6 +93,7 @@ impl Capabilities {
         thread_edit: false,
         daemon_restart: false,
         agent_visuals: false,
+        tool_images: false,
     };
 
     /// The fake daemon: every not-yet control is on.
@@ -108,6 +110,7 @@ impl Capabilities {
         thread_edit: true,
         daemon_restart: true,
         agent_visuals: true,
+        tool_images: true,
     };
 
     /// The approval panel's ▾ menu: the note needs a daemon that takes one; the similar-command
