@@ -23,7 +23,7 @@ const FEATURES: &[&str] = &[
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask lives in the workspace")
+        .unwrap_or_else(|| panic!("xtask lives in the workspace"))
         .to_path_buf()
 }
 
@@ -34,12 +34,12 @@ fn page_source() -> String {
 }
 
 fn wiring(source: &str) -> serde_json::Value {
-    let start = source
-        .find(r#"<script type="application/json" id="wiring">"#)
-        .expect("wiring data");
-    let from = start + r#"<script type="application/json" id="wiring">"#.len();
-    let end = source[from..].find("</script>").expect("wiring script end");
-    let raw = &source[from..from + end];
+    let (_, script) = source
+        .split_once(r#"<script type="application/json" id="wiring">"#)
+        .unwrap_or_else(|| panic!("missing wiring data"));
+    let (raw, _) = script
+        .split_once("</script>")
+        .unwrap_or_else(|| panic!("missing wiring script end"));
     assert!(
         source.contains(r#"JSON.parse(document.getElementById("wiring").textContent)"#),
         "the page must render the wiring data"
@@ -54,7 +54,7 @@ fn wiring(source: &str) -> serde_json::Value {
         source.contains("edge.reason"),
         "each line must carry its reason"
     );
-    serde_json::from_str(raw).expect("wiring json")
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("invalid wiring JSON: {error}"))
 }
 
 fn git_show(sha: &str, file: &str) -> String {
@@ -62,9 +62,10 @@ fn git_show(sha: &str, file: &str) -> String {
         .args(["show", &format!("{sha}:{file}")])
         .current_dir(workspace())
         .output()
-        .expect("git show");
+        .unwrap_or_else(|error| panic!("run git show {sha}:{file}: {error}"));
     assert!(output.status.success(), "git show {sha}:{file} failed");
-    String::from_utf8(output.stdout).expect("utf8")
+    String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("git show {sha}:{file} returned invalid UTF-8: {error}"))
 }
 
 fn rust_at(sha: &str) -> std::collections::BTreeSet<String> {
@@ -72,10 +73,10 @@ fn rust_at(sha: &str) -> std::collections::BTreeSet<String> {
         .args(["ls-tree", "-r", "--name-only", sha])
         .current_dir(workspace())
         .output()
-        .expect("git ls-tree");
+        .unwrap_or_else(|error| panic!("run git ls-tree {sha}: {error}"));
     assert!(output.status.success(), "git ls-tree failed");
     String::from_utf8(output.stdout)
-        .expect("utf8")
+        .unwrap_or_else(|error| panic!("git ls-tree {sha} returned invalid UTF-8: {error}"))
         .lines()
         .filter(|line| line.ends_with(".rs"))
         .filter(|line| {

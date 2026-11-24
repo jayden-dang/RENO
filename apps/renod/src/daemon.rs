@@ -549,7 +549,7 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
     s.installs.wait().await;
     // The shells are the daemon's children: they end with it.
     s.terminals.shutdown().await;
-    drop(s.power.take());
+    s.power = None;
     let report = s.kernel.shutdown().await;
     s.fs_defs.shutdown().await;
     s.fs_watch.shutdown().await;

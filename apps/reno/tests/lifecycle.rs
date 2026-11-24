@@ -337,12 +337,15 @@ fn install_hands_the_daemon_to_launchd_and_uninstall_takes_it_back() {
         said.contains(written.trim_end()),
         "the printed plist is the written one"
     );
-    let lint = Command::new("plutil")
-        .arg("-lint")
-        .arg(&plist_path)
-        .output()
-        .unwrap();
-    assert!(lint.status.success(), "{}", text(&lint.stdout));
+    #[cfg(target_os = "macos")]
+    {
+        let lint = Command::new("plutil")
+            .arg("-lint")
+            .arg(&plist_path)
+            .output()
+            .unwrap();
+        assert!(lint.status.success(), "{}", text(&lint.stdout));
+    }
 
     // launchd now owns a different process, and `status` says so.
     let owned = world.pid();
