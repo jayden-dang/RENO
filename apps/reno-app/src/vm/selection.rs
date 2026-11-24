@@ -14,7 +14,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 
-use crate::transcript::{Key, Row};
+use crate::transcript::{Key, Row, ToolEntry};
 use crate::vm::anchor::{self, Atom};
 use crate::vm::changes as facts;
 use crate::vm::convo;
@@ -29,10 +29,21 @@ pub(crate) enum Kind {
     Step,
     /// The entry's own text: a prompt, a reply, reasoning.
     Whole,
+    /// A span of a footnote, ordered within its definition.
+    NoteSpan(usize),
     /// What a step printed, as far as it is shown.
     Output,
     /// "Output was cut: 482 KB total": no source.
     Cut,
+    /// A tool's input stays in its own slot when the result arrives.
+    ToolInput(usize, ToolInputPart),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum ToolInputPart {
+    File,
+    Body,
+    Raw,
 }
 
 /// One of an entry's texts: the `n`th of its kind (a tool group has a step line, output and cut
@@ -48,11 +59,21 @@ impl Slot {
         Self { n, kind }
     }
 
+    pub(crate) const fn tool_input(step: usize, call: usize, part: ToolInputPart) -> Self {
+        Self::new(step, Kind::ToolInput(call, part))
+    }
+
     pub(crate) const WHOLE: Self = Self::new(0, Kind::Whole);
     pub(crate) const HEAD: Self = Self::new(0, Kind::Head);
 
-    pub(crate) const fn prose(section: usize) -> Self {
-        Self::new(section, Kind::Whole)
+    pub(crate) const fn prose(from: usize) -> Self {
+        Self::new(from, Kind::Whole)
+    }
+
+    pub(crate) const fn note(note_start: usize, span_start: usize) -> Self {
+        // Source offsets fit below this bit. Hoisted notes sort after all body prose.
+        let hoisted = 1 << (usize::BITS - 1);
+        Self::new(hoisted | note_start, Kind::NoteSpan(span_start))
     }
 }
 
@@ -209,12 +230,37 @@ impl Text {
     }
 }
 
+pub(crate) type ToolInputs = Vec<Option<ToolInput>>;
+
+pub(crate) struct ToolInput {
+    pub(crate) body: Option<String>,
+    pub(crate) raw: Option<String>,
+    pub(crate) card: ToolCard,
+}
+
+pub(crate) enum ToolCard {
+    Command(reno_proto::Seq),
+    Edit(Option<String>),
+    Patch(Vec<Range<usize>>),
+    Read,
+    Other,
+}
+
+impl ToolInput {
+    pub(crate) fn file_label(call: &ToolEntry) -> &str {
+        call.label
+            .split_once(' ')
+            .map_or(call.label.as_str(), |(_, path)| path)
+    }
+}
+
 /// What of the transcript is open, and the parsed reply of a prose row: what decides which
 /// texts a row shows.
 pub(crate) struct Shown<'a> {
     pub(crate) open: &'a dyn Fn(Key) -> bool,
-    pub(crate) output_open: &'a dyn Fn(&str) -> bool,
-    pub(crate) output_full: &'a dyn Fn(&str) -> bool,
+    pub(crate) output_open: &'a dyn Fn(Key, &str) -> bool,
+    pub(crate) output_full: &'a dyn Fn(Key, &str) -> bool,
+    pub(crate) tool_inputs: &'a dyn Fn(Key, &[ToolEntry]) -> ToolInputs,
     pub(crate) tree: &'a dyn Fn(Key, &str) -> BlockTree,
 }
 
@@ -243,9 +289,8 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
             prose
                 .sections
                 .into_iter()
-                .enumerate()
-                .map(|(ix, section)| Text {
-                    slot: Slot::prose(ix),
+                .map(|section| Text {
+                    slot: section.slot,
                     sourced: true,
                     span: section.source,
                     source: source.clone(),
@@ -261,31 +306,55 @@ pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
             }
             out
         }
-        Row::Worked { secs, .. } => {
+        Row::Worked { secs, rows, .. } if !rows.is_empty() => {
             vec![Text::sourceless(Slot::HEAD, &convo::worked_label(*secs))]
         }
-        Row::Tools { calls, .. } => {
+        Row::Tools { key, calls } => {
             let mut out = Vec::new();
-            for (n, line) in convo::step_lines(calls).iter().enumerate() {
+            let inputs = (shown.tool_inputs)(*key, calls);
+            for (n, (line, range)) in convo::step_lines(calls)
+                .into_iter()
+                .zip(convo::line_calls(calls))
+                .enumerate()
+            {
                 out.push(Text::sourceless(Slot::new(n, Kind::Step), &line.text));
-                let call = line
-                    .call
-                    .as_ref()
-                    .and_then(|id| calls.iter().find(|c| &c.id == id));
-                let Some((call, output)) = call.and_then(|c| Some((c, c.output.as_ref()?))) else {
-                    continue;
-                };
-                if !(shown.output_open)(&call.id) {
-                    continue;
+                if line.call.is_some()
+                    && let Some(call) = calls.get(range.start)
+                    && let Some(output) = &call.output
+                    && (shown.output_open)(*key, &call.id)
+                {
+                    let body = if (shown.output_full)(*key, &call.id) {
+                        output.text.strip_suffix('\n').unwrap_or(&output.text)
+                    } else {
+                        facts::fold(&output.text, facts::OUTPUT_LINES).shown
+                    };
+                    out.push(Text::plain(Slot::new(n, Kind::Output), body));
+                    if let Some(note) = facts::cut_note(output) {
+                        out.push(Text::sourceless(Slot::new(n, Kind::Cut), &note));
+                    }
                 }
-                let body = if (shown.output_full)(&call.id) {
-                    output.text.strip_suffix('\n').unwrap_or(&output.text)
-                } else {
-                    facts::fold(&output.text, facts::OUTPUT_LINES).shown
-                };
-                out.push(Text::plain(Slot::new(n, Kind::Output), body));
-                if let Some(note) = facts::cut_note(output) {
-                    out.push(Text::sourceless(Slot::new(n, Kind::Cut), &note));
+                for at in range {
+                    let Some(input) = inputs.get(at).and_then(Option::as_ref) else {
+                        continue;
+                    };
+                    if line.call.is_none() {
+                        out.push(Text::plain(
+                            Slot::tool_input(n, at, ToolInputPart::File),
+                            ToolInput::file_label(&calls[at]),
+                        ));
+                    }
+                    if let Some(body) = &input.body {
+                        out.push(Text::plain(
+                            Slot::tool_input(n, at, ToolInputPart::Body),
+                            body,
+                        ));
+                    }
+                    if let Some(raw) = &input.raw {
+                        out.push(Text::plain(
+                            Slot::tool_input(n, at, ToolInputPart::Raw),
+                            raw,
+                        ));
+                    }
                 }
             }
             out
@@ -527,12 +596,13 @@ mod tests {
             let open = |k: Key| self.open.contains(&k);
             let entries = reading(rows, &open);
             let tree = |_: Key, text: &str| reno_markdown::parse_full(text);
-            let out_open = |id: &str| self.outputs.contains(id);
-            let never = |_: &str| false;
+            let out_open = |_: Key, id: &str| self.outputs.contains(id);
+            let never = |_: Key, _: &str| false;
             let shown = Shown {
                 open: &open,
                 output_open: &out_open,
                 output_full: &never,
+                tool_inputs: &|_, _| Vec::new(),
                 tree: &tree,
             };
             f(&entries, &shown)
@@ -557,6 +627,44 @@ mod tests {
 
     fn drag(a: Pos, b: Pos) -> Selection {
         Selection { anchor: a, head: b }
+    }
+
+    #[test]
+    fn revealing_more_prose_keeps_a_hoisted_note_selected_at_its_source_offsets() {
+        let prefix = "Reference[^n].\n\n[^n]: a **bounded** wait\n\n";
+        let before = [prose(2, prefix)];
+        let after = [prose(2, &format!("{prefix}Later prose has arrived."))];
+        let world = World::new();
+        let start = prefix.find("**bounded**").unwrap();
+        let end = start + "**bounded**".len();
+        let selection = world.run(&before, |_, shown| {
+            let slot = texts_of(&before[0], shown)
+                .into_iter()
+                .find(|text| text.span.contains(&start))
+                .unwrap()
+                .slot;
+            drag(
+                Pos {
+                    ordinal: 0,
+                    slot,
+                    off: start,
+                },
+                Pos {
+                    ordinal: 0,
+                    slot,
+                    off: end,
+                },
+            )
+        });
+        assert_eq!(world.copy(&before, selection), "bounded");
+        assert_eq!(world.copy(&after, selection), "bounded");
+        assert_eq!(
+            world.anchors(&before, selection),
+            world.anchors(&after, selection)
+        );
+        world.run(&after, |entries, shown| {
+            assert_eq!(anchor::source_of(&selection, entries, shown), "**bounded**");
+        });
     }
 
     #[test]

@@ -189,7 +189,7 @@ fn a_selection_is_anchored_to_entry_keys_with_source_byte_ranges(cx: &mut TestAp
     let (_store, _root, vcx, screen) = open(cx);
     let (from, to) = centres(vcx, &screen);
     drag(vcx, from, to);
-    let anchors = screen.read_with(vcx, |s, _| s.selection_anchors());
+    let anchors = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
     let keys: Vec<_> = screen.read_with(vcx, |s, _| s.rows().iter().map(Row::key).collect());
     assert_eq!(anchors.len(), 2, "{anchors:?}");
     assert_eq!(anchors[0].key, keys[0]);
@@ -276,7 +276,7 @@ fn a_selection_holds_while_its_start_scrolls_out_of_view_and_the_drag_scrolls_th
     vcx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
     assert!(screen.read_with(vcx, |s, _| s.has_selection()));
     let copied = screen
-        .read_with(vcx, |s, _| s.selected_text())
+        .read_with(vcx, |s, cx| s.selected_text(cx))
         .expect("text");
     assert!(copied.starts_with("draw") || PROMPT.contains(copied.split("\n\n").next().unwrap()));
 }
@@ -579,5 +579,701 @@ fn triple_click_in_a_reply_copies_the_closing_marker_of_the_paragraph_as_markdow
     assert!(
         source.ends_with("at `src/supervisor.rs:42`"),
         "the closing backtick comes with the row: {source:?}"
+    );
+}
+
+fn right_click(vcx: &mut VisualTestContext, at: Point<gpui::Pixels>) {
+    vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    draw(vcx);
+}
+
+fn choose_menu_row(vcx: &mut VisualTestContext, row: &str) {
+    crate::tests::click(vcx, row);
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+}
+
+#[gpui::test]
+fn right_click_offers_copy_message_on_a_reply_and_copy_on_a_selection(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let (prompt, reply) = centres(vcx, &screen);
+
+    right_click(vcx, prompt);
+    assert!(painted(vcx, "transcript-menu"));
+    for row in [
+        "transcript-menu-open",
+        "transcript-menu-copy-link",
+        "transcript-menu-copy",
+        "transcript-menu-copy-as-markdown",
+        "transcript-menu-copy-message",
+    ] {
+        assert!(!painted(vcx, row), "{row}");
+    }
+    assert!(painted(vcx, "transcript-menu-scroll-to-bottom"));
+
+    right_click(vcx, reply);
+    assert!(painted(vcx, "transcript-menu-copy-message"));
+    choose_menu_row(vcx, "transcript-menu-copy-message");
+    assert_eq!(clipboard(vcx).as_deref(), Some(RENDER_REPLY));
+
+    let at = on_text(vcx, &screen, FIRST_PARAGRAPH);
+    press(vcx, at, 3, Modifiers::none());
+    right_click(vcx, reply);
+    choose_menu_row(vcx, "transcript-menu-copy");
+    assert_eq!(clipboard(vcx).as_deref(), Some(FIRST_PARAGRAPH));
+
+    right_click(vcx, reply);
+    choose_menu_row(vcx, "transcript-menu-copy-as-markdown");
+    assert_eq!(clipboard(vcx).as_deref(), Some(FIRST_PARAGRAPH));
+
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()));
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-as-markdown"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert_eq!(clipboard(vcx).as_deref(), Some(FIRST_PARAGRAPH));
+}
+
+fn append_reply(
+    vcx: &mut VisualTestContext,
+    store: &Entity<Store>,
+    screen: &Entity<RunScreen>,
+    reply: &str,
+) {
+    wait_for(vcx, "the seeded reply is complete", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.rows().iter().any(|row| matches!(row, Row::Done { .. }))
+        })
+    });
+    append_reply_events(vcx, store, reply);
+    screen.update(vcx, |s, cx| s.jump_to_latest(cx));
+    draw(vcx);
+}
+
+fn append_reply_events<C: gpui::AppContext>(cx: &mut C, store: &Entity<Store>, reply: &str) {
+    use reno_proto::{ExecEvent, Seq, SessionRef, StopReason};
+
+    let run = run_id(RENDER_RUN);
+    for event in [
+        ExecEvent::Resumed {
+            from_attempt: 0,
+            session: SessionRef("menu".into()),
+        },
+        ExecEvent::Text { text: reply.into() },
+        ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        },
+    ] {
+        store.update(cx, |s, cx| {
+            let seq = s
+                .state()
+                .transcript(&run)
+                .and_then(|t| t.highest)
+                .and_then(Seq::next)
+                .unwrap_or(Seq(1));
+            s.apply(
+                reno_client::Update::RunEvent {
+                    run: run.clone(),
+                    seq,
+                    event,
+                },
+                cx,
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn the_transcript_menu_copies_link_destinations_and_opens_them_through_their_handlers(
+    cx: &mut TestAppContext,
+) {
+    const WEB: &str = "https://example.com/docs?q=1";
+    const FILE: &str = "./src/supervisor.rs#L42";
+    const INLINE: &str = "src/supervisor.rs:42";
+    const IMAGE: &str = "https://example.com/badge.png";
+    const REPLY: &str = "See [the guide](https://example.com/docs?q=1), [source file](./src/supervisor.rs#L42), and `src/supervisor.rs:42`.
+
+Write to [the mailbox](mailto:team@example.com).
+
+![remote badge](https://example.com/badge.png)";
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, REPLY);
+    wait_for(vcx, "the worktree file resolved", |vcx| {
+        screen.read_with(vcx, |s, cx| s.file_resolves("src/supervisor.rs", cx))
+    });
+
+    let web = on_text(vcx, &screen, "the guide");
+    let file = on_text(vcx, &screen, "source file");
+    let inline = on_text(vcx, &screen, INLINE);
+    let image = vcx.debug_bounds("md-image-card").unwrap().center();
+    for (at, url) in [(web, WEB), (file, FILE), (inline, INLINE), (image, IMAGE)] {
+        right_click(vcx, at);
+        assert!(painted(vcx, "transcript-menu-open"), "{url}");
+        assert!(painted(vcx, "transcript-menu-copy-message"), "{url}");
+        choose_menu_row(vcx, "transcript-menu-copy-link");
+        assert_eq!(clipboard(vcx).as_deref(), Some(url));
+    }
+    for text in ["the mailbox", "Write to"] {
+        let at = on_text(vcx, &screen, text);
+        right_click(vcx, at);
+        assert!(painted(vcx, "transcript-menu-copy-message"));
+        assert!(!painted(vcx, "transcript-menu-open"));
+        assert!(!painted(vcx, "transcript-menu-copy-link"));
+        choose_menu_row(vcx, "transcript-menu-copy-message");
+    }
+
+    assert!(
+        recording.opened.borrow().is_empty(),
+        "right-clicking and copying do not activate a link"
+    );
+    right_click(vcx, web);
+    choose_menu_row(vcx, "transcript-menu-open");
+    assert_eq!(recording.opened.borrow().as_slice(), [WEB]);
+
+    right_click(vcx, file);
+    choose_menu_row(vcx, "transcript-menu-open");
+    let (active, opened) = screen.read_with(vcx, |s, _| {
+        (
+            s.panel_state().active().clone(),
+            s.files_model()
+                .and_then(|model| model.doc().map(|doc| (doc.path.clone(), doc.line))),
+        )
+    });
+    assert_eq!(active, crate::panel::surface::Surface::Files);
+    assert_eq!(opened, Some(("src/supervisor.rs".to_owned(), Some(42))));
+}
+
+#[gpui::test]
+fn the_transcript_menu_copies_a_selection_across_a_hoisted_footnote_in_reading_order(
+    cx: &mut TestAppContext,
+) {
+    const REPLY: &str = "Read this[^note].
+
+[^note]: Café from the real note.
+
+Skip this line.
+
+**Only the painted tail.**";
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, REPLY);
+    let (tail, note) = screen.read_with(vcx, |s, _| {
+        (
+            s.painted_point("the painted tail.", 0).unwrap(),
+            s.painted_point("Café from", "Café".len()).unwrap(),
+        )
+    });
+    vcx.simulate_mouse_down(tail, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(note, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(note, MouseButton::Left, Modifiers::none());
+    draw(vcx);
+
+    for (row, expected) in [
+        (
+            "transcript-menu-copy",
+            "the painted tail.
+
+Café",
+        ),
+        (
+            "transcript-menu-copy-as-markdown",
+            "the painted tail.**
+
+[^note]: Café",
+        ),
+        ("transcript-menu-copy-message", REPLY),
+    ] {
+        right_click(vcx, note);
+        choose_menu_row(vcx, row);
+        assert_eq!(clipboard(vcx).as_deref(), Some(expected));
+    }
+}
+
+#[gpui::test]
+fn shift_f10_opens_the_transcript_menu_and_arrows_and_enter_pick(cx: &mut TestAppContext) {
+    use crate::panel::persist::{PanelStore, path_in};
+    use crate::panel::saved::Saved;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = path_in(tmp.path());
+    cx.update(|cx| Saved::install(path.clone(), cx));
+    let (_store, _root, vcx, screen) = open(cx);
+    let key = screen.read_with(vcx, |s, _| s.panel_key().clone());
+    let persisted = |vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| Saved::flush(cx));
+        PanelStore::load(&path)
+            .0
+            .get(&key)
+            .and_then(|panel| panel.place)
+    };
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "transcript-menu"),
+        "the composer owns the keyboard"
+    );
+    for _ in 0..12 {
+        vcx.simulate_keystrokes("shift-tab");
+        draw(vcx);
+        vcx.simulate_keystrokes("shift-f10");
+        draw(vcx);
+        if painted(vcx, "transcript-menu") {
+            break;
+        }
+    }
+    assert!(
+        painted(vcx, "transcript-menu"),
+        "reachable without a pointer or selection"
+    );
+
+    let before = screen.read_with(vcx, |s, _| s.scroll_offset());
+    vcx.simulate_keystrokes("down up escape");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert_eq!(screen.read_with(vcx, |s, _| s.scroll_offset()), before);
+
+    // Escape restores transcript focus, so Down scrolls again after the menu closes.
+    vcx.simulate_keystrokes("down");
+    draw(vcx);
+    assert_ne!(screen.read_with(vcx, |s, _| s.scroll_offset()), before);
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-scroll-to-top"));
+    assert!(painted(vcx, "transcript-menu-scroll-to-bottom"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert!(screen.read_with(vcx, |s, _| s.is_following_tail()));
+    assert_eq!(persisted(vcx), None);
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-scroll-to-top"));
+    assert!(!painted(vcx, "transcript-menu-scroll-to-bottom"));
+    vcx.simulate_keystrokes("up enter");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    assert_eq!(screen.read_with(vcx, |s, _| s.scroll_offset()), before);
+    let place = screen.read_with(vcx, |s, _| s.saved_place());
+    assert!(place.is_some());
+    assert_eq!(persisted(vcx), place);
+}
+
+#[gpui::test]
+fn tab_navigation_between_the_composer_and_transcript_stays_within_the_run(
+    cx: &mut TestAppContext,
+) {
+    let (_store, _root, vcx, screen) = open(cx);
+    let transcript_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| screen.read(cx).transcript_focus.is_focused(window))
+    };
+    let composer_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window))
+    };
+    assert!(composer_focused(vcx));
+    for _ in 0..2 {
+        vcx.simulate_keystrokes("shift-tab");
+        draw(vcx);
+        assert!(transcript_focused(vcx));
+        for _ in 0..12 {
+            vcx.simulate_keystrokes("shift-tab");
+            draw(vcx);
+        }
+        assert!(transcript_focused(vcx));
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+        assert!(composer_focused(vcx));
+        for _ in 0..12 {
+            vcx.simulate_keystrokes("tab");
+            draw(vcx);
+        }
+        assert!(composer_focused(vcx));
+    }
+
+    let composer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+    vcx.simulate_keystrokes("cmd-a");
+    vcx.simulate_input("@src/superv");
+    wait_for(vcx, "the composer suggests the worktree file", |vcx| {
+        composer.read_with(vcx, |c, _| {
+            c.completion_labels()
+                .is_some_and(|labels| labels == ["src/supervisor.rs"])
+        })
+    });
+    vcx.simulate_keystrokes("tab");
+    draw(vcx);
+    assert!(composer_focused(vcx));
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.text().to_owned()),
+        "@src/supervisor.rs "
+    );
+}
+
+const CONTEXT_LINK: &str = "https://example.com/keyboard";
+const CONTEXT_REPLY: &str = "Read the complete documentation on this subject here: [the keyboard guide](https://example.com/keyboard).";
+
+#[gpui::test]
+fn transcript_menu_replacement_restores_the_original_keyboard_focus(cx: &mut TestAppContext) {
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, CONTEXT_REPLY);
+    let link = on_text(vcx, &screen, "the keyboard guide");
+
+    vcx.simulate_keystrokes("shift-tab shift-f10");
+    draw(vcx);
+    assert!(!vcx.debug_bounds("transcript-menu").unwrap().contains(&link));
+    right_click(vcx, link);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    assert!(recording.opened.borrow().is_empty());
+
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-menu"));
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(
+        painted(vcx, "transcript-menu"),
+        "Escape restored transcript focus"
+    );
+
+    vcx.simulate_keystrokes("escape tab");
+    draw(vcx);
+    let viewport = vcx.debug_bounds("transcript").unwrap();
+    right_click(vcx, viewport.origin + point(px(22.0), px(12.0)));
+    assert!(!vcx.debug_bounds("transcript-menu").unwrap().contains(&link));
+    right_click(vcx, link);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(vcx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window)));
+    assert!(recording.opened.borrow().is_empty());
+}
+
+#[gpui::test]
+fn transcript_menu_link_press_dismisses_the_existing_sidebar_popup(cx: &mut TestAppContext) {
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, CONTEXT_REPLY);
+    let thread = store.read_with(vcx, |s, _| {
+        s.thread_of(&run_id(RENDER_RUN)).unwrap().clone()
+    });
+    root.update_in(vcx, |root, window, cx| {
+        root.sidebar_act(
+            crate::ui::sidebar::Act::Menu(thread, Some(point(px(10.0), px(120.0)))),
+            window,
+            cx,
+        );
+    });
+    draw(vcx);
+    assert!(painted(vcx, "sidebar-menu"));
+    let link = on_text(vcx, &screen, "the keyboard guide");
+    assert!(!vcx.debug_bounds("sidebar-menu").unwrap().contains(&link));
+
+    right_click(vcx, link);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    assert!(
+        !painted(vcx, "sidebar-menu"),
+        "the prior popup closes on the outside press"
+    );
+    assert!(recording.opened.borrow().is_empty());
+    choose_menu_row(vcx, "transcript-menu-copy-link");
+    vcx.simulate_click(link, Modifiers::none());
+    draw(vcx);
+    assert_eq!(recording.opened.borrow().as_slice(), [CONTEXT_LINK]);
+}
+
+#[gpui::test]
+fn transcript_menu_keyboard_targets_replies_and_links_from_the_composer(cx: &mut TestAppContext) {
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, CONTEXT_REPLY);
+    assert!(!screen.read_with(vcx, |s, _| s.has_selection()));
+
+    vcx.simulate_keystrokes("shift-tab alt-up");
+    draw(vcx);
+    assert!(
+        painted(vcx, "transcript-context-link"),
+        "the visible link is outlined"
+    );
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    assert!(painted(vcx, "transcript-menu-open"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert_eq!(clipboard(vcx).as_deref(), Some(CONTEXT_LINK));
+    assert!(recording.opened.borrow().is_empty());
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert_eq!(recording.opened.borrow().as_slice(), [CONTEXT_LINK]);
+
+    vcx.simulate_keystrokes("alt-up");
+    draw(vcx);
+    assert!(
+        painted(vcx, "transcript-context-reply"),
+        "the visible reply is outlined"
+    );
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-message"));
+    assert!(!painted(vcx, "transcript-menu-copy-link"));
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert_eq!(clipboard(vcx).as_deref(), Some(CONTEXT_REPLY));
+
+    vcx.simulate_keystrokes("alt-down");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-context-link"));
+    vcx.simulate_keystrokes("home");
+    draw(vcx);
+    assert!(!painted(vcx, "transcript-context-link"));
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu"));
+    assert!(!painted(vcx, "transcript-menu-copy-link"));
+}
+
+#[gpui::test]
+fn resolving_an_earlier_path_keeps_the_keyboard_menu_on_its_selected_web_link(
+    cx: &mut TestAppContext,
+) {
+    const PATH: &str = "many/f000.txt";
+    const LINK: &str = "https://example.com/after";
+    const REPLY: &str = "See `many/f000.txt` and [the web guide](https://example.com/after).";
+    let recording = std::rc::Rc::new(crate::links::fake::Recording::default());
+    cx.update(|cx| crate::links::install(cx, recording.clone()));
+    let (store, _root, vcx, screen) = open(cx);
+    wait_for(vcx, "the seeded reply is complete", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.rows().iter().any(|row| matches!(row, Row::Done { .. }))
+        })
+    });
+    vcx.simulate_keystrokes("shift-tab");
+    draw(vcx);
+
+    // Keep the foreground turn open between painting the new reply and sending keys. The
+    // actual fs.list task can run on Tokio, and its result updates the screen on a later turn.
+    vcx.update(|window, cx| {
+        append_reply_events(cx, &store, REPLY);
+        screen.update(cx, |s, cx| {
+            s.refresh(cx);
+            s.jump_to_latest(cx);
+        });
+        window.draw(cx).clear(cx);
+        assert!(screen.read(cx).painted_point("the web guide", 4).is_some());
+        assert!(!screen.read(cx).file_resolves(PATH, cx));
+        let mut key = |name| {
+            window.dispatch_keystroke(gpui::Keystroke::parse(name).unwrap(), cx);
+            window.draw(cx).clear(cx);
+        };
+        for name in ["alt-up", "shift-f10", "down", "enter"] {
+            key(name);
+        }
+    });
+    assert_eq!(
+        clipboard(vcx).as_deref(),
+        Some(LINK),
+        "the selected web target before resolution"
+    );
+    wait_for(
+        vcx,
+        "the worktree listing resolved the earlier path",
+        |vcx| screen.read_with(vcx, |s, cx| s.file_resolves(PATH, cx)),
+    );
+
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    assert!(painted(vcx, "transcript-menu-copy-link"));
+    vcx.simulate_keystrokes("down enter");
+    draw(vcx);
+    assert_eq!(
+        clipboard(vcx).as_deref(),
+        Some(LINK),
+        "the same web target after resolution"
+    );
+    vcx.simulate_keystrokes("shift-f10");
+    draw(vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert_eq!(recording.opened.borrow().as_slice(), [LINK]);
+}
+
+#[gpui::test]
+fn checkbox_source_queries_highlight_the_drawn_boxes(cx: &mut TestAppContext) {
+    const REPLY: &str = "- [x] Lowercase marker\n- [X] Uppercase marker\n- [ ] Unchecked marker";
+    let (store, _root, vcx, screen) = open(cx);
+    append_reply(vcx, &store, &screen, REPLY);
+
+    let query = |vcx: &mut VisualTestContext, text, expected| {
+        vcx.simulate_keystrokes("cmd-f");
+        draw(vcx);
+        vcx.simulate_keystrokes("cmd-a");
+        vcx.simulate_input(text);
+        draw(vcx);
+        assert_eq!(
+            screen
+                .read_with(vcx, |s, _| s.find_count_label())
+                .as_deref(),
+            Some(expected),
+        );
+    };
+    let color_near_box = |vcx: &mut VisualTestContext, item, current| {
+        let body = screen.read_with(vcx, |s, _| s.painted_point(item, 0).unwrap());
+        vcx.update(|window, cx| {
+            let theme = crate::ui::theme::current(cx);
+            let color = crate::ui::find::hit_style(&theme, current).background_color;
+            window.painted_quads().into_iter().any(|quad| {
+                let b = quad.bounds.map(|n| px(n.0 / window.scale_factor()));
+                quad.background.as_solid() == color
+                    && b.right() < body.x
+                    && b.left() > body.x - px(32.0)
+                    && b.size.width >= px(7.0)
+                    && b.top() < body.y
+                    && body.y < b.bottom()
+            })
+        })
+    };
+
+    query(vcx, "[x]", "1 of 2");
+    assert!(color_near_box(vcx, "Lowercase marker", true));
+    assert!(color_near_box(vcx, "Uppercase marker", false));
+    vcx.simulate_keystrokes("enter cmd-g");
+    draw(vcx);
+    assert_eq!(
+        screen
+            .read_with(vcx, |s, _| s.find_count_label())
+            .as_deref(),
+        Some("2 of 2")
+    );
+    assert!(color_near_box(vcx, "Uppercase marker", true));
+    assert!(color_near_box(vcx, "Lowercase marker", false));
+
+    vcx.simulate_keystrokes("cmd-alt-c");
+    query(vcx, "[X]", "1 of 1");
+    assert!(color_near_box(vcx, "Uppercase marker", true));
+    assert!(!color_near_box(vcx, "Lowercase marker", false));
+    assert!(!color_near_box(vcx, "Lowercase marker", true));
+    query(vcx, "[x]", "1 of 1");
+    assert!(color_near_box(vcx, "Lowercase marker", true));
+    assert!(!color_near_box(vcx, "Uppercase marker", false));
+    assert!(!color_near_box(vcx, "Uppercase marker", true));
+    query(vcx, "[ ]", "1 of 1");
+    assert!(color_near_box(vcx, "Unchecked marker", true));
+
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    let body = screen.read_with(vcx, |s, _| s.painted_point("Uppercase marker", 0).unwrap());
+    press(vcx, point(body.x - px(24.0), body.y), 2, Modifiers::none());
+    assert_eq!(copy_with_the_keyboard(vcx), "☑ ");
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    assert_eq!(clipboard(vcx).as_deref(), Some("[X]"));
+}
+
+#[gpui::test]
+fn panned_nested_table_margins_pick_visible_text_and_keep_existing_endpoints(
+    cx: &mut TestAppContext,
+) {
+    let (store, _root, vcx, screen) = open(cx);
+    let reply = format!(
+        "> - A nested table\n>\n>   | ghost | hiddenprefix nearword visibleword {} |\n>   | --- | --- |\n>   | seed | body |",
+        "trailing ".repeat(24)
+    );
+    append_reply(vcx, &store, &screen, &reply);
+
+    let table = vcx.debug_bounds("md-table-scroll").expect("nested table");
+    let transcript = vcx.debug_bounds("transcript").unwrap();
+    let glyph = |vcx: &VisualTestContext, text, index| {
+        screen.read_with(vcx, |s, _| {
+            s.painted_point(text, index)
+                .unwrap_or_else(|| panic!("missing layout for {text:?}"))
+        })
+    };
+    let margin = point(table.left() - px(14.0), glyph(vcx, "ghost", 4).y);
+    assert!(transcript.contains(&margin) && !table.contains(&margin));
+
+    let pan = |vcx: &mut VisualTestContext, x| {
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: table.center(),
+            delta: gpui::ScrollDelta::Pixels(point(x, px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Started,
+            source: gpui::ScrollSource::Pointer,
+        });
+        draw(vcx);
+    };
+    let from_ghost = margin.x - glyph(vcx, "ghost", 4).x;
+    pan(vcx, from_ghost);
+    assert!(glyph(vcx, "ghost", "ghost".len()).x < table.left());
+    assert!(
+        (glyph(vcx, "ghost", 4).x - margin.x).abs() < px(2.0),
+        "the fully hidden word is laid out immediately under the list inset"
+    );
+    press(vcx, margin, 2, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "hiddenprefix",
+        "the nested table margin selects the nearest visible word"
+    );
+
+    let from_near = table.left() - glyph(vcx, "nearword", 0).x;
+    pan(vcx, from_near);
+    assert!(glyph(vcx, "hiddenprefix", "hiddenprefix".len()).x < table.left());
+    assert!(glyph(vcx, "nearword", 2).x > table.left());
+    press(vcx, margin, 2, Modifiers::none());
+    assert_eq!(
+        copy_with_the_keyboard(vcx),
+        "nearword",
+        "a margin double-click on a partly clipped cell maps to visible text"
+    );
+
+    let end = glyph(vcx, "visibleword", "visibleword".len());
+    assert!(table.contains(&end));
+    drag(vcx, end, margin);
+    let copied = copy_with_the_keyboard(vcx);
+    assert!(
+        copied.starts_with("nearword ") && copied.contains("visibleword"),
+        "the drag starts its copied range at the visible edge: {copied:?}"
+    );
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    let source = clipboard(vcx).unwrap();
+    assert!(source.starts_with("nearword ") && source.contains("visibleword"));
+    let saved = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
+    assert!(!saved.is_empty());
+
+    let click_margin = point(table.left() - px(32.0), margin.y);
+    assert!(transcript.contains(&click_margin) && !table.contains(&click_margin));
+    let near_end = glyph(vcx, "visibleword", "visibleword".len() - 1);
+    pan(vcx, click_margin.x - near_end.x);
+    assert!(glyph(vcx, "visibleword", "visibleword".len()).x < table.left());
+    assert!(
+        (glyph(vcx, "visibleword", "visibleword".len() - 1).x - click_margin.x).abs() < px(2.0)
+    );
+    assert_eq!(
+        screen.read_with(vcx, |s, cx| s.selection_anchors(cx)),
+        saved
+    );
+    assert_eq!(copy_with_the_keyboard(vcx), copied);
+    screen.update(vcx, |s, cx| s.copy_markdown(cx));
+    assert_eq!(clipboard(vcx).as_deref(), Some(source.as_str()));
+
+    press(vcx, click_margin, 1, Modifiers::none());
+    assert!(
+        screen
+            .read_with(vcx, |s, cx| s.selection_anchors(cx))
+            .is_empty(),
+        "a single click cannot keep the selection hidden underneath the margin"
     );
 }

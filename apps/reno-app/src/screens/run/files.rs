@@ -196,7 +196,7 @@ impl RunScreen {
 
     // --- talking to the daemon ----------------------------------------------------------------
 
-    pub(super) fn files_call<T, Fut>(
+    fn files_call<T, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         call: impl FnOnce(Client, RunId) -> Fut,
@@ -213,14 +213,20 @@ impl RunScreen {
             );
             return;
         };
-        let task = Tokio::spawn(cx, call(client, self.run.clone()));
+        let tab = self.files.as_ref().map(|files| files.search.entity_id());
+        let task = Tokio::spawn(cx, call(client, self.files_run.clone()));
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(error)) => Err(fail_of(&error)),
                 Err(error) => Err(Fail::Other(error.to_string())),
             };
-            this.update(cx, |screen, cx| done(screen, result, cx)).ok();
+            this.update(cx, |screen, cx| {
+                if screen.files.as_ref().map(|files| files.search.entity_id()) == tab {
+                    done(screen, result, cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -407,7 +413,7 @@ impl RunScreen {
         let Some(client) = self.store.read(cx).client() else {
             return;
         };
-        let run = self.run.clone();
+        let run = self.files_run.clone();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<WatchMsg>();
         let pump = Tokio::spawn(cx, async move {
             match client.watch_fs(run).await {
@@ -500,6 +506,21 @@ impl RunScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_file_at_from(&self.run.clone(), path, line, window, cx);
+    }
+
+    pub(super) fn open_file_at_from(
+        &mut self,
+        run: &RunId,
+        path: &str,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if &self.files_run != run {
+            self.files_run = run.clone();
+            self.files = None;
+        }
         self.open_surface(Surface::Files, window, cx);
         // The tab is made when it first shows; it may not be yet in a window that has not drawn.
         self.panel_shown = true;

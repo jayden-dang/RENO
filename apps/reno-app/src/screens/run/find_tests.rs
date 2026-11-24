@@ -5,7 +5,10 @@
 
 use std::time::Duration;
 
-use gpui::{AppContext as _, Entity, ListOffset, TestAppContext, VisualTestContext, px};
+use gpui::{
+    AppContext as _, Entity, KeyUpEvent, Keystroke, ListOffset, Modifiers, TestAppContext,
+    VisualTestContext, px,
+};
 use reno_client::Update;
 use reno_client::fake::FakeConfig;
 use reno_proto::{ActionClass, ExecEvent, RunId, SessionRef, StopReason, ToolCall};
@@ -1870,7 +1873,9 @@ fn footnotes_draw_at_the_reply_end_and_a_reference_click_scrolls_to_its_note(
         s.select_source(key, start..start + target.len())
     });
     assert_eq!(
-        screen.read_with(vcx, |s, _| s.selected_text()).as_deref(),
+        screen
+            .read_with(vcx, |s, cx| s.selected_text(cx))
+            .as_deref(),
         Some(target)
     );
     vcx.simulate_keystrokes("cmd-f");
@@ -1941,7 +1946,7 @@ fn dragging_in_either_direction_across_a_hoisted_note_copies_the_visible_ranges(
             vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
             Some("the painted tail.\n\nCafé")
         );
-        let anchors = screen.read_with(vcx, |s, _| s.selection_anchors());
+        let anchors = screen.read_with(vcx, |s, cx| s.selection_anchors(cx));
         assert_eq!(anchors.len(), 2);
         assert_eq!(anchors[0].key, anchors[1].key);
         assert_eq!(anchors[0].range.as_ref(), Some(&(from..REPLY.len())));
@@ -1958,4 +1963,202 @@ fn dragging_in_either_direction_across_a_hoisted_note_copies_the_visible_ranges(
             Some("the painted tail.**\n\n[^note]: Café")
         );
     }
+}
+
+#[gpui::test]
+fn find_reveals_a_clipped_table_match_again_after_manual_pan(cx: &mut TestAppContext) {
+    use reno_client::fake::transcript::{RENDER2_REPLY, RENDER2_RUN};
+
+    const QUERY: &str = "owns";
+    let (_store, root, vcx) = setup(cx);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run_id(RENDER2_RUN), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .expect("the second Render check is open");
+    let reply = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |s, _| {
+            s.items().items.iter().enumerate().find_map(|(ix, item)| {
+                let Row::Prose { text, .. } = s.items().row(s.rows(), ix)? else {
+                    return None;
+                };
+                (item.visual.is_none() && text.as_str() == RENDER2_REPLY).then_some(ix)
+            })
+        })
+    };
+    wait_for(vcx, "the rich reply arrived", |vcx| reply(vcx).is_some());
+    let ix = reply(vcx).unwrap();
+    screen.update(vcx, |s, cx| {
+        s.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+        s.note_place(cx);
+        cx.notify();
+    });
+    draw(vcx);
+
+    let match_is_visible = |vcx: &mut VisualTestContext| {
+        let table = vcx.debug_bounds("md-table-scroll").expect("table viewport");
+        let glyph_edges = screen.read_with(vcx, |s, _| {
+            [0, QUERY.len()].map(|index| s.painted_point(QUERY, index).expect("laid-out match"))
+        });
+        let inside_view = screen.read_with(vcx, |s, _| {
+            let view = s.list.viewport_bounds();
+            glyph_edges
+                .iter()
+                .all(|edge| table.contains(edge) && view.contains(edge))
+        });
+        inside_view
+            && vcx.update(|window, cx| {
+                let theme = crate::ui::theme::current(cx);
+                let view = table.scale(window.scale_factor());
+                window.painted_quads().into_iter().any(|quad| {
+                    quad.background.as_solid() == Some(theme.accent)
+                        && view.contains(&quad.bounds.origin)
+                        && view.contains(&quad.bounds.bottom_right())
+                })
+            })
+    };
+
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    type_query(vcx, QUERY);
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 1"));
+    assert!(
+        !match_is_visible(vcx),
+        "the search starts at the table's left edge"
+    );
+
+    for keys in ["enter", "enter", "cmd-g"] {
+        vcx.simulate_keystrokes(keys);
+        for _ in 0..3 {
+            draw(vcx);
+        }
+        assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 1"));
+        assert!(
+            match_is_visible(vcx),
+            "{keys} reveals the whole painted match"
+        );
+        let at = vcx.debug_bounds("md-table-scroll").unwrap().center();
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(5000.0), px(0.0))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Started,
+            source: gpui::ScrollSource::Pointer,
+        });
+        for _ in 0..3 {
+            draw(vcx);
+        }
+        assert!(
+            !match_is_visible(vcx),
+            "the owner can pan away after {keys}"
+        );
+    }
+}
+
+#[gpui::test]
+fn every_new_control_is_reachable_and_operable_by_keyboard(cx: &mut TestAppContext) {
+    bind(cx);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run_id("builder1"), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .unwrap();
+    wait_for(vcx, "transcript is ready", |vcx| painted(vcx, "thinking"));
+    screen.update_in(vcx, |screen, window, cx| screen.focus_run_input(window, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("shift-tab");
+    assert!(vcx.update(|window, cx| screen.read(cx).transcript_focus.is_focused(window)));
+    vcx.simulate_keystrokes("f6");
+    draw(vcx);
+    assert!(
+        !vcx.update(|window, cx| screen.read(cx).transcript_focus.is_focused(window)),
+        "F6 enters the visible transcript controls"
+    );
+    assert!(
+        !vcx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window)),
+        "control focus stays in the reading surface"
+    );
+}
+
+#[gpui::test]
+fn keyboard_opens_a_history_fold_and_its_command_output(cx: &mut TestAppContext) {
+    bind(cx);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run_id("builder0"), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .unwrap();
+    wait_for(vcx, "completed run has replayed", |vcx| {
+        screen.read_with(vcx, |s, _| {
+            matches!(s.rows().last(), Some(Row::Done { .. }))
+        })
+    });
+    let fold = screen.read_with(vcx, |s, _| {
+        s.rows()
+            .iter()
+            .find_map(|row| {
+                let Row::Worked { key, rows, .. } = row else {
+                    return None;
+                };
+                rows.iter()
+                    .any(|row| {
+                        matches!(row, Row::Tools { calls, .. } if calls.iter().any(|call| call.id == "t2"))
+                    })
+                    .then_some(*key)
+            })
+            .unwrap()
+    });
+    let focus_button = |vcx: &mut VisualTestContext, id: &str| {
+        let selector = Box::leak(id.to_owned().into_boxed_str());
+        for _ in 0..30 {
+            let bounds = vcx.debug_bounds(selector).unwrap();
+            let focused = vcx.update(|window, cx| {
+                let bounds = window
+                    .pixel_snap_bounds(bounds)
+                    .scale(window.scale_factor());
+                let ink = crate::ui::theme::current(cx).accent;
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.bounds == bounds && quad.border_color == ink)
+            });
+            if focused {
+                vcx.simulate_keystrokes("enter");
+                // GPUI's keystroke helper only sends KeyDown. Buttons activate on KeyUp.
+                vcx.simulate_event(KeyUpEvent {
+                    keystroke: Keystroke {
+                        modifiers: Modifiers::default(),
+                        key: "enter".into(),
+                        key_char: None,
+                    },
+                });
+                draw(vcx);
+                return;
+            }
+            vcx.update(|window, cx| window.focus_next(cx));
+            draw(vcx);
+        }
+        panic!("keyboard did not reach {id}");
+    };
+    screen.update_in(vcx, |s, window, cx| window.focus(&s.transcript_focus, cx));
+    vcx.simulate_keystrokes("f6");
+    draw(vcx);
+    focus_button(vcx, &format!("worked-{}", fold.0));
+    wait_for(vcx, "tool is visible inside the open fold", |vcx| {
+        painted(vcx, "step-t2")
+    });
+    focus_button(vcx, "step-t2");
+    assert!(painted(vcx, "tool-output-t2"));
 }

@@ -17,17 +17,25 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use gpui::{AnyElement, App, ImageFormat, SharedString, Task, div, img, prelude::*, px};
+use gpui::{
+    AnyElement, App, Div, ImageFormat, MouseButton, Role, SharedString, Stateful, Task, div, img,
+    prelude::*, px,
+};
 use reno_client::Client;
+use reno_markdown::parser::InlineImage;
 use reno_proto::RunId;
 
-use super::link::{self, Action, LinkPolicy};
+use super::Host;
+use super::link::{self, Action};
 use super::lru::Lru;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::theme::Theme;
 
 /// The largest `data:` payload decoded, in bytes.
 const DATA_MAX_BYTES: usize = 8 * 1024 * 1024;
+const SVG_MIME: &str = "image/svg+xml";
+/// Bound the raster allocation independently of the source dimensions.
+const MAX_SVG_SIDE: f32 = 2048.0;
 /// Images kept decoded in memory, and the most bytes they may hold together (ARCH-12).
 const CACHE_ENTRIES: usize = 64;
 const CACHE_BYTES: usize = 48 * 1024 * 1024;
@@ -39,6 +47,8 @@ pub(crate) enum ImageSource {
     Worktree(String),
     /// Decoded in the app from a `data:` URL.
     Data(Arc<gpui::Image>),
+    /// Encoded Markdown SVG, decoded and rasterized by the image cache.
+    SvgData(Arc<str>),
 }
 
 /// What an image source in markdown turns into.
@@ -59,9 +69,7 @@ pub(crate) fn classify(src: &str) -> Classified {
     let src = src.trim();
     let lower = src.to_ascii_lowercase();
     if lower.starts_with("data:") {
-        return decode_data(src).map_or(Classified::Refused, |image| {
-            Classified::Source(ImageSource::Data(Arc::new(image)))
-        });
+        return decode_data(src).map_or(Classified::Refused, Classified::Source);
     }
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Classified::Remote {
@@ -95,7 +103,7 @@ pub(crate) fn raster_format(mime: &str) -> Option<ImageFormat> {
     ImageFormat::from_mime_type(&mime.to_ascii_lowercase()).filter(|f| *f != ImageFormat::Svg)
 }
 
-fn decode_data(src: &str) -> Option<gpui::Image> {
+fn decode_data(src: &str) -> Option<ImageSource> {
     let rest = src.get("data:".len()..)?;
     let (meta, payload) = rest.split_once(',')?;
     let mut parts = meta.split(';');
@@ -103,15 +111,66 @@ fn decode_data(src: &str) -> Option<gpui::Image> {
     if !parts.any(|p| p.eq_ignore_ascii_case("base64")) {
         return None;
     }
-    let format = raster_format(&mime)?;
-    if payload.len() / 4 * 3 > DATA_MAX_BYTES {
+    let payload = payload.trim();
+    if payload.is_empty() || payload.len() > DATA_MAX_BYTES.div_ceil(3) * 4 {
         return None;
     }
+    if mime == SVG_MIME {
+        return Some(ImageSource::SvgData(Arc::from(payload)));
+    }
+    let format = raster_format(&mime)?;
+    let bytes = decode_payload(payload)?;
+    Some(ImageSource::Data(Arc::new(gpui::Image::from_bytes(
+        format, bytes,
+    ))))
+}
+
+fn decode_payload(payload: &str) -> Option<Vec<u8>> {
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(payload.trim())
+        .decode(payload)
         .ok()?;
-    (!bytes.is_empty() && bytes.len() <= DATA_MAX_BYTES)
-        .then(|| gpui::Image::from_bytes(format, bytes))
+    (!bytes.is_empty() && bytes.len() <= DATA_MAX_BYTES).then_some(bytes)
+}
+
+/// Draw a Markdown SVG with the bundled font and without resolving nested image resources.
+pub(crate) fn rasterize_svg(bytes: &[u8], scale: f32) -> Option<super::mermaid::Raster> {
+    if bytes.len() > DATA_MAX_BYTES || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let mut image_href_resolver = super::mermaid::no_files();
+    // Embedded images can allocate or decompress independently of the outer canvas.
+    image_href_resolver.resolve_data = Box::new(|_, _, _| None);
+    let options = usvg::Options {
+        fontdb: super::mermaid::fonts(),
+        font_family: "sans-serif".to_owned(),
+        image_href_resolver,
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_str(std::str::from_utf8(bytes).ok()?, &options).ok()?;
+    if tree.root().children().is_empty() {
+        return None;
+    }
+    let (width, height) = (tree.size().width(), tree.size().height());
+    let raster_scale = scale.min(MAX_SVG_SIDE / width.max(height));
+    let mut pixmap = tiny_skia::Pixmap::new(
+        (width * raster_scale).ceil() as u32,
+        (height * raster_scale).ceil() as u32,
+    )?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(raster_scale, raster_scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+        .pixels()
+        .iter()
+        .any(|pixel| pixel.alpha() != 0)
+        .then_some(())?;
+    Some(super::mermaid::Raster {
+        png: pixmap.encode_png().ok()?,
+        width: pixmap.width() as f32,
+        height: pixmap.height() as f32,
+    })
 }
 
 /// How the host reads a run's worktree images.
@@ -139,9 +198,15 @@ enum Slot {
     Failed,
 }
 
-/// The images read from worktrees, by (run, path), bounded.
+/// Bitmap-only callers and Markdown use separate worktree cache keys.
+#[derive(Clone, Eq, Hash, PartialEq)]
+enum CacheKey {
+    Worktree { run: RunId, path: String, svg: bool },
+    SvgData(Arc<str>),
+}
+
 struct Images {
-    slots: Lru<(RunId, String), Slot>,
+    slots: Lru<CacheKey, Slot>,
 }
 
 impl gpui::Global for Images {}
@@ -163,20 +228,77 @@ pub(crate) enum Shown {
     Failed,
 }
 
-/// The image `source` names: decoded bytes at once, a worktree file once it is read.
+/// Images posted by tools and the visual desk are bitmap-only.
 pub(crate) fn resolve(source: &ImageSource, host: &ImageHost, cx: &mut App) -> Shown {
     match source {
         ImageSource::Data(image) => Shown::Ready(image.clone()),
-        ImageSource::Worktree(path) => state_of(host, path, cx),
+        ImageSource::Worktree(path) => state_of(host, path, false, cx),
+        ImageSource::SvgData(_) => Shown::Failed,
     }
 }
 
+fn resolve_markdown(source: &ImageSource, host: &ImageHost, cx: &mut App) -> Shown {
+    match source {
+        ImageSource::Data(image) => Shown::Ready(image.clone()),
+        ImageSource::Worktree(path) => state_of(host, path, true, cx),
+        ImageSource::SvgData(payload) => {
+            let payload = payload.clone();
+            let key = CacheKey::SvgData(payload.clone());
+            let cost = payload.len();
+            cached_load(key, cost, cx, move |cx| {
+                cx.background_spawn(async move {
+                    decode_payload(&payload).and_then(|bytes| decoded(SVG_MIME, bytes, true))
+                })
+            })
+        }
+    }
+}
+
+fn decoded(mime: &str, bytes: Vec<u8>, svg: bool) -> Option<(Arc<gpui::Image>, usize)> {
+    let (format, bytes, pixels) = if svg && mime.eq_ignore_ascii_case(SVG_MIME) {
+        let raster = rasterize_svg(&bytes, 1.0)?;
+        (
+            ImageFormat::Png,
+            raster.png,
+            raster.width as usize * raster.height as usize * 4,
+        )
+    } else {
+        (raster_format(mime)?, bytes, 0)
+    };
+    let cost = bytes.len() + pixels;
+    Some((Arc::new(gpui::Image::from_bytes(format, bytes)), cost))
+}
+
 /// The state of `path` of `run`, starting its read when nobody has.
-fn state_of(host: &ImageHost, path: &str, cx: &mut App) -> Shown {
+fn state_of(host: &ImageHost, path: &str, svg: bool, cx: &mut App) -> Shown {
     let (Some(run), Some(client)) = (host.run.clone(), host.client.clone()) else {
         return Shown::Failed;
     };
-    let key = (run.clone(), path.to_owned());
+    let path = path.to_owned();
+    let key = CacheKey::Worktree {
+        run: run.clone(),
+        path: path.clone(),
+        svg,
+    };
+    cached_load(key, 0, cx, move |cx| {
+        let read =
+            gpui_tokio::Tokio::spawn(cx, async move { client.fs_read_image_all(run, path).await });
+        let executor = cx.background_executor().clone();
+        async move {
+            let (mime, bytes) = read.await.ok()?.ok()?;
+            executor
+                .spawn(async move { decoded(&mime, bytes, svg) })
+                .await
+        }
+    })
+}
+
+fn cached_load<F: Future<Output = Option<(Arc<gpui::Image>, usize)>> + 'static>(
+    key: CacheKey,
+    key_cost: usize,
+    cx: &mut App,
+    start: impl FnOnce(&mut App) -> F,
+) -> Shown {
     if let Some(slot) = cx.default_global::<Images>().slots.get(&key) {
         return match slot {
             Slot::Loading(_) => Shown::Loading,
@@ -184,32 +306,19 @@ fn state_of(host: &ImageHost, path: &str, cx: &mut App) -> Shown {
             Slot::Failed => Shown::Failed,
         };
     }
-    let read = gpui_tokio::Tokio::spawn(cx, {
-        let (run, path) = (run, path.to_owned());
-        async move { client.fs_read_image_all(run, path).await }
-    });
+    let load = start(cx);
     let task = cx.spawn({
         let key = key.clone();
         async move |cx| {
-            let slot = match read.await {
-                Ok(Ok((mime, bytes))) => raster_format(&mime)
-                    .map(|format| {
-                        let cost = bytes.len();
-                        (
-                            Slot::Ready(Arc::new(gpui::Image::from_bytes(format, bytes))),
-                            cost,
-                        )
-                    })
-                    .unwrap_or((Slot::Failed, 0)),
-                _ => (Slot::Failed, 0),
-            };
+            let (slot, cost) = load.await.map_or((Slot::Failed, 0), |(image, cost)| {
+                (Slot::Ready(image), cost)
+            });
             cx.update(|cx| {
                 let images = cx.default_global::<Images>();
-                // Only while the entry is still ours: a cache that dropped it cancelled the read.
+                // A cache that dropped the entry cancelled its load.
                 if let Some(Slot::Loading(done)) = images.slots.remove(&key) {
                     done.detach();
-                    let (slot, cost) = slot;
-                    images.slots.insert(key, slot, cost);
+                    images.slots.insert(key, slot, key_cost + cost);
                 }
                 super::settled(cx);
             });
@@ -217,7 +326,7 @@ fn state_of(host: &ImageHost, path: &str, cx: &mut App) -> Shown {
     });
     cx.default_global::<Images>()
         .slots
-        .insert(key, Slot::Loading(task), 0);
+        .insert(key, Slot::Loading(task), key_cost);
     Shown::Loading
 }
 
@@ -253,64 +362,107 @@ pub(crate) fn picture(image: Arc<gpui::Image>) -> gpui::Div {
         .child(img(image).max_w_full().rounded(px(6.0)))
 }
 
-/// The image a markdown `![alt](src)` stands for. `wrapper` is the link around the image
+/// The image a markdown `![alt](src)` stands for. The wrapper is the link around the image
 /// (`[![alt](src)](url)`), followed as any link is (TRANSCRIPT-11.5).
 pub(crate) fn view(
-    alt: &str,
-    src: &str,
-    wrapper: Option<&str>,
+    image: &InlineImage,
+    atom: usize,
     host: &ImageHost,
-    policy: &LinkPolicy,
+    markdown: &Host,
     theme: &Theme,
     cx: &mut App,
 ) -> AnyElement {
-    let action = wrapper.map(|url| policy.action(url));
+    let (alt, src) = (image.alt.as_str(), image.source.as_str());
+    let wrapped = image
+        .link
+        .as_deref()
+        .map(|url| (markdown.links.action(url), url))
+        .filter(|(action, _)| *action != Action::Plain);
     let body = match classify(src) {
-        Classified::Source(source) => match resolve(&source, host, cx) {
+        Classified::Source(source) => match resolve_markdown(&source, host, cx) {
             Shown::Ready(image) => picture(image).into_any_element(),
             Shown::Loading => note(theme, "Loading image\u{2026}").into_any_element(),
             Shown::Failed => failed_note(theme, not_loaded_text(alt, src)),
         },
         Classified::Remote { url, host: site } => {
-            return link_card(alt, &url, &site, action, policy, theme);
+            let (action, target) = wrapped.unwrap_or_else(|| (markdown.links.action(&url), &url));
+            return clickable(
+                link_card(alt, &url, &site, theme),
+                action,
+                target,
+                atom,
+                markdown,
+                theme,
+            );
         }
         Classified::Refused => failed_note(theme, not_loaded_text(alt, src)),
     };
-    match action.filter(|a| *a != Action::Plain) {
-        Some(action) => clickable(body, action, policy, alt),
+    match wrapped {
+        Some((action, target)) => clickable(
+            div()
+                .id(SharedString::from(format!("md-image-link-{alt}")))
+                .child(body),
+            action,
+            target,
+            atom,
+            markdown,
+            theme,
+        ),
         None => body,
     }
 }
 
-fn clickable(body: AnyElement, action: Action, policy: &LinkPolicy, label: &str) -> AnyElement {
-    let policy = policy.clone();
-    div()
-        .id(SharedString::from(format!("md-image-link-{label}")))
-        .cursor_pointer()
-        .child(body)
+fn clickable(
+    body: Stateful<Div>,
+    action: Action,
+    target: &str,
+    atom: usize,
+    markdown: &Host,
+    theme: &Theme,
+) -> AnyElement {
+    if action == Action::Plain {
+        return body.into_any_element();
+    }
+    let policy = markdown.links.clone();
+    let target = target.to_owned();
+    body.cursor_pointer()
+        .role(Role::Button)
+        .aria_label(format!("Open {target}"))
+        .focusable()
+        .tab_stop(true)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(crate::ui::kit::focus_ring(theme))
         .on_click(move |_, window, cx| policy.run(&action, window, cx))
+        .when_some(markdown.link_menu.clone(), |card, menu| {
+            let (track, tracked_target) = (menu.clone(), target.clone());
+            card.relative()
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, _| {
+                            track.paint_target(atom, &tracked_target, bounds, window);
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    menu.open(Some(&target), event, window, cx);
+                })
+        })
         .into_any_element()
 }
 
 /// A web image as a card: its alt text and host. It opens the page the image names, or the
 /// link around it, only through the host's policy; nothing is fetched.
-fn link_card(
-    alt: &str,
-    url: &str,
-    site: &str,
-    wrapper: Option<Action>,
-    policy: &LinkPolicy,
-    theme: &Theme,
-) -> AnyElement {
-    let action = wrapper
-        .filter(|a| *a != Action::Plain)
-        .unwrap_or_else(|| policy.action(url));
+fn link_card(alt: &str, url: &str, site: &str, theme: &Theme) -> Stateful<Div> {
     let title = if alt.trim().is_empty() {
         "Image"
     } else {
         alt.trim()
     };
-    let card = div()
+    div()
         .id(SharedString::from(format!("md-image-card-{url}")))
         .debug_selector(|| "md-image-card".to_owned())
         .flex()
@@ -340,14 +492,7 @@ fn link_card(
                         .text_color(theme.faint)
                         .child(site.to_owned()),
                 ),
-        );
-    if action == Action::Plain {
-        return card.into_any_element();
-    }
-    let policy = policy.clone();
-    card.cursor_pointer()
-        .on_click(move |_, window, cx| policy.run(&action, window, cx))
-        .into_any_element()
+        )
 }
 
 #[cfg(test)]
@@ -419,11 +564,40 @@ mod tests {
             "data:text/html;base64,PGI+",
             "data:image/png,rawbytes",
             "data:image/png;base64,",
-            "data:image/svg+xml;base64,PHN2Zy8+",
             "data:",
         ] {
             assert_eq!(classify(bad), Classified::Refused, "{bad}");
         }
+    }
+
+    #[test]
+    fn svg_text_uses_the_bundled_font() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="32">
+            <text x="4" y="24">Geist</text>
+        </svg>"#;
+        assert!(rasterize_svg(svg, 1.0).is_some());
+    }
+
+    #[test]
+    fn embedded_svg_images_are_not_decoded() {
+        use base64::engine::general_purpose::STANDARD;
+
+        let nested = STANDARD.encode(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
+            <rect width="8" height="8"/>
+            </svg>"#,
+        );
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
+             <image href="data:image/svg+xml;base64,{nested}" width="8" height="8"/>
+            </svg>"#,
+        );
+        assert!(rasterize_svg(svg.as_bytes(), 1.0).is_none());
+    }
+
+    #[test]
+    fn a_malformed_svg_does_not_rasterize() {
+        assert!(rasterize_svg(b"<svg/>", 1.0).is_none());
     }
 
     #[test]
@@ -443,7 +617,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let state = state_of(&ImageHost::default(), "docs/graph.png", cx);
+            let state = state_of(&ImageHost::default(), "docs/graph.png", true, cx);
             assert!(matches!(state, Shown::Failed));
             assert_eq!(cx.default_global::<Images>().slots.len(), 0);
         });

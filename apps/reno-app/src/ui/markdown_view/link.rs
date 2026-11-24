@@ -232,8 +232,18 @@ pub(crate) fn looks_like_path(text: &str) -> bool {
 /// The worktree files a reply's links and inline-code spans name, without repeats: what the
 /// host is asked to resolve.
 pub(crate) fn paths_in(tree: &reno_markdown::BlockTree) -> Vec<String> {
+    let mut out = Vec::new();
+    for target in file_targets_in(tree) {
+        if !out.contains(&target.path) {
+            out.push(target.path);
+        }
+    }
+    out
+}
+
+pub(crate) fn file_targets_in(tree: &reno_markdown::BlockTree) -> Vec<FileTarget> {
     use reno_markdown::{Block, InlineRun};
-    fn runs(runs: &[InlineRun], out: &mut Vec<String>) {
+    fn runs(runs: &[InlineRun], out: &mut Vec<FileTarget>) {
         for run in runs {
             let target = match run.style.link.as_deref() {
                 Some(dest) if !links::is_web_link(dest.trim()) => file_target(dest),
@@ -242,13 +252,13 @@ pub(crate) fn paths_in(tree: &reno_markdown::BlockTree) -> Vec<String> {
                 None => None,
             };
             if let Some(target) = target
-                && !out.contains(&target.path)
+                && !out.contains(&target)
             {
-                out.push(target.path);
+                out.push(target);
             }
         }
     }
-    fn block(b: &Block, out: &mut Vec<String>) {
+    fn block(b: &Block, out: &mut Vec<FileTarget>) {
         match b {
             Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
             Block::BlockQuote { children, .. }

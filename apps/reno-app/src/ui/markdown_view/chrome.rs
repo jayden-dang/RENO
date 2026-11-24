@@ -353,7 +353,9 @@ fn controls(card: &Card<'_>, theme: &Theme) -> Vec<Stateful<gpui::Div>> {
         } else {
             ("Wrap lines", "Wrap long lines")
         };
-        let mut b = button(theme, label, Icon::Wrap)
+        let mut b = button(theme, "Wrap lines", Icon::Wrap)
+            .debug_selector(move || label.to_owned())
+            .aria_label(label)
             .tooltip(kit::tip(tip))
             .on_click(move |_, _, cx| toggle_wrap(key, cx));
         if card.wrapped {

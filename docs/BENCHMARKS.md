@@ -124,7 +124,7 @@ builds `renod`, `reno` and `reno-app` in release, starts its own `renod` on a te
 directory (mock executor only), and starts the app against it through `RENO_DATA_DIR`. It never
 uses `--fake`, because the fake daemon runs inside the app and would be counted as the app's cost,
 and it never reaches the installed daemon. It writes `target/bench/app-report.json` and
-`app-report.txt`, and exits 1 when a number is past a budget (the one marked as a target excepted).
+`app-report.txt`, and exits 1 when a measured value exceeds a budget.
 
 ```
 cargo xtask bench --app                       # full: 30 s settle, 120 s idle, 60 s streaming, long transcript
@@ -150,7 +150,9 @@ reports no number.
 | Idle wakeups | `top -l 2 -s <window> -stats idlew`, no sudo. `IDLEW` is a running count since the process started, so the rate is the difference between the two samples over the window | < 1 per second |
 | Idle footprint | `footprint` (or `vmmap --summary`): physical footprint, which includes the GPU's `IOAccelerator` memory that RSS misses | <= 135 MiB |
 | Streaming | `renod --stream-mock`, a bench-only script that emits text deltas at a steady rate (about 20 events a second for 60 s, markdown with code blocks); the app shows that run. CPU and peak footprint over the window; fails as "window not drawn" if it drew fewer frames than seconds | CPU <= 15 % · peak footprint <= 260 MiB |
-| Long transcript | `renod --stream-mock=burst` finishes a run of 2,000 messages; with `RENO_BENCH=1`, `RENO_BENCH_SCROLL=1` and `RENO_OPEN=run_<id>` the app scrolls the transcript from end to start and back by a fixed step a frame. Peak footprint and frame time p95 | peak footprint <= 370 MiB · frame time p95 <= 16.7 ms, a **target** (below) |
+| Long transcript | `renod --stream-mock=burst` finishes a run of 2,000 messages; with `RENO_BENCH=1`, `RENO_BENCH_SCROLL=1` and `RENO_OPEN=run_<id>` the app scrolls the transcript from end to start and back by a fixed step a frame. Peak footprint and frame time p95 | peak footprint <= 370 MiB · frame time p95 <= 16.7 ms |
+| Long reply | `renod --stream-mock=longreply` produces one long reply with Markdown, code and math. The app opens it after completion and scrolls it from end to start and back. | peak footprint <= 370 MiB · frame time p95 <= 16.7 ms |
+| Find while streaming | `renod --stream-mock=findburst` waits for the benchmark app to open Find with `RENO_BENCH_FIND="looked at"`, then streams the 2,000 messages. Frame times are captured until the app receives Done. | peak footprint <= 370 MiB · frame time p95 <= 16.7 ms |
 | Allocator | `--compare-allocators`: idle plus streaming, once with the system allocator and once with mimalloc | decision recorded |
 | GPU memory | The `IOAccelerator` share of the footprint, on its own | recorded, no budget |
 
@@ -169,14 +171,14 @@ The owner signed these off after the first full measurement. Each is the measure
 | Streaming CPU | <= 15 % of a core | 6.0 % after the redraw fix (20 to 21 % before) |
 | Streaming peak footprint | <= 260 MiB | 208 MiB |
 | Long transcript peak footprint | <= 370 MiB | 294 MiB |
-| Long transcript frame time p95 | <= 16.7 ms, **a target that ROAD-33 must meet** | 30 ms |
+| Long transcript frame time p95 | <= 16.7 ms | 30 ms |
+| Long reply frame time p95 | <= 16.7 ms | Pending Mac measurement |
+| Find while streaming frame time p95 | <= 16.7 ms | Pending Mac measurement |
 
-**The frame-time limit is a target, not a budget.** The 16.7 ms is one frame at 60 Hz. Measured,
-the long transcript draws a frame in about 30 ms (p50 29 ms, p95 30 ms), because the transcript
-is not virtualised by message: the 2,000 messages fold into 4 turn rows, and each row is laid out
-and painted whole. That is the row model ROAD-33 replaces, so the limit is ROAD-33's to meet. The
-report marks it "target, ROAD-33" and says "over (ROAD-33)" while it is over, and the run does not
-fail on it until ROAD-33 lands, when it becomes an ordinary budget.
+The 16.7 ms frame-time budget is one frame at 60 Hz. The earlier long-transcript baseline
+measured around 30 ms p95 while 2,000 messages were laid out across four turn rows. The current
+benchmark reports each transcript scenario separately and applies the 370 MiB footprint budget to
+the highest measured peak. The ROAD-33 Mac measurements and deferred U1 comparison remain pending.
 
 ### Measured, 2026-11-21
 

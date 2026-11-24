@@ -16,7 +16,7 @@ use reno_markdown::{Block, BlockTree, InlineRun};
 
 use crate::links;
 use crate::ui::markdown_view::link::file_target;
-use crate::vm::selection::{self, Entry, Selection, Shown};
+use crate::vm::selection::{self, Entry, Selection, Shown, Slot};
 
 /// What separates an atom from the one before it when both are copied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +201,7 @@ pub(crate) fn source_of(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_
 
 #[derive(Clone, Debug)]
 pub(crate) struct Section {
+    pub(crate) slot: Slot,
     pub(crate) source: Range<usize>,
     pub(crate) atoms: Range<usize>,
 }
@@ -212,9 +213,16 @@ pub(crate) struct Prose {
 }
 
 impl Prose {
-    pub(crate) fn section_at(&self, atom: usize) -> usize {
-        self.sections
-            .partition_point(|section| section.atoms.end <= atom)
+    pub(crate) fn section_at(&self, atom: usize) -> Option<&Section> {
+        let ix = self
+            .sections
+            .partition_point(|section| section.atoms.end <= atom);
+        self.sections.get(ix)
+    }
+
+    pub(crate) fn slot_at(&self, atom: usize) -> Slot {
+        self.section_at(atom)
+            .map_or(Slot::WHOLE, |section| section.slot)
     }
 }
 
@@ -247,11 +255,26 @@ pub(crate) fn prose(source: &str, tree: &BlockTree) -> Prose {
 
     let mut sections = Vec::new();
     let mut atoms = b.out;
-    add_sections(&mut sections, 0..source.len(), &b.root_notes, &atoms, 0);
+    add_sections(
+        &mut sections,
+        0..source.len(),
+        &b.root_notes,
+        &atoms,
+        0,
+        Slot::prose,
+    );
     for note in b.footnotes {
         let first = atoms.len();
         atoms.extend(note.atoms);
-        add_sections(&mut sections, note.source, &note.children, &atoms, first);
+        let note_start = note.source.start;
+        add_sections(
+            &mut sections,
+            note.source,
+            &note.children,
+            &atoms,
+            first,
+            |from| Slot::note(note_start, from),
+        );
     }
     Prose {
         atoms: Rc::new(atoms),
@@ -270,6 +293,7 @@ fn add_sections(
     hoisted: &[Range<usize>],
     atoms: &[Atom],
     mut first: usize,
+    slot_of: impl Fn(usize) -> Slot,
 ) {
     let mut from = scope.start;
     for removed in hoisted {
@@ -277,6 +301,7 @@ fn add_sections(
         let after = first + atoms[first..].partition_point(|atom| atom.src.start < end);
         if first < after {
             sections.push(Section {
+                slot: slot_of(from),
                 source: from..end,
                 atoms: first..after,
             });
@@ -286,6 +311,7 @@ fn add_sections(
     }
     if first < atoms.len() || hoisted.is_empty() {
         sections.push(Section {
+            slot: slot_of(from),
             source: from..scope.end.max(from),
             atoms: first..atoms.len(),
         });
@@ -415,6 +441,19 @@ impl Builder<'_> {
 
     fn run(&mut self, run: &InlineRun) -> Atom {
         let style = &run.style;
+        if let Some(marker) = &style.task {
+            let src = marker.range.clone();
+            self.cursor = self.cursor.max(src.end);
+            let text = task_box_text(marker.checked).to_owned();
+            return Atom {
+                src,
+                copy: text.clone(),
+                text,
+                gap: Gap::Joined,
+                shape: Shape::Whole,
+                block: None,
+            };
+        }
         if let Some(label) = &style.footnote_ref {
             let src = style
                 .footnote_range
@@ -622,6 +661,10 @@ impl Builder<'_> {
         self.cursor = b;
         Some(a..b)
     }
+}
+
+pub(crate) fn task_box_text(checked: bool) -> &'static str {
+    if checked { "☑ " } else { "☐ " }
 }
 
 pub(crate) fn footnote_marker(label: &str) -> String {
@@ -932,12 +975,13 @@ mod tests {
     fn source_between(rows: &[Row], open: &[Key], from: Pos, to: Pos) -> String {
         let is_open = |k: Key| open.contains(&k);
         let entries = selection::reading(rows, &is_open);
-        let never = |_: &str| false;
+        let never = |_: Key, _: &str| false;
         let tree = |_: Key, text: &str| parse_full(text);
         let shown = Shown {
             open: &is_open,
             output_open: &never,
             output_full: &never,
+            tool_inputs: &|_, _| Vec::new(),
             tree: &tree,
         };
         let sel = Selection {

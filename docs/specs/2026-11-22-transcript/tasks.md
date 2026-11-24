@@ -676,13 +676,13 @@ enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, str
 
 **Depends-on:** Task 14, Task 16
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `right_click_offers_open_copy_link_copy_copy_as_markdown_copy_message_and_scroll_as_they_apply`;
   - `shift_f10_opens_it_and_arrows_and_enter_pick`.
   Run: `cargo test -p reno-app menu` — expect: fails.
-- [ ] **Step 2:** Implement the menu, and `MenuState` in `ui/menu.rs`. Run: `cargo test -p reno-app` — expect: pass,
+- [x] **Step 2:** Implement the menu, and `MenuState` in `ui/menu.rs`. Run: `cargo test -p reno-app` — expect: pass,
   with the sidebar menu tests unchanged.
-- [ ] **Step 3:** Commit `transcript: a context menu with Open, Copy Link, Copy, Copy as Markdown and Copy Message`.
+- [x] **Step 3:** Commit `transcript: a context menu with Open, Copy Link, Copy, Copy as Markdown and Copy Message`.
 
 _Requirements: TRANSCRIPT-8.3_
 
@@ -707,15 +707,15 @@ enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, str
 
 **Depends-on:** Task 16
 
-- [ ] **Step 1:** Add failing tests on the `render2` reply:
+- [x] **Step 1:** Add failing tests on the `render2` reply:
   - `a_callout_draws_with_its_kind_label`;
   - `a_wide_table_scrolls_sideways`;
   - `front_matter_draws_as_pairs_and_comments_are_hidden`;
   - `task_items_draw_a_box_that_does_not_toggle`.
   Run: `cargo test -p reno-app renderers` — expect: fails.
-- [ ] **Step 2:** Implement them with theme tokens: note `accent`, tip `success`, warning `warning`, caution `danger`. Run:
+- [x] **Step 2:** Implement them with theme tokens: note `accent`, tip `success`, warning `warning`, caution `danger`. Run:
   `cargo test -p reno-app` — expect: pass, with the Files tab preview tests unchanged.
-- [ ] **Step 3:** Commit `markdown: callouts, wide tables, front matter and task boxes`.
+- [x] **Step 3:** Commit `markdown: callouts, wide tables, front matter and task boxes`.
 
 _Requirements: TRANSCRIPT-14.1, TRANSCRIPT-14.2, TRANSCRIPT-14.3, TRANSCRIPT-14.4_
 
@@ -736,8 +736,8 @@ renderers; OFL notice THIRD_PARTY_NOTICES.md:9); `resvg`/`usvg` `=0.46.0` alread
 
 **Depends-on:** none
 
-- [ ] **Step 1:** Run `cargo test -p reno-app math` and `cargo test -p reno-app settings_pages` — expect: pass.
-- [ ] **Step 2:** For any of 9.1–9.6 with no test shown in that run, add one. Watch it fail by breaking the guarded line,
+- [x] **Step 1:** Run `cargo test -p reno-app math` and `cargo test -p reno-app settings_pages` — expect: pass.
+- [x] **Step 2:** For any of 9.1–9.6 with no test shown in that run, add one. Watch it fail by breaking the guarded line,
   then restore. Commit `math: every math requirement held by a test`.
 
 _Requirements: TRANSCRIPT-9.1, TRANSCRIPT-9.2, TRANSCRIPT-9.3, TRANSCRIPT-9.4, TRANSCRIPT-9.5, TRANSCRIPT-9.6_
@@ -764,15 +764,15 @@ SVG.
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_worktree_svg_draws` (`docs/flow.svg`);
   - `a_data_svg_draws_the_same_way`;
   - `an_svg_whose_image_href_names_a_file_outside_the_worktree_paints_nothing`;
   - `an_image_wrapped_in_a_link_follows_the_link`.
   Run: `cargo test -p reno-app svg` — expect: the first fails ("Image not loaded").
-- [ ] **Step 2:** Rasterise worktree SVGs from `fs.read_image`, and `data:` SVGs, through `usvg` with `no_files()`. Run:
+- [x] **Step 2:** Rasterise worktree SVGs from `fs.read_image`, and `data:` SVGs, through `usvg` with `no_files()`. Run:
   `cargo test -p reno-app` — expect: pass, including the kept 11.2–11.4 tests and the zero-send test.
-- [ ] **Step 3:** Commit `images: worktree SVGs drawn by the app's own rasteriser, which follows no paths`.
+- [x] **Step 3:** Commit `images: worktree SVGs drawn by the app's own rasteriser, which follows no paths`.
 
 _Requirements: TRANSCRIPT-11.1, TRANSCRIPT-11.2, TRANSCRIPT-11.3, TRANSCRIPT-11.4, TRANSCRIPT-11.5_
 
@@ -795,14 +795,14 @@ _Requirements: TRANSCRIPT-11.1, TRANSCRIPT-11.2, TRANSCRIPT-11.3, TRANSCRIPT-11.
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_tool_results_image_shows_under_its_call_at_most_384_square_with_go_to_file`;
   - `on_the_real_capabilities_no_tool_image_or_placeholder_shows`.
   Run: `cargo test -p reno-app tool_image` — expect: fails.
-- [ ] **Step 2:** Implement the desk method, its fake seed, the capability and the drawing. Run: `cargo test -p reno-app`
+- [x] **Step 2:** Implement the desk method, its fake seed, the capability and the drawing. Run: `cargo test -p reno-app`
   and `cargo test -p reno-client --features fake` — expect: pass, including the kept 12.1 and 12.3–12.5 tests and
   `protocol_schema_matches_snapshot`.
-- [ ] **Step 3:** Commit `visuals: tool-result images on the mocked desk`.
+- [x] **Step 3:** Commit `visuals: tool-result images on the mocked desk`.
 
 _Requirements: TRANSCRIPT-12.1, TRANSCRIPT-12.2, TRANSCRIPT-12.3, TRANSCRIPT-12.4, TRANSCRIPT-12.5_
 
@@ -828,13 +828,13 @@ and `prefs.rs`
 
 **Depends-on:** Task 17
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `streamed_text_catches_up_within_200_ms_and_the_tick_stops`, on the test clock;
   - `with_reduce_motion_text_shows_at_once`;
   - `an_idle_screen_arms_no_reveal_tick`.
   Run: `cargo test -p reno-app reveal` — expect: fails.
-- [ ] **Step 2:** Implement it. Run: `cargo test -p reno-app` — expect: pass.
-- [ ] **Step 3:** Commit `transcript: streamed text is revealed smoothly and the tick stops when it catches up`.
+- [x] **Step 2:** Implement it. Run: `cargo test -p reno-app` — expect: pass.
+- [x] **Step 3:** Commit `transcript: streamed text is revealed smoothly and the tick stops when it catches up`.
 
 _Requirements: TRANSCRIPT-13.1, TRANSCRIPT-13.2_
 
@@ -860,14 +860,14 @@ and `prefs.rs`
 
 **Depends-on:** Task 5, Task 21
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `a_new_edit_or_command_opens_inside_its_group_while_live`;
   - `turning_the_settings_off_keeps_them_collapsed`;
   - `the_expand_keys_round_trip_and_a_missing_key_is_on`.
   Run: `cargo test -p reno-app expand` — expect: fails.
-- [ ] **Step 2:** Implement them, and add the keys to `KEYS`. Run: `cargo test -p reno-app` — expect: pass, including the
+- [x] **Step 2:** Implement them, and add the keys to `KEYS`. Run: `cargo test -p reno-app` — expect: pass, including the
   tool-group guard.
-- [ ] **Step 3:** Commit `tools: new edits and commands open in their group; settings to keep them closed`.
+- [x] **Step 3:** Commit `tools: new edits and commands open in their group; settings to keep them closed`.
 
 _Requirements: TRANSCRIPT-13.4, TRANSCRIPT-13.18_
 
@@ -905,10 +905,10 @@ and `prefs.rs`
 
 **Depends-on:** Task 3, Task 23
 
-- [ ] **Step 1:** Add failing unit tests: `an_edit_input_yields_its_path_and_both_texts`, `a_patch_input_yields_one_entry_per_file`
+- [x] **Step 1:** Add failing unit tests: `an_edit_input_yields_its_path_and_both_texts`, `a_patch_input_yields_one_entry_per_file`
   and `a_bash_input_yields_its_command`.
   Run: `cargo test -p reno-app vm::convo` — expect: fails to compile.
-- [ ] **Step 2:** Add failing GPUI tests on `render2`:
+- [x] **Step 2:** Add failing GPUI tests on `render2`:
   - `a_one_file_edit_shows_its_badge_go_to_file_and_inline_diff`;
   - `a_patch_shows_one_hunk_block_per_file`;
   - `a_command_shows_copy_and_status_and_a_watched_call_its_elapsed_time`, on the test clock;
@@ -916,9 +916,13 @@ and `prefs.rs`
   - `a_restored_call_shows_no_elapsed_time`;
   - `a_numbered_read_shows_as_a_code_block_and_raw_input_opens`.
   Run: `cargo test -p reno-app changes_tests` — expect: fails.
-- [ ] **Step 3:** Implement the shapes and the cards with kit components. An unknown input shape falls back to raw input.
+- [x] **Step 3:** Implement the shapes and the cards with kit components. An unknown input shape falls back to raw input.
   Run: `cargo test -p reno-app` — expect: pass.
-- [ ] **Step 4:** Commit `tools: edit, patch, command and read-file cards from the call's own input`.
+- [x] **Step 4:** Commit `tools: edit, patch, command and read-file cards from the call's own input`.
+
+A replay inside an already-live attempt has no marker in the frozen event stream. Calls first observed there may
+auto-expand. Loaded and completed history keeps its collapsed default. Elapsed time requires confirmation that the
+attempt was still queued after the app began following, then live observations of both the call and its result.
 
 _Requirements: TRANSCRIPT-13.5, TRANSCRIPT-13.6, TRANSCRIPT-13.7_
 
@@ -944,16 +948,16 @@ and `prefs.rs`
 
 **Depends-on:** Task 11, Task 24
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `an_error_turn_shows_a_callout_with_copy_error`;
   - `an_empty_reply_and_a_call_canceled_before_output_are_hidden`, where canceled means no result in an `Interrupted`
     turn;
   - `a_call_with_no_result_in_a_completed_turn_stays_pending_in_its_group`, which holds guard 13.15;
   - `a_worktree_path_in_a_tool_result_is_a_button_that_opens_the_file`.
   Run: `cargo test -p reno-app convo_tests` — expect: fails.
-- [ ] **Step 2:** Implement them. Run: `cargo test -p reno-app` — expect: pass, including the guard tests for 13.10–13.15
+- [x] **Step 2:** Implement them. Run: `cargo test -p reno-app` — expect: pass, including the guard tests for 13.10–13.15
   (the Thinking line, the inline approval line, the output block, chips, the parser's reparse, tool grouping).
-- [ ] **Step 3:** Commit `transcript: error callouts, hidden empty rows and resource links`.
+- [x] **Step 3:** Commit `transcript: error callouts, hidden empty rows and resource links`.
 
 _Requirements: TRANSCRIPT-13.8, TRANSCRIPT-13.9, TRANSCRIPT-13.10, TRANSCRIPT-13.11, TRANSCRIPT-13.12, TRANSCRIPT-13.13, TRANSCRIPT-13.14, TRANSCRIPT-13.15, TRANSCRIPT-13.16_
 
@@ -974,13 +978,13 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
 
 **Depends-on:** Task 18, Task 22
 
-- [ ] **Step 1:** Add the failing tests:
+- [x] **Step 1:** Add the failing tests:
   - `every_new_control_is_reachable_and_operable_by_keyboard`;
   - `highlights_callouts_and_diagrams_draw_from_theme_tokens_in_light_and_dark`, which asserts the token roles used, not
     pixels.
   Run: `cargo test -p reno-app keyboard` — expect: a control with no focus path fails.
-- [ ] **Step 2:** Give each failing control its focus path and label. Run: `cargo test -p reno-app` — expect: pass.
-- [ ] **Step 3:** Commit `a11y: every new transcript control works from the keyboard`.
+- [x] **Step 2:** Give each failing control its focus path and label. Run: `cargo test -p reno-app` — expect: pass.
+- [x] **Step 3:** Commit `a11y: every new transcript control works from the keyboard`.
 
 _Requirements: TRANSCRIPT-16.8, TRANSCRIPT-16.9_
 
@@ -1001,14 +1005,14 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
 
 **Depends-on:** Task 20, Task 26
 
-- [ ] **Step 1:** Run these, each expected to pass:
+- [x] **Step 1:** Run these, each expected to pass:
   - `cargo test -p reno-proto protocol_schema` (16.10);
   - the zero-send test and the link-opener guards (16.5, 16.6);
   - the outside-the-worktree image test (16.7);
   - the persist and prefs round trips, with a file from before this feature (16.11);
   - `cargo test -p reno-app settings_pages` (16.13).
-- [ ] **Step 2:** Run `cargo deny check` and `cargo machete`, and confirm every new crate is pinned with `=` (16.12).
-- [ ] **Step 3:** Record the results in the build ledger. Commit only if a test file changed.
+- [x] **Step 2:** Run `cargo deny check` and `cargo machete`, and confirm every new crate is pinned with `=` (16.12).
+- [x] **Step 3:** Record the results in the build ledger. Commit only if a test file changed.
 
 _Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.10, TRANSCRIPT-16.11, TRANSCRIPT-16.12, TRANSCRIPT-16.13_
 
@@ -1041,13 +1045,13 @@ _Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.
 
 **Depends-on:** Task 4, Task 6, Task 27
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `the_long_reply_mock_streams_one_reply_with_code_and_math` (renod);
   - `the_long_frame_row_fails_the_run_when_over_16_7_ms`, which replaces the target test near :731 (xtask);
   - `reno_bench_find_opens_the_strip_with_the_query` (app).
   Run: `cargo test -p renod long_reply`, `cargo test -p xtask long_frame` and `cargo test -p reno-app bench_find` — expect:
   each fails.
-- [ ] **Step 2:** Implement the mock, the hook, both scenarios and the budget row. Rewrite BENCHMARKS.md's "a target, not a
+- [x] **Step 2:** Implement the mock, the hook, both scenarios and the budget row. Rewrite BENCHMARKS.md's "a target, not a
   budget" line. Run the three commands — expect: pass. The `Steady` and `Burst` tests are unchanged (1.11).
 - [ ] **Step 3:** Manual acceptance on a quiet Mac: `cargo xtask bench --app`. Expect:
   - long transcript, long reply and find while streaming each at p95 ≤ 16.7 ms;
@@ -1055,7 +1059,7 @@ _Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.
   - the streaming, idle and cold-start budgets met.
   A miss on find while streaming moves the recount to an owned background task. A miss on 16.1 from reparsing raises the
   tree bound or parses off-frame. Both go through `reroute-plan`.
-- [ ] **Step 4:** Commit `bench: one very long reply, find while streaming, and the long-transcript frame budget`.
+- [x] **Step 4:** Commit `bench: one very long reply, find while streaming, and the long-transcript frame budget`.
 
 _Requirements: TRANSCRIPT-16.1, TRANSCRIPT-16.2, TRANSCRIPT-16.3_
 

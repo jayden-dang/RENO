@@ -17,7 +17,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use reno_client::fake::FakeConfig;
-use reno_client::fake::transcript::{RENDER_REPLY, RENDER_RUN};
+use reno_client::fake::transcript::{RENDER_REPLY, RENDER_RUN, RENDER2_REPLY};
 use reno_client::visuals::{Visual, VisualImage, VisualKind};
 use reno_markdown::BlockTree;
 
@@ -342,6 +342,80 @@ fn math_is_typeset_display_and_inline_or_its_source_when_off(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn inline_math_uses_the_text_size_and_theme_and_keeps_the_tex_when_off(cx: &mut TestAppContext) {
+    const TEX: &str = "314159x^2";
+    const SOURCE: &str = r"Before \(314159x^2\) after.";
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (host, registry) = selectable_reply(SOURCE);
+        cx.update(|cx| {
+            crate::prefs::update(cx, |p| {
+                p.typeset_math = true;
+                p.math_size = 100;
+            })
+        });
+        let (view, vcx) = probe(cx, SOURCE, host, appearance);
+        let layout_text = || {
+            registry
+                .take()
+                .last()
+                .map(|piece| piece.layout.text().to_owned())
+                .unwrap()
+        };
+        let shown = layout_text();
+        vcx.update(|window, _| {
+            assert!(
+                markdown_view::math::has_cached_picture(
+                    TEX,
+                    false,
+                    15.0,
+                    Theme::for_appearance(appearance).text,
+                    window.scale_factor(),
+                ),
+                "typeset with the body size and {appearance:?} text token (layout: {shown:?})"
+            );
+        });
+        assert!(
+            shown.starts_with("Before ") && shown.ends_with(" after."),
+            "{shown:?}"
+        );
+        assert!(!shown.contains(TEX), "the formula is painted as a picture");
+
+        vcx.update(|_, cx| crate::prefs::update(cx, |p| p.typeset_math = false));
+        view.update(vcx, |_, cx| cx.notify());
+        draw(vcx);
+        assert_eq!(layout_text(), "Before 314159x^2 after.");
+    }
+}
+
+#[gpui::test]
+fn invalid_inline_math_draws_its_exact_tex_with_typesetting_enabled(cx: &mut TestAppContext) {
+    const SOURCE: &str = r"Before $\notacommand{x}$ after.";
+    let (host, registry) = selectable_reply(SOURCE);
+    let (_view, _vcx) = probe(cx, SOURCE, host, Appearance::Dark);
+    let pieces = registry.take();
+    let actual = pieces.last().unwrap().layout.text();
+    assert_eq!(actual, r"Before \notacommand{x} after.");
+}
+
+#[gpui::test]
+fn bracket_delimited_display_math_draws_on_its_own_line(cx: &mut TestAppContext) {
+    let source = "Before\n\n\\[x^2\\]\n\nAfter";
+    let (host, registry) = selectable_reply(source);
+    let (_view, vcx) = probe(cx, source, host, Appearance::Dark);
+    let math = vcx.debug_bounds("md-math-display").unwrap();
+    let pieces = registry.take();
+    let prose = |text| {
+        pieces
+            .iter()
+            .find(|piece| piece.layout.text() == text)
+            .unwrap()
+            .bounds
+    };
+    assert!(prose("Before").bottom() <= math.top());
+    assert!(math.bottom() <= prose("After").top());
+}
+
+#[gpui::test]
 fn display_math_reads_at_one_and_a_fifth_of_the_text_size_times_the_math_setting(
     cx: &mut TestAppContext,
 ) {
@@ -466,6 +540,111 @@ fn a_worktree_image_is_read_through_the_daemon_for_the_run_and_shown(cx: &mut Te
         settle(vcx, |vcx| painted(vcx, "md-image-not-loaded"));
         assert!(!painted(vcx, "md-image"), "{src}");
     }
+}
+
+fn data_svg(svg: &str) -> String {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.encode(svg);
+    format!("data:image/svg+xml;base64,{bytes}")
+}
+
+const DOT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
+
+#[gpui::test]
+fn a_worktree_svg_draws(cx: &mut TestAppContext) {
+    let store = fake_with_transcript(cx);
+    let run = run_id(reno_client::fake::transcript::RENDER2_RUN);
+    let client = store.read_with(cx, |s, _| s.client());
+    let host = Host::transcript(Some(run), client, None);
+    let (_view, vcx) = probe(cx, "![flow](docs/flow.svg)", host.clone(), Appearance::Dark);
+    settle(vcx, |vcx| {
+        painted(vcx, "md-image") || painted(vcx, "md-image-not-loaded")
+    });
+    assert!(
+        painted(vcx, "md-image"),
+        "Markdown should draw the worktree SVG"
+    );
+
+    for source in [
+        VisualImage::Worktree("docs/flow.svg".to_owned()),
+        VisualImage::Data {
+            mime: "image/svg+xml".into(),
+            bytes: DOT_SVG.as_bytes().to_vec(),
+        },
+    ] {
+        let host = host.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| ProbeVisual {
+            visual: Visual {
+                id: "refused-svg".into(),
+                caption: "An SVG".into(),
+                after: reno_proto::Seq(1),
+                kind: VisualKind::Image(source),
+            },
+            host,
+            theme: Theme::for_appearance(Appearance::Dark),
+        });
+        settle(vcx, |vcx| {
+            painted(vcx, "md-image") || painted(vcx, "md-visual-failed")
+        });
+        assert!(
+            painted(vcx, "md-visual-failed"),
+            "posted SVG remains refused"
+        );
+        assert!(!painted(vcx, "md-image"));
+    }
+}
+
+#[gpui::test]
+fn a_data_svg_draws_the_same_way(cx: &mut TestAppContext) {
+    let source = format!("![dot]({})", data_svg(DOT_SVG));
+    let (_view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-image"));
+}
+
+#[gpui::test]
+fn an_svg_whose_image_href_names_a_file_outside_the_worktree_paints_nothing(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("outside.svg");
+    std::fs::write(&path, DOT_SVG).unwrap();
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+          <image href="{}" width="10" height="10"/>
+        </svg>"#,
+        path.display()
+    );
+    let source = format!("![outside]({})", data_svg(&svg));
+    let (_view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-image-not-loaded"));
+    assert!(!painted(vcx, "md-image"));
+}
+
+#[gpui::test]
+fn an_image_wrapped_in_a_link_follows_the_link(cx: &mut TestAppContext) {
+    let hits = Rc::new(links::fake::Recording::default());
+    cx.update(|cx| links::install(cx, hits.clone()));
+    let target = "https://example.org/reference";
+    let source = format!("[![dot]({})]({target})", data_svg(DOT_SVG));
+    let (_view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-image"));
+    click(vcx, "md-image");
+    assert_eq!(*hits.opened.borrow(), [target.to_owned()]);
 }
 
 #[gpui::test]
@@ -935,4 +1114,405 @@ fn a_hoisted_note_only_list_item_leaves_no_marker_in_the_reply(cx: &mut TestAppC
     });
     draw(vcx);
     assert_eq!(note_top(vcx), before);
+}
+
+#[gpui::test]
+fn a_callout_draws_with_its_kind_label(cx: &mut TestAppContext) {
+    let source = format!(
+        "{RENDER2_REPLY}\n> [!TIP]\n> A tip.\n\n> [!WARNING]\n> A warning.\n\n> [!CAUTION]\n> A caution.\n\n> [!IMPORTANT]\n> An important detail.",
+    );
+    let (view, vcx) = probe(
+        cx,
+        &source,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    vcx.simulate_resize(gpui::size(px(800.0), px(1400.0)));
+    for appearance in [Appearance::Dark, Appearance::Light] {
+        view.update(vcx, |probe, cx| {
+            probe.theme = Theme::for_appearance(appearance);
+            cx.notify();
+        });
+        draw(vcx);
+        let theme = Theme::for_appearance(appearance);
+        for (frame, label, color) in [
+            ("md-callout-note", "Note", theme.accent),
+            ("md-callout-tip", "Tip", theme.success),
+            ("md-callout-warning", "Warning", theme.warning),
+            ("md-callout-caution", "Caution", theme.danger),
+            ("md-callout-important", "Important", theme.accent),
+        ] {
+            let frame = vcx.debug_bounds(frame).expect("drawn callout");
+            let label = vcx.debug_bounds(label).expect("drawn kind label");
+            assert!(frame.contains(&label.center()));
+            assert!(
+                label.bottom() < frame.bottom(),
+                "the label precedes the body"
+            );
+            let ink = vcx.update(|window, _| {
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == window.pixel_snap_bounds(frame).scale(window.scale_factor())
+                        && quad.border_color == color
+                        && quad.border_widths.left.0 > 0.0
+                })
+            });
+            assert!(ink, "the {label:?} callout frame uses the role color");
+        }
+    }
+}
+
+#[gpui::test]
+fn a_wide_table_scrolls_sideways(cx: &mut TestAppContext) {
+    let theme = Theme::for_appearance(Appearance::Dark);
+    let (host, registry) = selectable_reply(RENDER2_REPLY);
+    let (_view, vcx) = probe(cx, RENDER2_REPLY, host, Appearance::Dark);
+    let table = vcx
+        .debug_bounds("md-table-scroll")
+        .expect("wide table viewport");
+    let track = vcx
+        .debug_bounds("md-table-scrollbar")
+        .expect("table scrollbar");
+    let thumb = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, _| {
+            let track = track.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| {
+                    quad.background.as_solid() == Some(theme.faint)
+                        && track.contains(&quad.bounds.center())
+                        && quad.bounds.size.width < track.size.width
+                })
+                .expect("visible scrollbar thumb")
+                .bounds
+                .map(|n| px(n.0 / window.scale_factor()))
+        })
+    };
+    let last_cell = || {
+        registry
+            .take()
+            .into_iter()
+            .rfind(|p| p.layout.text().starts_with("Who owns the follow-up"))
+            .expect("rightmost table header")
+    };
+
+    let initial = last_cell().bounds;
+    let left_thumb = thumb(vcx);
+    assert!(
+        initial.right() > table.right(),
+        "keep the column's natural width"
+    );
+    wheel_by(vcx, table.center(), gpui::point(px(0.0), px(-120.0)), false);
+    assert_eq!(last_cell().bounds.left(), initial.left());
+    assert_eq!(thumb(vcx), left_thumb);
+
+    wheel_by(vcx, table.center(), gpui::point(px(-160.0), px(0.0)), false);
+    let wheel_position = last_cell().bounds.left();
+    assert!(wheel_position < initial.left());
+    let moved_thumb = thumb(vcx);
+    assert!(moved_thumb.left() > left_thumb.left());
+
+    let button = gpui::MouseButton::Left;
+    let modifiers = gpui::Modifiers::none();
+    let end = gpui::point(track.right() + px(8.0), moved_thumb.center().y);
+    vcx.simulate_mouse_down(moved_thumb.center(), button, modifiers);
+    vcx.simulate_mouse_move(end, button, modifiers);
+    vcx.simulate_mouse_up(end, button, modifiers);
+    draw(vcx);
+    let last = last_cell();
+    let visible = last.bounds;
+    let text = last.layout.text();
+    assert!(visible.left() < wheel_position, "dragging moves the table");
+    assert!(visible.left() >= table.left() && visible.right() <= table.right());
+    assert!(text.ends_with("past the grace period"));
+    assert_eq!(&RENDER2_REPLY[last.map.source_range(0..text.len())], text);
+    assert_eq!(thumb(vcx).right(), track.right());
+}
+
+fn selectable_reply(source: &str) -> (Host, markdown_view::select::Registry) {
+    let mut stream = Streaming::default();
+    stream.set_text(source);
+    let registry = markdown_view::select::Registry::default();
+    let host =
+        Host::transcript(None, None, None).selectable(Some(Rc::new(markdown_view::SelectHost {
+            registry: registry.clone(),
+            key: crate::transcript::Key(0),
+            anchors: stream.anchors(),
+            selected: None,
+            style: Default::default(),
+        })));
+    (host, registry)
+}
+
+#[gpui::test]
+fn front_matter_draws_as_pairs_and_comments_are_hidden(cx: &mut TestAppContext) {
+    use crate::ui::markdown_view::Marks;
+    use crate::vm::find::Query;
+
+    let source = RENDER2_REPLY.replacen(
+        "title: Bounded shutdown",
+        "title :   \"Böunded: shutdown\"  ",
+        1,
+    );
+    let query = ":   \"Böunded";
+    let match_start = source.find(query).unwrap();
+    let (host, registry) = selectable_reply(&source);
+    let host = host.marked(Some(Rc::new(Marks {
+        reveal: None,
+        source_hits: Vec::new(),
+        matcher: Rc::new(
+            Query {
+                text: query.to_owned(),
+                ..Default::default()
+            }
+            .compile()
+            .unwrap(),
+        ),
+        current: Some(0),
+        current_source: Some(match_start..match_start + query.len()),
+    })));
+    let (_view, vcx) = probe(cx, &source, host, Appearance::Dark);
+    let card = vcx.debug_bounds("md-front-matter").expect("metadata table");
+    let pieces = registry.take();
+    let part = |text: &str| {
+        let piece = pieces.iter().find(|p| p.layout.text() == text).unwrap();
+        assert_eq!(&source[piece.map.source_range(0..text.len())], text);
+        assert!(card.contains(&piece.bounds.center()));
+        piece.bounds
+    };
+    let title = part("title :   ");
+    let value = part("\"Böunded: shutdown\"  ");
+    let status = part("status: ");
+    let draft = part("draft");
+    assert_eq!(title.top(), value.top());
+    assert_eq!(status.top(), draft.top());
+    assert!(title.top() < status.top());
+    assert_eq!(value.left(), draft.left());
+    assert!(title.right() < value.left());
+    assert!(
+        pieces
+            .iter()
+            .all(|p| { !p.layout.text().contains("wider than the column on purpose") })
+    );
+
+    let current = Theme::for_appearance(Appearance::Dark).accent;
+    let highlighted = vcx.update(|window, _| {
+        let frame = card.scale(window.scale_factor());
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                frame.contains(&quad.bounds.center()) && quad.background.as_solid() == Some(current)
+            })
+            .count()
+    });
+    assert_eq!(highlighted, 2, "one current match paints across both cells");
+}
+
+#[gpui::test]
+fn task_items_draw_a_box_that_does_not_toggle(cx: &mut TestAppContext) {
+    let source = RENDER2_REPLY.replacen("[x] Bound", "[X] Bound", 1);
+    let (host, registry) = selectable_reply(&source);
+    let (view, vcx) = probe(cx, &source, host, Appearance::Dark);
+    assert!(painted(vcx, "md-task-box"));
+    let _ = registry.take();
+    draw(vcx);
+
+    let boxes = || {
+        registry
+            .take()
+            .into_iter()
+            .filter_map(|piece| {
+                let text = piece.layout.text();
+                matches!(text.trim_end(), "☑" | "☐").then(|| {
+                    let range = piece.map.source_range(0..text.trim_end().len());
+                    (text, &source[range], piece.bounds)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = boxes();
+    assert_eq!(
+        before
+            .iter()
+            .map(|(text, raw, _)| (text.trim_end(), *raw))
+            .collect::<Vec<_>>(),
+        [("☑", "[X]"), ("☑", "[x]"), ("☐", "[ ]")]
+    );
+    for (_, _, bounds) in &before {
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    }
+    let _ = registry.take();
+    draw(vcx);
+    assert_eq!(
+        boxes(),
+        before,
+        "clicking the checked and unchecked boxes leaves their state unchanged"
+    );
+    assert_eq!(
+        view.read_with(vcx, |probe, _| probe.tree.clone()),
+        tree_of(&source)
+    );
+}
+
+#[test]
+fn an_uppercase_task_marker_copies_the_drawn_state_and_keeps_its_markdown_bytes() {
+    let source = RENDER2_REPLY.replacen("[x] Bound", "[X] Bound", 1);
+    let start = source.find("[X]").unwrap();
+    let range = start..start + "[X]".len();
+    let atoms = crate::vm::anchor::atoms(&source, &tree_of(&source));
+    let marker = atoms
+        .iter()
+        .find(|atom| atom.src == range)
+        .expect("exact checkbox source");
+    assert_eq!(&source[marker.src.clone()], "[X]");
+    assert_eq!(marker.search_source(&(0.."☑".len())), Some(range.clone()));
+    assert_eq!(crate::vm::anchor::copy(&atoms, range), "☑ ");
+}
+
+#[gpui::test]
+fn a_wide_table_is_reachable_and_scrolls_with_the_keyboard(cx: &mut TestAppContext) {
+    let source = format!(
+        "| Left | Right |\n| --- | --- |\n| first cell | `{}` |",
+        "wide code ".repeat(100)
+    );
+    let (host, registry) = selectable_reply(&source);
+    let (_view, vcx) = probe(cx, &source, host, Appearance::Dark);
+    let left = || {
+        registry
+            .take()
+            .into_iter()
+            .rfind(|piece| piece.layout.text() == "Right")
+            .unwrap()
+            .bounds
+            .left()
+    };
+    let before = left();
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.simulate_keystrokes("right");
+    draw(vcx);
+    assert!(left() < before, "the focused viewport pans right");
+    vcx.simulate_keystrokes("left");
+    draw(vcx);
+    assert_eq!(left(), before);
+}
+
+#[gpui::test]
+fn highlights_callouts_and_diagrams_draw_from_theme_tokens_in_light_and_dark(
+    cx: &mut TestAppContext,
+) {
+    use crate::vm::find::Query;
+    use markdown_view::Marks;
+
+    let source = "> [!WARNING]\n> Caution ahead. Caution again.\n\n```mermaid\nflowchart LR\n A[Start] --> B[Stop]\n```";
+    let (start, length) = (source.find("Caution").unwrap(), "Caution".len());
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (host, _) = selectable_reply(source);
+        let host = host.marked(Some(Rc::new(Marks {
+            matcher: Rc::new(
+                Query {
+                    text: "Caution".to_owned(),
+                    ..Default::default()
+                }
+                .compile()
+                .unwrap(),
+            ),
+            current: Some(0),
+            current_source: Some(start..start + length),
+            source_hits: Vec::new(),
+            reveal: None,
+        })));
+        let (_, vcx) = probe(cx, source, host, appearance);
+        let theme = Theme::for_appearance(appearance);
+        let callout = vcx.debug_bounds("md-callout-warning").unwrap();
+        vcx.update(|window, _| {
+            let bounds = window
+                .pixel_snap_bounds(callout)
+                .scale(window.scale_factor());
+            let quads = window.painted_quads();
+            let ordinary = Some(theme.warning.opacity(if appearance == Appearance::Dark {
+                0.25
+            } else {
+                0.18
+            }));
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.bounds == bounds && quad.border_color == theme.warning)
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| bounds.contains(&quad.bounds.center())
+                        && quad.background.as_solid() == Some(theme.accent))
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| bounds.contains(&quad.bounds.center())
+                        && quad.background.as_solid() == ordinary),
+                "ordinary match uses the warning tint"
+            );
+        });
+        let hex = |color| {
+            let [r, g, b, _] = markdown_view::math::bytes_of(color);
+            format!("#{r:02x}{g:02x}{b:02x}")
+        };
+        let directive = markdown_view::mermaid::init_directive(&theme);
+        for (var, color) in [
+            ("background", theme.surface),
+            ("primaryColor", theme.raised),
+            ("primaryTextColor", theme.text),
+            ("primaryBorderColor", theme.faint),
+            ("lineColor", theme.muted),
+        ] {
+            assert!(directive.contains(&format!("\"{var}\":\"{}\"", hex(color))));
+        }
+    }
+}
+
+#[gpui::test]
+fn a_footnote_reference_can_be_activated_with_the_keyboard(cx: &mut TestAppContext) {
+    let source = "A reference[^note].\n\n[^note]: The destination.";
+    let (host, _) = selectable_reply(source);
+    let hits = Rc::new(std::cell::Cell::new(0));
+    let count = hits.clone();
+    let host = host.on_footnote(move |_, _| count.set(count.get() + 1));
+    let (_, vcx) = probe(cx, source, host, Appearance::Dark);
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(hits.get(), 1);
+}
+
+#[gpui::test]
+fn diagram_zoom_can_be_changed_and_reset_with_the_keyboard(cx: &mut TestAppContext) {
+    let source = format!("```mermaid\n{WIDE_FLOW}\n```");
+    let (_, vcx) = probe(cx, &source, Host::preview(), Appearance::Dark);
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+    for _ in 0..8 {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.simulate_keystrokes("=");
+        draw(vcx);
+        if painted(vcx, "diagram-zoom-level") {
+            break;
+        }
+    }
+    assert!(painted(vcx, "diagram-zoom-level"));
+    for _ in 0..24 {
+        vcx.simulate_keystrokes("=");
+        draw(vcx);
+    }
+    let before = vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x;
+    vcx.simulate_keystrokes("right");
+    draw(vcx);
+    assert!(vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x < before);
+    vcx.simulate_keystrokes("left");
+    draw(vcx);
+    assert_eq!(
+        vcx.debug_bounds("md-diagram-zoom").unwrap().origin.x,
+        before
+    );
+    vcx.simulate_keystrokes("0");
+    draw(vcx);
+    assert!(!painted(vcx, "diagram-zoom-level"));
 }

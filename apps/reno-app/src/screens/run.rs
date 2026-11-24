@@ -11,12 +11,13 @@
 //! parsed when its item is first drawn.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
-    ListOffset, ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*,
-    px,
+    ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString,
+    Subscription, Task, Window, div, list, prelude::*, px,
 };
 use reno_client::visuals::Visual;
 use reno_proto::{
@@ -25,6 +26,10 @@ use reno_proto::{
 };
 
 use super::ScreenEvent;
+use crate::actions::{
+    ChooseMenuItem, CloseMenu, FocusTranscript, NextMenuItem, NextTranscriptControl,
+    PreviousMenuItem, PreviousTranscriptControl,
+};
 use crate::panel::saved::Saved;
 use crate::panel::{Descriptors, PanelKey, PanelState, Place};
 use crate::prefs::{Prefs, ThinkingMode};
@@ -34,8 +39,10 @@ use crate::transcript::{self as model, Change, Facts, Key, Row, ToolEntry, TurnB
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
+use crate::ui::markdown_view::link::{Action as LinkAction, LinkPolicy};
 use crate::ui::markdown_view::lru::Lru;
 use crate::ui::markdown_view::{self, Streaming};
+use crate::ui::menu;
 use crate::ui::scrollbar::{self, scrollbar};
 use crate::ui::theme::{self, Theme};
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
@@ -68,6 +75,18 @@ pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.
 const CHANGES_EVERY: Duration = Duration::from_secs(1);
+
+/// Leave one tick for the phase of a timer already running when a delta arrives.
+const REVEAL_EVERY: Duration = Duration::from_millis(16);
+const REVEAL_WINDOW: Duration = Duration::from_millis(184);
+/// Put the first few characters on screen as soon as a new reply starts.
+const REVEAL_FIRST_BYTES: usize = 32;
+
+struct StreamReveal {
+    key: Key,
+    shown: usize,
+    deadline: Instant,
+}
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
@@ -159,6 +178,69 @@ struct Latest {
     lead: Vec<Row>,
 }
 
+struct TranscriptMenu {
+    at: Point<Pixels>,
+    link: Option<String>,
+    has_selection: bool,
+    reply: Option<Key>,
+    can_scroll_to_top: bool,
+    can_scroll_to_bottom: bool,
+    state: menu::MenuState,
+    return_focus: Option<FocusHandle>,
+}
+
+impl TranscriptMenu {
+    fn items(&self) -> impl Iterator<Item = MenuItem> + use<> {
+        [
+            self.link.as_ref().map(|_| MenuItem::Open),
+            self.link.as_ref().map(|_| MenuItem::CopyLink),
+            self.has_selection.then_some(MenuItem::Copy),
+            self.has_selection.then_some(MenuItem::CopyAsMarkdown),
+            self.reply.map(|_| MenuItem::CopyMessage),
+            self.can_scroll_to_top.then_some(MenuItem::ScrollToTop),
+            self.can_scroll_to_bottom
+                .then_some(MenuItem::ScrollToBottom),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MenuItem {
+    Open,
+    CopyLink,
+    Copy,
+    CopyAsMarkdown,
+    CopyMessage,
+    ScrollToTop,
+    ScrollToBottom,
+}
+
+impl MenuItem {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::CopyLink => "Copy Link",
+            Self::Copy => "Copy",
+            Self::CopyAsMarkdown => "Copy as Markdown",
+            Self::CopyMessage => "Copy Message",
+            Self::ScrollToTop => "Scroll to top",
+            Self::ScrollToBottom => "Scroll to bottom",
+        }
+    }
+}
+
+fn menu_link_allowed(policy: &LinkPolicy, url: &str, cx: &gpui::App) -> bool {
+    match policy.action(url) {
+        LinkAction::Web(_) => true,
+        LinkAction::File(file) => policy
+            .files()
+            .is_some_and(|files| files.resolves(&file.path, cx)),
+        _ => false,
+    }
+}
+
 pub(crate) struct RunScreen {
     store: Entity<Store>,
     /// The thread's latest run when the screen opened: the run the composer, the header and the
@@ -200,6 +282,9 @@ pub(crate) struct RunScreen {
     /// first drawn. The oldest go when the thread is long; the reply still arriving never does.
     markdown: Lru<Key, Streaming>,
     live_reply: Option<Key>,
+    reveal: Option<StreamReveal>,
+    reveal_through: Option<Seq>,
+    reveal_task: Option<Task<()>>,
     /// Folds, tool groups, reasoning rows and long messages that are open: the owner's, and those
     /// find opened (which it closes again).
     open: Opens<Key>,
@@ -215,8 +300,9 @@ pub(crate) struct RunScreen {
     reasoning_scroll: gpui::ScrollHandle,
     reasoning_scrolled: std::cell::Cell<Option<(Key, usize)>>,
     /// Tool calls whose output shows, and those showing all of it.
-    outputs_open: Opens<String>,
-    outputs_full: Opens<String>,
+    outputs_open: Opens<output::ToolKey>,
+    outputs_full: Opens<output::ToolKey>,
+    tool_events: output::ToolEvents,
     /// Find in the conversation.
     find: find::Find,
     /// The side panel's tabs, keyed by what the panel belongs to (the run, until threads land).
@@ -239,6 +325,7 @@ pub(crate) struct RunScreen {
     panel_shown: bool,
     /// The Files tab's tree, viewer and watch, made when it first shows.
     files: Option<files::FilesTab>,
+    files_run: RunId,
     /// The Terminal tabs: a slot each, with its view made when it first shows.
     terms: terminal::Terms,
     /// The History tab's log, search and selection, made when it first shows.
@@ -295,6 +382,8 @@ pub(crate) struct RunScreen {
     /// Selecting text across the transcript, and the node that holds the keyboard for ⌘C.
     select: select::Select,
     transcript_focus: FocusHandle,
+    transcript_menu_focus: FocusHandle,
+    transcript_menu: Option<TranscriptMenu>,
     /// The runs of the thread shown, oldest first; a row's run is in the high bits of its key.
     runs: Vec<RunId>,
     /// The agent-posted visuals of those runs (none with the real daemon).
@@ -354,6 +443,9 @@ impl RunScreen {
                 screen.update(cx, |this, cx| this.note_place(cx)).ok();
             });
         });
+        let loaded_transcript = store.read(cx).state().transcript(&run);
+        let tool_events = output::ToolEvents::from_loaded(loaded_transcript);
+        let reveal_through = loaded_transcript.and_then(|transcript| transcript.highest);
         let mut screen = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 this.refresh(cx);
@@ -381,6 +473,9 @@ impl RunScreen {
             facts: Facts::default(),
             markdown: Lru::new(PARSED_REPLIES, usize::MAX),
             live_reply: None,
+            reveal: None,
+            reveal_through,
+            reveal_task: None,
             open: Opens::default(),
             streaming_open: None,
             reasoning_shut: HashSet::new(),
@@ -389,6 +484,7 @@ impl RunScreen {
             reasoning_scrolled: std::cell::Cell::new(None),
             outputs_open: Opens::default(),
             outputs_full: Opens::default(),
+            tool_events,
             find: find::Find::default(),
             panel_key: key,
             panel,
@@ -400,6 +496,7 @@ impl RunScreen {
             panel_focus: cx.focus_handle(),
             panel_shown: false,
             files: None,
+            files_run: run.clone(),
             terms,
             history: None,
             history_page: crate::vm::git_graph::PAGE,
@@ -430,7 +527,9 @@ impl RunScreen {
             activity_output: None,
             activity_chips: 0,
             select: select::Select::default(),
-            transcript_focus: cx.focus_handle(),
+            transcript_focus: cx.focus_handle().tab_stop(true),
+            transcript_menu_focus: cx.focus_handle(),
+            transcript_menu: None,
             runs: Vec::new(),
             visuals: Vec::new(),
             file_index: links::Index::default(),
@@ -716,7 +815,8 @@ impl RunScreen {
         let from = from.min(self.rows.len());
         let rows_replaced = rows.is_some();
         let old_rows = match rows {
-            Some(new) => {
+            Some(mut new) => {
+                transcript::hide_interrupted_tools(&mut new);
                 let old = self.rows.split_off(from);
                 self.rows.extend(new);
                 old
@@ -802,9 +902,12 @@ impl RunScreen {
             .approvals_for(&self.run)
             .cloned()
             .collect();
+        let previous = self.tail_reply();
         if !self.advance_latest(routing.clone(), &pending, cx) {
             self.rebuild_rows(routing, &pending, cx);
         }
+        self.track_reply_reveal(previous, cx);
+        self.expand_new_tools(cx);
         self.track_streaming_reasoning(cx);
         self.sync_visuals(cx);
         self.measure_activity_chips(cx);
@@ -813,6 +916,131 @@ impl RunScreen {
         self.follow_place();
         self.follow_changes(cx);
         self.follow_thread(cx);
+    }
+
+    fn tail_reply(&self) -> Option<(Key, usize)> {
+        match self.rows.last()? {
+            Row::Prose { key, text } if self.run_of(*key) == self.run => Some((*key, text.len())),
+            _ => None,
+        }
+    }
+
+    fn track_reply_reveal(&mut self, previous: Option<(Key, usize)>, cx: &mut Context<Self>) {
+        let received_delta = self
+            .store
+            .read(cx)
+            .state()
+            .transcript(&self.run)
+            .is_some_and(|journal| {
+                let after = journal
+                    .events
+                    .partition_point(|(seq, _)| Some(*seq) <= self.reveal_through);
+                self.reveal_through = journal.highest;
+                journal.events[after..]
+                    .iter()
+                    .any(|(_, event)| matches!(event, reno_proto::ExecEvent::Text { .. }))
+            });
+        let Some((key, received)) = self.tail_reply().filter(|_| self.is_live(cx)) else {
+            self.finish_reply_reveal();
+            return;
+        };
+        if cx.reduce_motion() {
+            self.finish_reply_reveal();
+            return;
+        }
+        let local = |key: Key| key.order().map_or(key.0, |(_, seq)| seq);
+        if let Some(reveal) = &mut self.reveal {
+            if local(reveal.key) == local(key) {
+                reveal.key = key;
+            } else {
+                self.finish_reply_reveal();
+            }
+        }
+        let previous = previous.filter(|(old, _)| local(*old) == local(key));
+        let before = previous.map_or(0, |(_, len)| len);
+        if received < before {
+            self.finish_reply_reveal();
+        }
+        if !received_delta || received <= before {
+            return;
+        }
+        let deadline = cx.background_executor().now() + REVEAL_WINDOW;
+        let shown = if let Some(reveal) = &self.reveal {
+            reveal.shown
+        } else if previous.is_some() {
+            before
+        } else if let Some(Row::Prose { text, .. }) = self.rows.last() {
+            text.floor_char_boundary(REVEAL_FIRST_BYTES.min(received))
+        } else {
+            return;
+        };
+        if shown >= received {
+            return;
+        }
+        self.reveal = Some(StreamReveal {
+            key,
+            shown,
+            deadline,
+        });
+        if self.reveal_task.is_none() {
+            self.reveal_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(REVEAL_EVERY).await;
+                    if !this.update(cx, Self::reveal_tick).unwrap_or(false) {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn reveal_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(reveal), Some(Row::Prose { key, text })) =
+            (self.reveal.as_mut(), self.rows.last())
+        else {
+            self.finish_reply_reveal();
+            return false;
+        };
+        let remaining = reveal
+            .deadline
+            .saturating_duration_since(cx.background_executor().now());
+        let frames = remaining.as_millis().div_ceil(REVEAL_EVERY.as_millis()) as usize + 1;
+        if cx.reduce_motion() || reveal.key != *key || frames == 1 {
+            self.finish_reply_reveal();
+            cx.notify();
+            return false;
+        }
+        let step = text.len().saturating_sub(reveal.shown).div_ceil(frames);
+        reveal.shown = text.ceil_char_boundary(reveal.shown.saturating_add(step));
+        if reveal.shown == text.len() {
+            self.finish_reply_reveal();
+            cx.notify();
+            return false;
+        }
+        let key = *key;
+        self.remeasure(key);
+        cx.notify();
+        true
+    }
+
+    fn finish_reply_reveal(&mut self) {
+        self.reveal_task = None;
+        if let Some(reveal) = self.reveal.take() {
+            self.remeasure(reveal.key);
+        }
+    }
+
+    fn shown_reply<'a>(&self, key: Key, text: &'a str) -> &'a str {
+        self.reveal
+            .as_ref()
+            .filter(|reveal| reveal.key == key)
+            .and_then(|reveal| text.get(..reveal.shown))
+            .unwrap_or(text)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reveal_pending(&self) -> bool {
+        self.reveal_task.is_some()
     }
 
     /// Chips under the transcript's agent text change those rows' height: measure the prose rows
@@ -869,7 +1097,10 @@ impl RunScreen {
         let end = (top + SETTLED_ITEMS).min(self.items.len());
         for ix in top..end {
             let holds_output = self.items.items[ix].visual.is_some()
-                || matches!(self.items.row(&self.rows, ix), Some(Row::Prose { .. }));
+                || matches!(
+                    self.items.row(&self.rows, ix),
+                    Some(Row::Prose { .. } | Row::Tools { .. })
+                );
             if holds_output {
                 self.measure_again(ix);
             }
@@ -1207,8 +1438,32 @@ impl RunScreen {
         }
 
         let list = self.list.clone();
-        cx.spawn_in(window, async move |_, cx| {
-            // The rows are in when the count has held for a second and a half.
+        cx.spawn_in(window, async move |screen, cx| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let ready = screen.update(cx, |screen, cx| {
+                    if matches!(screen.rows.last(), Some(Row::Done { .. })) {
+                        screen.open_all_folds(cx);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                match ready {
+                    Ok(true) => break,
+                    Err(_) => return,
+                    Ok(false) if Instant::now() >= deadline => {
+                        bench::report_scroll(0, &[]);
+                        return;
+                    }
+                    Ok(false) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await
+                    }
+                }
+            }
+            // Let the open list lay out and settle before taking the first frame sample.
             let mut held = 0;
             let mut count = 0;
             while held < 6 {
@@ -1468,6 +1723,7 @@ impl RunScreen {
     /// The owner moved the view: where it rests now is the place to keep, saved soon. A view at
     /// the tail has no place.
     pub(super) fn note_place(&mut self, cx: &mut Context<Self>) {
+        self.select.menu_target = None;
         self.rechecks = 0;
         let place = self.saved_place();
         self.place_moved = true;
@@ -1643,6 +1899,219 @@ impl RunScreen {
     pub(super) fn summary<'a>(&self, cx: &'a gpui::App) -> Option<&'a RunSummary> {
         self.store.read(cx).state().run(&self.run)
     }
+
+    fn transcript_link_policy(&self, reply: Option<Key>, cx: &mut Context<Self>) -> LinkPolicy {
+        LinkPolicy::Transcript {
+            files: Some(self.file_links_for(
+                reply.map_or_else(|| self.run.clone(), |key| self.run_of(key)),
+                cx,
+            )),
+        }
+    }
+
+    fn open_transcript_menu(
+        &mut self,
+        at: Point<Pixels>,
+        link: Option<&str>,
+        reply: Option<Key>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let link =
+            link.filter(|url| menu_link_allowed(&self.transcript_link_policy(reply, cx), url, cx));
+        let following = self.list.is_following_tail();
+        let return_focus = if self.transcript_menu_focus.is_focused(window) {
+            self.transcript_menu
+                .as_ref()
+                .and_then(|menu| menu.return_focus.clone())
+        } else {
+            window.focused(cx)
+        };
+        self.transcript_menu = Some(TranscriptMenu {
+            at,
+            link: link.map(str::to_owned),
+            has_selection: self.has_selection(),
+            reply,
+            can_scroll_to_top: following || self.scrolled_px() > 0.0,
+            can_scroll_to_bottom: !following,
+            state: menu::MenuState::default(),
+            return_focus,
+        });
+        window.focus(&self.transcript_menu_focus, cx);
+        cx.notify();
+    }
+
+    fn open_transcript_menu_by_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self
+            .select
+            .menu_targets
+            .borrow()
+            .iter()
+            .find(|target| Some(&target.id) == self.select.menu_target.as_ref())
+            .cloned();
+        if let Some(target) = target {
+            self.open_transcript_menu(
+                target.bounds.bottom_left(),
+                target.id.destination(),
+                Some(target.id.reply),
+                window,
+                cx,
+            );
+            self.step_transcript_menu(true, cx);
+            return;
+        }
+        let view = self.select.list.get();
+        let anchor = self
+            .select
+            .current
+            .filter(|s| !s.is_empty())
+            .and_then(|sel| {
+                let pieces = self.select.registry.borrow();
+                let piece = pieces.iter().find(|piece| {
+                    self.select.order.get(&piece.key) == Some(&sel.head.ordinal)
+                        && piece.slot == sel.head.slot
+                        && piece.bounds.intersects(&view)
+                })?;
+                let at = gpui::point(piece.bounds.left(), piece.bounds.top().max(view.top()));
+                let reply = self
+                    .items
+                    .item_of(piece.key)
+                    .and_then(|ix| self.items.row(&self.rows, ix))
+                    .filter(|row| matches!(row, Row::Prose { .. }))
+                    .map(Row::key);
+                Some((at, reply))
+            });
+        let (at, reply) = anchor.unwrap_or((view.origin + gpui::point(px(8.0), px(8.0)), None));
+        self.open_transcript_menu(at, None, reply, window, cx);
+        self.step_transcript_menu(true, cx);
+    }
+
+    fn dismiss_transcript_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TranscriptMenu> {
+        let menu = self.transcript_menu.take()?;
+        if self.transcript_menu_focus.is_focused(window) {
+            if let Some(focus) = &menu.return_focus {
+                window.focus(focus, cx);
+            } else {
+                window.blur(cx);
+            }
+        }
+        cx.notify();
+        Some(menu)
+    }
+
+    fn choose_transcript_menu(
+        &mut self,
+        item: MenuItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.dismiss_transcript_menu(window, cx) else {
+            return;
+        };
+        match item {
+            MenuItem::Open => {
+                if let Some(target) = menu.link {
+                    let policy = self.transcript_link_policy(menu.reply, cx);
+                    let action = policy.action(&target);
+                    window.defer(cx, move |window, cx| policy.run(&action, window, cx));
+                }
+            }
+            MenuItem::CopyLink => {
+                if let Some(target) = menu.link {
+                    output::copy(cx, target, "Link copied");
+                }
+            }
+            MenuItem::Copy => self.copy_selection(cx),
+            MenuItem::CopyAsMarkdown => self.copy_markdown(cx),
+            MenuItem::CopyMessage => {
+                if let Some(Row::Prose { key, text }) = menu
+                    .reply
+                    .and_then(|key| self.items.item_of(key))
+                    .and_then(|ix| self.items.row(&self.rows, ix))
+                {
+                    output::copy(
+                        cx,
+                        self.shown_reply(*key, text).to_owned(),
+                        "Message copied",
+                    );
+                }
+            }
+            MenuItem::ScrollToTop => self.key_home(cx),
+            MenuItem::ScrollToBottom => self.jump_to_latest(cx),
+        }
+    }
+
+    fn step_transcript_menu(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.transcript_menu {
+            menu.state.step(menu.items().count(), forward);
+            cx.notify();
+        }
+    }
+
+    fn choose_highlighted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let item = self
+            .transcript_menu
+            .as_ref()
+            .and_then(|menu| menu.items().nth(menu.state.highlighted?));
+        if let Some(item) = item {
+            self.choose_transcript_menu(item, window, cx);
+        }
+    }
+
+    fn transcript_popup(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let open = self.transcript_menu.as_ref()?;
+        let panel = menu::panel(theme, "transcript-menu", 208.0)
+            .key_context(menu::CONTEXT)
+            .track_focus(&self.transcript_menu_focus)
+            .on_action(cx.listener(|this, _: &PreviousMenuItem, _, cx| {
+                this.step_transcript_menu(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextMenuItem, _, cx| {
+                this.step_transcript_menu(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ChooseMenuItem, window, cx| {
+                this.choose_highlighted(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseMenu, window, cx| {
+                this.dismiss_transcript_menu(window, cx);
+            }))
+            .children(open.items().enumerate().map(|(ix, item)| {
+                let label = item.label();
+                let id = format!("transcript-menu-{}", label.to_lowercase().replace(' ', "-"));
+                menu::row(theme, id, label, None, None, true, false)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .when(open.state.highlighted == Some(ix), |row| {
+                        row.bg(theme.row_selected()).border_color(theme.accent)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.choose_transcript_menu(item, window, cx);
+                    }))
+            }));
+        let screen = cx.weak_entity();
+        let dismiss: menu::Dismiss = Rc::new(move |window, cx| {
+            screen
+                .update(cx, |this, cx| this.dismiss_transcript_menu(window, cx))
+                .ok();
+        });
+        Some(menu::popup(open.at, panel, &dismiss))
+    }
+
+    fn focus_run_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select.menu_target = None;
+        let focus = if self.panel_for.is_some() && !self.keep_composer {
+            self.approval_focus.clone()
+        } else {
+            self.focus_handle(cx)
+        };
+        window.focus(&focus, cx);
+        cx.notify();
+    }
 }
 
 impl Render for RunScreen {
@@ -1655,6 +2124,9 @@ impl Render for RunScreen {
         }
         self.remeasure_settled(cx);
         self.follow_thinking_setting(cx);
+        if cx.reduce_motion() {
+            self.finish_reply_reveal();
+        }
         self.recheck_view(window, cx);
         // The texts file themselves again as the list paints them.
         self.begin_paint();
@@ -1667,9 +2139,14 @@ impl Render for RunScreen {
             }
         }
         let rail = self.tick_rail(&theme, cx);
+        let [focus, drag_tracker] = self.select_nodes(cx);
         let transcript = div()
             .id("transcript")
             .debug_selector(|| "transcript".to_owned())
+            .key_context(select::CONTROLS_CONTEXT)
+            .tab_group()
+            .on_action(|_: &NextTranscriptControl, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousTranscriptControl, window, cx| window.focus_prev(cx))
             .relative()
             .flex_1()
             .min_h_0()
@@ -1677,6 +2154,14 @@ impl Render for RunScreen {
             .max_w(px(COLUMN))
             .flex()
             .flex_col()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_transcript_menu(event.position, None, None, window, cx);
+                }),
+            )
+            .child(focus)
             .child(
                 div()
                     .w_full()
@@ -1696,7 +2181,35 @@ impl Render for RunScreen {
                     ),
             )
             // After the list, so it is on top of it and takes the clicks.
-            .children(self.select_nodes(cx))
+            .child(drag_tracker)
+            .when(
+                self.transcript_focus.is_focused(window) && window.last_input_was_keyboard(),
+                |transcript| {
+                    transcript
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(theme.accent),
+                        )
+                        .children(self.menu_target_outline(&theme))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(RAIL + 8.0))
+                                .bottom(px(8.0))
+                                .rounded(px(5.0))
+                                .bg(theme.surface)
+                                .px(px(7.0))
+                                .py(px(3.0))
+                                .text_color(theme.muted)
+                                .text_size(px(11.0))
+                                .child("⌥↑/↓ links and replies · ⇧F10 menu · F6 controls"),
+                        )
+                },
+            )
             .children(rail)
             .child(
                 div()
@@ -1750,7 +2263,13 @@ impl Render for RunScreen {
             .size_full()
             .relative()
             .flex()
-            .child(chat);
+            .on_action(cx.listener(|this, _: &FocusTranscript, window, cx| {
+                this.select.menu_target = None;
+                window.focus(&this.transcript_focus, cx);
+                cx.notify();
+            }))
+            .child(chat)
+            .children(self.transcript_popup(&theme, cx));
         self.with_panel(stage, &theme, window, cx)
     }
 }

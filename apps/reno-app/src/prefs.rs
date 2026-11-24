@@ -139,7 +139,7 @@ impl Word for ThinkingMode {
 pub(crate) const PREVIEW_LINES: u16 = 16;
 
 /// The keys of the file this build reads besides the notification switches.
-const KEYS: [&str; 13] = [
+const KEYS: [&str; 15] = [
     "mode",
     "theme",
     "accent",
@@ -153,6 +153,8 @@ const KEYS: [&str; 13] = [
     "typesetMath",
     "mathSize",
     "thinking",
+    "expandNewEdits",
+    "expandNewCommands",
 ];
 
 /// The smallest, the default and the largest math size (a percentage of the text size) and the
@@ -196,6 +198,8 @@ pub(crate) struct Prefs {
     pub(crate) math_size: u8,
     /// How reasoning blocks show (Settings › General).
     pub(crate) thinking: ThinkingMode,
+    pub(crate) expand_new_edits: bool,
+    pub(crate) expand_new_commands: bool,
     /// Keys of the file this build does not know, written back unchanged.
     rest: Map<String, Value>,
 }
@@ -220,6 +224,8 @@ impl Default for Prefs {
             typeset_math: true,
             math_size: MATH_SIZE_DEFAULT,
             thinking: ThinkingMode::Auto,
+            expand_new_edits: true,
+            expand_new_commands: true,
             rest: Map::new(),
         }
     }
@@ -254,6 +260,16 @@ impl Pref {
 }
 
 impl Prefs {
+    /// Whether newly arriving edits and commands open.
+    pub(crate) fn tool_expansion(cx: &gpui::App) -> (bool, bool) {
+        cx.try_global::<PrefStore>().map_or((true, true), |store| {
+            (
+                store.prefs.expand_new_edits,
+                store.prefs.expand_new_commands,
+            )
+        })
+    }
+
     /// How reasoning blocks show, in the preferences in force.
     pub(crate) fn thinking(cx: &gpui::App) -> ThinkingMode {
         cx.try_global::<PrefStore>()
@@ -329,6 +345,8 @@ impl Prefs {
             .filter(|size| MATH_SIZES.contains(size))
             .unwrap_or(MATH_SIZE_DEFAULT);
         prefs.thinking = ThinkingMode::from_word(word("thinking"));
+        prefs.expand_new_edits = flag("expandNewEdits", prefs.expand_new_edits);
+        prefs.expand_new_commands = flag("expandNewCommands", prefs.expand_new_commands);
         prefs.rest = map
             .into_iter()
             .filter(|(key, _)| {
@@ -358,6 +376,8 @@ impl Prefs {
         put("typesetMath", self.typeset_math.into());
         put("mathSize", self.math_size.into());
         put("thinking", self.thinking.word().into());
+        put("expandNewEdits", self.expand_new_edits.into());
+        put("expandNewCommands", self.expand_new_commands.into());
         put(
             "skippedUpdates",
             Value::Object(
@@ -738,6 +758,30 @@ mod tests {
             let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(json["thinking"], word);
             assert_eq!(PrefStore::at(path.clone()).prefs().thinking, mode);
+        }
+    }
+
+    #[test]
+    fn the_expand_keys_round_trip_and_a_missing_key_is_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        for (saved, edits, commands) in [
+            (r#"{"mode":"dark"}"#, true, true),
+            (r#"{"expandNewEdits":false}"#, false, true),
+            (r#"{"expandNewCommands":false}"#, true, false),
+            (
+                r#"{"expandNewEdits":"off","expandNewCommands":null}"#,
+                true,
+                true,
+            ),
+        ] {
+            std::fs::write(&path, saved).unwrap();
+            let mut store = PrefStore::at(path.clone());
+            store.update(|prefs| prefs.hidden_files = !prefs.hidden_files);
+            let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["expandNewEdits"], edits, "{saved}");
+            assert_eq!(json["expandNewCommands"], commands, "{saved}");
+            assert_eq!(PrefStore::at(path.clone()).prefs(), store.prefs());
         }
     }
 

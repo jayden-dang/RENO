@@ -132,7 +132,7 @@ fn measurer() -> Result<Arc<Measurer>, String> {
 }
 
 /// The fonts the rasteriser draws labels with: the app's UI font only.
-fn fonts() -> Arc<usvg::fontdb::Database> {
+pub(super) fn fonts() -> Arc<usvg::fontdb::Database> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     FONTS
         .get_or_init(|| {

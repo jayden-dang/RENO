@@ -7,7 +7,7 @@
 //! selected, and puts the text on the clipboard. Painting never changes a height, so a selection
 //! never makes the list measure again.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -21,8 +21,11 @@ use gpui::{
 };
 
 use super::RunScreen;
-use crate::actions::{End, Home, LineDown, LineUp, NextPrompt, PageDown, PageUp, PrevPrompt};
-use crate::transcript::Key;
+use crate::actions::{
+    End, FocusRunInput, Home, LineDown, LineUp, NextMenuTarget, NextPrompt, NextTranscriptControl,
+    OpenMenu, PageDown, PageUp, PrevPrompt, PreviousMenuTarget, PreviousTranscriptControl,
+};
+use crate::transcript::{Key, Row, ToolEntry};
 use crate::ui::find as look;
 use crate::ui::markdown_view::select::{Map, Piece, Registry, Track, flatten_layers};
 use crate::ui::theme::Theme;
@@ -33,6 +36,7 @@ actions!(run_transcript, [CopyTranscript]);
 
 /// The key context of the transcript's focus: ⌘C copies the selection only while it holds focus.
 const CONTEXT: &str = "Transcript";
+pub(super) const CONTROLS_CONTEXT: &str = "TranscriptControls";
 
 /// A drag moves the pointer this far before it is a selection and not a click.
 const DRAG_SLOP: f32 = 3.0;
@@ -53,6 +57,26 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, Some(CONTEXT)),
         KeyBinding::new("shift-pageup", PrevPrompt, Some(CONTEXT)),
         KeyBinding::new("shift-pagedown", NextPrompt, Some(CONTEXT)),
+        KeyBinding::new("shift-f10", OpenMenu, Some(CONTEXT)),
+        KeyBinding::new("alt-up", PreviousMenuTarget, Some(CONTEXT)),
+        KeyBinding::new("alt-down", NextMenuTarget, Some(CONTEXT)),
+        KeyBinding::new("tab", FocusRunInput, Some(CONTEXT)),
+        KeyBinding::new("f6", NextTranscriptControl, Some(CONTROLS_CONTEXT)),
+        KeyBinding::new(
+            "shift-f6",
+            PreviousTranscriptControl,
+            Some(CONTROLS_CONTEXT),
+        ),
+        KeyBinding::new(
+            "tab",
+            NextTranscriptControl,
+            Some("TranscriptControls && !Transcript"),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            PreviousTranscriptControl,
+            Some("TranscriptControls && !Transcript"),
+        ),
     ]);
 }
 
@@ -69,6 +93,8 @@ pub(super) struct Select {
     pub(super) current: Option<Selection>,
     /// The texts painted since the last draw began.
     pub(super) registry: Registry,
+    pub(super) menu_targets: Rc<RefCell<Vec<MenuTarget>>>,
+    pub(super) menu_target: Option<MenuTargetId>,
     /// Where each entry is in reading order.
     pub(super) order: HashMap<Key, usize>,
     drag: Option<Drag>,
@@ -77,6 +103,30 @@ pub(super) struct Select {
     /// How far the list moves each step while the pointer is held past its edge (negative: up).
     scroll: f32,
     task: Option<Task<()>>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct MenuLinkId {
+    pub(super) atom: usize,
+    pub(super) destination: String,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct MenuTargetId {
+    pub(super) reply: Key,
+    pub(super) link: Option<MenuLinkId>,
+}
+
+impl MenuTargetId {
+    pub(super) fn destination(&self) -> Option<&str> {
+        self.link.as_ref().map(|link| link.destination.as_str())
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct MenuTarget {
+    pub(super) id: MenuTargetId,
+    pub(super) bounds: Bounds<Pixels>,
 }
 
 /// Where a text of a row is, for painting and tracking it.
@@ -100,8 +150,7 @@ impl RunScreen {
             .collect();
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_selection(&self) -> bool {
+    pub(super) fn has_selection(&self) -> bool {
         self.select.current.is_some_and(|s| !s.is_empty())
     }
 
@@ -141,13 +190,13 @@ impl RunScreen {
         let anchors = self.markdown.peek(&key).map(|stream| stream.anchors());
         let at = |off, end| {
             let section = anchors.as_ref().and_then(|prose| {
-                prose.sections.iter().position(|section| {
+                prose.sections.iter().find(|section| {
                     section.source.contains(&off) || (end && section.source.end == off)
                 })
             });
             Pos {
                 ordinal,
-                slot: Slot::prose(section.unwrap_or(0)),
+                slot: section.map_or(Slot::WHOLE, |section| section.slot),
                 off,
             }
         };
@@ -232,8 +281,7 @@ impl RunScreen {
     /// past the texts, the nearest.
     fn nearest_piece<'a>(&self, pieces: &'a [Piece], point: Point<Pixels>) -> Option<&'a Piece> {
         let area = self.select.list.get();
-        let gap = |p: &Piece| {
-            let b = &p.bounds;
+        let gap = |b: &Bounds<Pixels>| {
             let dy = if point.y < b.top() {
                 b.top() - point.y
             } else if point.y > b.bottom() {
@@ -253,13 +301,15 @@ impl RunScreen {
         };
         pieces
             .iter()
-            .filter(|p| p.bounds.intersects(&area) || area.size.width == px(0.0))
-            .filter(|p| self.select.order.contains_key(&p.key))
-            .min_by(|a, b| {
+            .filter_map(|p| p.hit_bounds.map(|bounds| (p, bounds)))
+            .filter(|(_, bounds)| bounds.intersects(&area) || area.size.width == px(0.0))
+            .filter(|(p, _)| self.select.order.contains_key(&p.key))
+            .min_by(|(_, a), (_, b)| {
                 gap(a)
                     .partial_cmp(&gap(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
+            .map(|(piece, _)| piece)
     }
 
     /// The position under `point`, from the texts painted last frame.
@@ -279,14 +329,19 @@ impl RunScreen {
     }
 
     /// What `unit` selects at `point`: the word or drawn line under it, or the block around it.
-    fn unit_selection(&self, point: Point<Pixels>, unit: SelectUnit) -> Option<Selection> {
+    fn unit_selection(
+        &self,
+        point: Point<Pixels>,
+        unit: SelectUnit,
+        cx: &App,
+    ) -> Option<Selection> {
         let at = self.position_at(point)?;
         let whole = unit == SelectUnit::Block || {
             let pieces = self.select.registry.borrow();
             self.nearest_piece(&pieces, point)?.map.is_sourceless()
         };
         if whole {
-            return self.view(|entries, shown| selection::block_at(at, entries, shown));
+            return self.view(cx, |entries, shown| selection::block_at(at, entries, shown));
         }
         let range = {
             let pieces = self.select.registry.borrow();
@@ -341,7 +396,7 @@ impl RunScreen {
             }
             unit => {
                 self.select.drag = None;
-                if let Some(sel) = self.unit_selection(event.position, unit) {
+                if let Some(sel) = self.unit_selection(event.position, unit, cx) {
                     self.select.current = Some(sel);
                     self.focus_transcript(window, cx);
                     cx.notify();
@@ -497,10 +552,11 @@ impl RunScreen {
     // --- copying -------------------------------------------------------------------------------
 
     /// Runs `f` over the entries in reading order and what each shows.
-    fn view<T>(&self, f: impl FnOnce(&[Entry<'_>], &Shown<'_>) -> T) -> T {
+    fn view<T>(&self, cx: &App, f: impl FnOnce(&[Entry<'_>], &Shown<'_>) -> T) -> T {
         let open = |k: Key| self.open.contains(&k);
-        let out_open = |id: &str| self.outputs_open.contains(&id.to_owned());
-        let out_full = |id: &str| self.outputs_full.contains(&id.to_owned());
+        let out_open = |key, id: &str| self.outputs_open.contains(&self.tool_key(key, id));
+        let out_full = |key, id: &str| self.outputs_full.contains(&self.tool_key(key, id));
+        let tool_inputs = |key, calls: &[ToolEntry]| self.tool_inputs(key, calls, cx);
         let tree = |key: Key, text: &str| {
             self.markdown
                 .peek(&key)
@@ -510,48 +566,140 @@ impl RunScreen {
             open: &open,
             output_open: &out_open,
             output_full: &out_full,
+            tool_inputs: &tool_inputs,
             tree: &tree,
         };
-        f(&selection::reading(&self.rows, &open), &shown)
+        let prefix = self.rows.last().and_then(|row| {
+            let Row::Prose { key, text } = row else {
+                return None;
+            };
+            let shown = self.shown_reply(*key, text);
+            (shown.len() < text.len()).then(|| Row::Prose {
+                key: *key,
+                text: shown.to_owned(),
+            })
+        });
+        let mut entries = selection::reading(&self.rows, &open);
+        if let (Some(last), Some(prefix)) = (entries.last_mut(), prefix.as_ref()) {
+            last.row = prefix;
+        }
+        f(&entries, &shown)
     }
 
     /// What ⌘C copies: the selected text in order, with a blank line between entries.
-    pub(crate) fn selected_text(&self) -> Option<String> {
+    pub(crate) fn selected_text(&self, cx: &App) -> Option<String> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
-        let text = self.view(|entries, shown| selection::copy_text(&sel, entries, shown));
+        let text = self.view(cx, |entries, shown| {
+            selection::copy_text(&sel, entries, shown)
+        });
         (!text.is_empty()).then_some(text)
     }
 
     /// The markdown source of the selection, as the owner wrote it.
-    fn selected_source(&self) -> Option<String> {
+    fn selected_source(&self, cx: &App) -> Option<String> {
         let sel = self.select.current.filter(|s| !s.is_empty())?;
-        let text = self.view(|entries, shown| anchor::source_of(&sel, entries, shown));
+        let text = self.view(cx, |entries, shown| anchor::source_of(&sel, entries, shown));
         (!text.is_empty()).then_some(text)
     }
 
     /// The entries and source ranges the selection covers (TRANSCRIPT-2.13): what a later
     /// comments item anchors to.
     #[allow(dead_code)]
-    pub(crate) fn selection_anchors(&self) -> Vec<selection::Anchor> {
+    pub(crate) fn selection_anchors(&self, cx: &App) -> Vec<selection::Anchor> {
         let Some(sel) = self.select.current.filter(|s| !s.is_empty()) else {
             return Vec::new();
         };
-        self.view(|entries, shown| selection::anchors(&sel, entries, shown))
+        self.view(cx, |entries, shown| {
+            selection::anchors(&sel, entries, shown)
+        })
     }
 
     /// ⌘C in the transcript.
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text() {
+        if let Some(text) = self.selected_text(cx) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
     /// "Copy as Markdown": the selection's source bytes on the clipboard.
-    #[cfg_attr(not(test), expect(dead_code))] // The transcript's context menu calls it (Task 17).
     pub(super) fn copy_markdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_source() {
+        if let Some(text) = self.selected_source(cx) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    fn step_menu_target(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let targets = self.select.menu_targets.borrow();
+        let mut visible: Vec<_> = targets
+            .iter()
+            .filter(|target| {
+                target.id.destination().is_none_or(|url| {
+                    let policy = self.transcript_link_policy(Some(target.id.reply), cx);
+                    super::menu_link_allowed(&policy, url, cx)
+                })
+            })
+            .map(|target| &target.id)
+            .collect();
+        visible.sort_unstable_by_key(|id| {
+            (
+                self.items.item_of(id.reply),
+                id.link.as_ref().map(|link| link.atom),
+            )
+        });
+        visible.dedup();
+        let current = visible
+            .iter()
+            .position(|&id| Some(id) == self.select.menu_target.as_ref());
+        let next = match (current, forward) {
+            (Some(at), true) => visible.get(at + 1).or_else(|| visible.first()),
+            (Some(at), false) => at
+                .checked_sub(1)
+                .and_then(|at| visible.get(at))
+                .or_else(|| visible.last()),
+            (None, true) => visible.first(),
+            (None, false) => visible.last(),
+        };
+        self.select.menu_target = next.map(|&id| id.clone());
+        cx.notify();
+    }
+
+    pub(super) fn menu_target_outline(&self, theme: &Theme) -> Option<AnyElement> {
+        let selected = self.select.menu_target.clone()?;
+        let is_link = selected.link.is_some();
+        let targets = self.select.menu_targets.clone();
+        let accent = theme.accent;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .debug_selector(move || {
+                    if is_link {
+                        "transcript-context-link"
+                    } else {
+                        "transcript-context-reply"
+                    }
+                    .to_owned()
+                })
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |area, (), window, _| {
+                            if let Some(target) =
+                                targets.borrow().iter().find(|target| target.id == selected)
+                            {
+                                let outline = target.bounds.dilate(px(1.0)).intersect(&area);
+                                window.paint_quad(gpui::outline(
+                                    outline,
+                                    accent,
+                                    gpui::BorderStyle::Solid,
+                                ));
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The transcript's own focus, a node of no size that carries ⌘C; and the layer that
@@ -563,6 +711,16 @@ impl RunScreen {
             .size_0()
             .key_context(CONTEXT)
             .track_focus(&self.transcript_focus)
+            .on_action(cx.listener(|this, _: &FocusRunInput, w, cx| this.focus_run_input(w, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenMenu, w, cx| this.open_transcript_menu_by_key(w, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PreviousMenuTarget, _, cx| {
+                this.step_menu_target(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextMenuTarget, _, cx| {
+                this.step_menu_target(true, cx);
+            }))
             .on_action(cx.listener(|this, _: &CopyTranscript, _, cx| this.copy_selection(cx)))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.key_page(-1, cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.key_page(1, cx)))
@@ -584,6 +742,7 @@ impl RunScreen {
     /// The registry is emptied before each draw of the list: texts file themselves as they paint.
     pub(super) fn begin_paint(&self) {
         self.select.registry.borrow_mut().clear();
+        self.select.menu_targets.borrow_mut().clear();
     }
 }
 

@@ -24,6 +24,9 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The wiring diagram test reads the historical commit pinned in its data.
+          fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

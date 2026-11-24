@@ -109,6 +109,66 @@ pub(crate) fn report_scroll(rows: usize, intervals: &[Duration]) {
     println!("scroll-frames {}", list.join(","));
 }
 
+/// Starts measuring as soon as an on-screen Find strip has opened. The bench daemon waits for
+/// its mock steer so that the burst cannot finish before the window starts drawing it.
+#[allow(clippy::print_stdout)]
+pub(crate) fn find_streaming(
+    store: gpui::Entity<crate::store::Store>,
+    run: reno_proto::RunId,
+    window: &mut gpui::Window,
+) {
+    window.on_next_frame(move |window, _| {
+        println!("find-ready");
+        let started = Instant::now();
+        capture_find_frames(store, run, window, started, started, Vec::new());
+    });
+    window.refresh();
+}
+
+fn capture_find_frames(
+    store: gpui::Entity<crate::store::Store>,
+    run: reno_proto::RunId,
+    window: &mut gpui::Window,
+    started: Instant,
+    last: Instant,
+    mut intervals: Vec<Duration>,
+) {
+    window.on_next_frame(move |window, cx| {
+        let now = Instant::now();
+        let transcript = store.read(cx).state().transcript(&run);
+        if !intervals.is_empty()
+            || transcript.is_some_and(|journal| {
+                journal
+                    .events
+                    .iter()
+                    .any(|(_, event)| matches!(event, reno_proto::ExecEvent::Text { .. }))
+            })
+        {
+            intervals.push(now.saturating_duration_since(last));
+        }
+        if let Some(journal) = transcript
+            && matches!(
+                journal.events.last(),
+                Some((_, reno_proto::ExecEvent::Done { .. }))
+            )
+        {
+            let messages = journal
+                .events
+                .iter()
+                .filter(|(_, event)| matches!(event, reno_proto::ExecEvent::Text { .. }))
+                .count();
+            report_scroll(messages, &intervals);
+        } else if now.duration_since(started) < Duration::from_secs(30)
+            && intervals.len() < SCROLL_MAX_FRAMES
+        {
+            capture_find_frames(store, run, window, started, now, intervals);
+        } else {
+            report_scroll(0, &[]);
+        }
+    });
+    window.refresh();
+}
+
 /// Which way the scripted scroll is going.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pass {
@@ -190,4 +250,60 @@ mod tests {
         }
         assert_eq!(plan.pass(), Pass::Down);
     }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn reno_bench_find_opens_the_strip_with_the_query(cx: &mut gpui::TestAppContext) {
+    let options = crate::app::Options::parse(std::iter::empty(), |key| match key {
+        "RENO_BENCH" => Some("1".to_owned()),
+        "RENO_BENCH_FIND" => Some("looked at".to_owned()),
+        _ => None,
+    })
+    .unwrap();
+    let store = crate::tests::fake_store(cx);
+    crate::tests::wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = crate::tests::window(cx, &store, crate::ui::theme::Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(crate::tests::run_id("builder1"), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .unwrap();
+    screen.update_in(vcx, |screen, window, cx| {
+        screen.open_bench_find(options.bench_find.as_deref().unwrap(), window, cx)
+    });
+    crate::tests::draw(vcx);
+    assert!(crate::tests::painted(vcx, "find-query"));
+    assert_eq!(
+        screen
+            .read_with(vcx, |screen, _| screen.bench_find_query())
+            .as_deref(),
+        Some("looked at")
+    );
+    let run = crate::tests::run_id("builder1");
+    store.update(vcx, |store, cx| {
+        let seq = store
+            .state()
+            .transcript(&run)
+            .map_or(reno_proto::Seq(1), reno_client::Transcript::resume_from);
+        store.apply(
+            reno_client::Update::RunEvent {
+                run,
+                seq,
+                event: reno_proto::ExecEvent::Text {
+                    text: "I looked at the result.".into(),
+                },
+            },
+            cx,
+        );
+    });
+    crate::tests::draw(vcx);
+    vcx.executor().advance_clock(Duration::from_millis(160));
+    crate::tests::draw(vcx);
+    assert!(
+        screen
+            .read_with(vcx, |screen, _| screen.find_count_label())
+            .is_some_and(|count| count.ends_with("of 1"))
+    );
 }

@@ -7,10 +7,108 @@
 
 use std::collections::HashSet;
 
-use reno_proto::{ExecEvent, Question, Seq};
+use reno_proto::{ActionClass, ExecEvent, Question, Seq, ToolCall};
+use serde_json::Value;
 
 use crate::transcript::{Outcome, Resolution, Row, ToolEntry, ToolKind};
 use crate::vm::routing::RoutingView;
+
+pub(crate) struct Edit<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) old: &'a str,
+    pub(crate) new: &'a str,
+}
+
+pub(crate) struct FilePatch<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) hunk: &'a str,
+}
+
+pub(crate) fn input_path(input: &Value) -> Option<&str> {
+    ["file_path", "path", "filePath"]
+        .iter()
+        .find_map(|key| input.get(*key)?.as_str())
+        .filter(|path| !path.is_empty())
+}
+
+pub(crate) fn edit_pair(input: &Value) -> Option<(&str, &str)> {
+    let (old, new) = [
+        ("old_string", "new_string"),
+        ("oldText", "newText"),
+        ("old_text", "new_text"),
+    ]
+    .into_iter()
+    .find_map(|(old, new)| Some((input.get(old)?.as_str()?, input.get(new)?.as_str()?)))?;
+    (old != new).then_some((old, new))
+}
+
+pub(crate) fn edit_of(call: &ToolCall) -> Option<Edit<'_>> {
+    if call.class != ActionClass::Edit {
+        return None;
+    }
+    let path = input_path(&call.input)?;
+    let (old, new) = edit_pair(&call.input)?;
+    Some(Edit { path, old, new })
+}
+
+pub(crate) fn command_of(call: &ToolCall) -> Option<String> {
+    if call.class != ActionClass::Command {
+        return None;
+    }
+    ["command", "cmd"]
+        .iter()
+        .find_map(|key| call.input.get(*key)?.as_str())
+        .filter(|command| !command.trim().is_empty())
+        .map(str::to_owned)
+}
+
+pub(crate) fn patch_text(call: &ToolCall) -> Option<&str> {
+    if call.class != ActionClass::Edit {
+        return None;
+    }
+    ["patch", "diff"]
+        .iter()
+        .filter_map(|key| call.input.get(*key)?.as_str())
+        .find(|patch| !patch.trim().is_empty())
+}
+
+pub(crate) fn patch_of(call: &ToolCall) -> Option<Vec<FilePatch<'_>>> {
+    let text = patch_text(call)?;
+    let mut files = Vec::new();
+    let mut active: Option<(&str, usize)> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let tag = line.trim_end_matches(['\r', '\n']);
+        let path = ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+            .iter()
+            .find_map(|prefix| tag.strip_prefix(prefix));
+        if path.is_some() || tag == "*** End Patch" {
+            if let Some((path, start)) = active.take() {
+                files.push(FilePatch {
+                    path,
+                    hunk: text[start..offset].trim_end_matches(['\r', '\n']),
+                });
+            }
+            active = path
+                .filter(|path| !path.is_empty())
+                .map(|path| (path, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    if let Some((path, start)) = active {
+        files.push(FilePatch {
+            path,
+            hunk: text[start..].trim_end_matches(['\r', '\n']),
+        });
+    }
+    (!files.is_empty()).then_some(files)
+}
+
+pub(crate) fn numbered_read_line(line: &str) -> bool {
+    let line = line.trim_start();
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && line[digits..].starts_with(['\t', ':'])
+}
 
 /// A user message longer than this many characters collapses.
 pub(crate) const COLLAPSE_CHARS: usize = 320;
@@ -445,6 +543,60 @@ mod tests {
 
     use super::*;
     use crate::transcript::{Key, Row};
+
+    #[test]
+    fn an_edit_input_yields_its_path_and_both_texts() {
+        let call = ToolCall::new(
+            "edit",
+            json!({"file_path":"src/lease.rs","old_string":"before","new_string":"after"}),
+            ActionClass::Edit,
+        );
+        let edit = edit_of(&call).unwrap();
+        assert_eq!(edit.path, "src/lease.rs");
+        assert_eq!(edit.old, "before");
+        assert_eq!(edit.new, "after");
+        assert!(
+            edit_of(&ToolCall::new(
+                "edit",
+                json!({"path":"x"}),
+                ActionClass::Edit
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_patch_input_yields_one_entry_per_file() {
+        let call = ToolCall::new(
+            "apply_patch",
+            json!({"patch": "*** Begin Patch\n*** Update File: src/lease.rs\n@@\n-old\n+new\n*** Add File: src/fresh.rs\n+new\n*** End Patch\n"}),
+            ActionClass::Edit,
+        );
+        let files = patch_of(&call).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "src/lease.rs");
+        assert_eq!(files[0].hunk, "@@\n-old\n+new");
+        assert_eq!(files[1].path, "src/fresh.rs");
+        assert_eq!(files[1].hunk, "+new");
+    }
+
+    #[test]
+    fn a_bash_input_yields_its_command() {
+        let call = ToolCall::new(
+            "bash",
+            json!({"command":"cargo test -p reno-app"}),
+            ActionClass::Command,
+        );
+        assert_eq!(command_of(&call).as_deref(), Some("cargo test -p reno-app"));
+        assert!(
+            command_of(&ToolCall::new(
+                "bash",
+                json!({"unknown":"x"}),
+                ActionClass::Command
+            ))
+            .is_none()
+        );
+    }
 
     fn call(id: &str, kind: ToolKind, label: &str, outcome: Outcome) -> ToolEntry {
         ToolEntry {

@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, Div, MouseDownEvent, Pixels, Point, Role, SharedString, Stateful,
-    Window, anchored, deferred, div, prelude::*, px,
+    Anchor, AnyElement, App, Bounds, Div, MouseDownEvent, Pixels, Point, Role, SharedString,
+    Stateful, Window, anchored, deferred, div, prelude::*, px,
 };
 
 use super::kit;
@@ -14,6 +14,34 @@ use super::theme::Theme;
 
 /// What a popup calls when a click lands outside it.
 pub(crate) type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
+
+pub(crate) const CONTEXT: &str = "PopupMenu";
+
+pub(crate) fn visible_target(bounds: Bounds<Pixels>, window: &Window) -> Option<Bounds<Pixels>> {
+    let visible = bounds.intersect(&window.content_mask().bounds);
+    (visible.size.width > px(0.0) && visible.size.height > px(0.0)).then_some(visible)
+}
+
+#[derive(Default)]
+pub(crate) struct MenuState {
+    pub(crate) highlighted: Option<usize>,
+}
+
+impl MenuState {
+    pub(crate) fn step(&mut self, len: usize, forward: bool) {
+        if len == 0 {
+            self.highlighted = None;
+            return;
+        }
+        let current = self.highlighted.filter(|&ix| ix < len);
+        self.highlighted = Some(match (current, forward) {
+            (Some(ix), true) => (ix + 1) % len,
+            (Some(ix), false) => ix.checked_sub(1).unwrap_or(len - 1),
+            (None, true) => 0,
+            (None, false) => len - 1,
+        });
+    }
+}
 
 /// The panel every popup sits on.
 pub(crate) fn panel(theme: &Theme, id: &'static str, width: f32) -> Stateful<Div> {

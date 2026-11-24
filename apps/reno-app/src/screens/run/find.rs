@@ -70,6 +70,8 @@ pub(super) struct Find {
     /// Whether the current hit was gone to since the query changed: the first Enter goes to the
     /// first hit rather than past it.
     navigated: bool,
+    /// A new request for each explicit navigation, even when the same hit wraps.
+    navigation: u64,
     /// The recount waiting to run (armed by an event, not polling).
     timer: Option<Task<()>>,
     /// The calls whose output search opened, with the row each is in, to measure them again.
@@ -170,7 +172,14 @@ impl RunScreen {
 
     #[cfg(test)]
     pub(crate) fn output_is_open(&self, call: &str) -> bool {
-        self.outputs_open.contains(&call.to_owned())
+        let tools_open = |row: &Row| {
+            matches!(row, Row::Tools { key, calls } if calls.iter().any(|entry| entry.id == call)
+                && self.outputs_open.contains(&self.tool_key(*key, call)))
+        };
+        self.rows.iter().any(|row| match row {
+            Row::Worked { rows, .. } => rows.iter().any(tools_open),
+            row => tools_open(row),
+        })
     }
 
     // --- opening and closing -----------------------------------------------------------------
@@ -209,6 +218,24 @@ impl RunScreen {
         }
         window.focus(&field.read(cx).focus_handle(cx), cx);
         cx.notify();
+    }
+
+    /// Installs the benchmark query through the same field as interactive Find.
+    pub(crate) fn open_bench_find(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_find(window, cx);
+        self.find_field(cx)
+            .update(cx, |field, cx| field.set_text(query, cx));
+        self.find_query_changed(query.to_owned(), cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bench_find_query(&self) -> Option<String> {
+        self.find.open.then(|| self.find.query.text.clone())
     }
 
     /// Esc or the close button: the bar goes, the highlights go, and what search opened closes
@@ -433,6 +460,7 @@ impl RunScreen {
             self.find.found.step(forward);
         }
         self.find.navigated = true;
+        self.find.navigation = self.find.navigation.wrapping_add(1);
         self.find_reveal(cx);
     }
 
@@ -492,11 +520,12 @@ impl RunScreen {
             measure.push(hit.key);
         }
         if let Some((call, cut)) = need.output {
-            if self.outputs_open.search_open(call.clone()) {
+            let key = self.tool_key(hit.key, &call);
+            if self.outputs_open.search_open(key.clone()) {
                 opened_any = true;
                 self.find.opened_outputs.push((call.clone(), hit.key));
             }
-            if cut && self.outputs_full.search_open(call.clone()) {
+            if cut && self.outputs_full.search_open(key) {
                 opened_any = true;
                 self.find.opened_outputs.push((call, hit.key));
             }
@@ -552,6 +581,8 @@ impl RunScreen {
         let hits = self.find.by_row.get(&key)?;
         Some(Rc::new(crate::ui::markdown_view::Marks {
             matcher: self.find.matcher.clone(),
+            source_hits: self.find_highlights(key, Part::Whole),
+            reveal: self.find.navigated.then_some(self.find.navigation),
             current: hits
                 .iter()
                 .position(|&at| self.find.found.current == Some(at)),
@@ -720,14 +751,17 @@ impl RunScreen {
     fn find_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
         [
             kit::icon_button(theme, "find-prev", Icon::ChevUp, 26.0)
+                .aria_label("Previous match")
                 .tooltip(kit::tip("Previous match"))
                 .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx)))
                 .into_any_element(),
             kit::icon_button(theme, "find-next", Icon::ChevDown, 26.0)
+                .aria_label("Next match")
                 .tooltip(kit::tip("Next match"))
                 .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx)))
                 .into_any_element(),
             kit::icon_button(theme, "find-close", Icon::X, 26.0)
+                .aria_label("Close Find")
                 .tooltip(kit::tip("Close"))
                 .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
                 .into_any_element(),
@@ -748,6 +782,13 @@ impl RunScreen {
             .id("find-bar")
             .debug_selector(|| "find-bar".to_owned())
             .key_context(look::BAR_CONTEXT)
+            .tab_group()
+            .on_action(|_: &crate::actions::NextTranscriptControl, window, cx| {
+                window.focus_next(cx)
+            })
+            .on_action(
+                |_: &crate::actions::PreviousTranscriptControl, window, cx| window.focus_prev(cx),
+            )
             .flex_none()
             .w_full()
             .h(px(36.0))

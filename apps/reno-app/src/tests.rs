@@ -563,6 +563,106 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     );
 }
 
+fn open_live_reply(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Store>,
+    &mut VisualTestContext,
+    Entity<crate::screens::run::RunScreen>,
+    RunId,
+) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    let run = run_id("builder1");
+    root.update_in(vcx, |root, window, cx| {
+        root.open_run(run.clone(), window, cx)
+    });
+    let screen = root
+        .read_with(vcx, |root, _| root.run_screen().cloned())
+        .unwrap();
+    wait_drawn(vcx, |vcx| painted(vcx, "thinking"));
+    (store, vcx, screen, run)
+}
+
+fn send_reply_delta(vcx: &mut VisualTestContext, store: &Entity<Store>, run: &RunId, text: &str) {
+    store.update(vcx, |store, cx| {
+        let seq = store
+            .state()
+            .transcript(run)
+            .and_then(|transcript| transcript.highest)
+            .and_then(reno_proto::Seq::next)
+            .unwrap();
+        store.apply(
+            Update::RunEvent {
+                run: run.clone(),
+                seq,
+                event: reno_proto::ExecEvent::Text { text: text.into() },
+            },
+            cx,
+        );
+    });
+    draw(vcx);
+}
+
+#[gpui::test]
+fn streamed_text_catches_up_within_200_ms_and_the_tick_stops(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live_reply(cx);
+    send_reply_delta(vcx, &store, &run, "\n\n👋");
+    vcx.executor().advance_clock(Duration::from_millis(192));
+    draw(vcx);
+    send_reply_delta(vcx, &store, &run, " the rest of the reply arrives later");
+    let at = screen
+        .read_with(vcx, |screen, _| screen.painted_point("👋", 0))
+        .expect("the first Unicode character is visible");
+    let hidden = |vcx: &VisualTestContext| {
+        screen.read_with(vcx, |screen, _| screen.painted_point("later", 0).is_none())
+    };
+    assert!(hidden(vcx), "the newly received suffix is still hidden");
+    assert!(screen.read_with(vcx, |screen, _| screen.reveal_pending()));
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 4,
+        first_mouse: false,
+    });
+    assert_eq!(
+        screen
+            .read_with(vcx, |screen, cx| screen.selected_text(cx))
+            .as_deref(),
+        Some("👋"),
+        "selecting the block can copy only the shown prefix",
+    );
+    vcx.executor().advance_clock(Duration::from_millis(16));
+    draw(vcx);
+    assert!(hidden(vcx), "the suffix takes more than one tick to reveal");
+    assert!(screen.read_with(vcx, |screen, _| screen.painted_point("👋 th", 0).is_some()));
+    vcx.executor().advance_clock(Duration::from_millis(184));
+    draw(vcx);
+    assert!(!hidden(vcx), "the last delta is fully shown after 200 ms");
+    assert!(!screen.read_with(vcx, |screen, _| screen.reveal_pending()));
+}
+
+#[gpui::test]
+fn with_reduce_motion_text_shows_at_once(cx: &mut TestAppContext) {
+    let (store, vcx, screen, run) = open_live_reply(cx);
+    vcx.update(|_, cx| cx.set_reduce_motion(true));
+    send_reply_delta(vcx, &store, &run, "\n\nA reply without animated motion");
+    assert!(screen.read_with(vcx, |screen, _| {
+        screen.painted_point("animated motion", 0).is_some()
+    }));
+}
+
+#[gpui::test]
+fn an_idle_screen_arms_no_reveal_tick(cx: &mut TestAppContext) {
+    let (_store, vcx, screen, _run) = open_live_reply(cx);
+    assert!(!screen.read_with(vcx, |screen, _| screen.reveal_pending()));
+    vcx.executor().advance_clock(Duration::from_secs(1));
+    draw(vcx);
+    assert!(!screen.read_with(vcx, |screen, _| screen.reveal_pending()));
+}
+
 #[gpui::test]
 fn approving_inline_with_a_click_resumes_the_run(cx: &mut TestAppContext) {
     let store = fake_store(cx);

@@ -239,3 +239,26 @@ fn general_has_a_thinking_choice_that_saves(cx: &mut TestAppContext) {
         assert_eq!(saved(vcx).thinking, mode, "{id}");
     }
 }
+
+#[gpui::test]
+fn general_saves_the_expand_switches_independently(cx: &mut TestAppContext) {
+    let store = fake(cx);
+    let (_root, vcx) = settings_at(cx, &store, Category::General);
+    let choices = |vcx: &mut VisualTestContext| -> serde_json::Value {
+        serde_json::from_slice(&saved(vcx).to_json()).unwrap()
+    };
+    assert_eq!(choices(vcx)["expandNewEdits"], true);
+    assert_eq!(choices(vcx)["expandNewCommands"], true);
+
+    click(vcx, "expand-new-edits");
+    assert_eq!(choices(vcx)["expandNewEdits"], false);
+    assert_eq!(choices(vcx)["expandNewCommands"], true);
+
+    click(vcx, "expand-new-commands");
+    assert_eq!(choices(vcx)["expandNewEdits"], false);
+    assert_eq!(choices(vcx)["expandNewCommands"], false);
+
+    click(vcx, "expand-new-edits");
+    assert_eq!(choices(vcx)["expandNewEdits"], true);
+    assert_eq!(choices(vcx)["expandNewCommands"], false);
+}

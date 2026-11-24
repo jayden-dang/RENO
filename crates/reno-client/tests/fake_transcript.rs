@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use reno_client::fake::{FakeConfig, FakeDaemon};
+use reno_client::visuals::{VisualDesk, VisualImage};
 use reno_proto::{
     ErrorCode, ExecEvent, FsListParams, FsReadParams, RunId, RunListParams, RunStatus, StopReason,
     TaskRunParams,
@@ -22,6 +23,21 @@ fn on() -> FakeConfig {
         transcript_threads: true,
         ..FakeConfig::default()
     }
+}
+
+#[test]
+fn a_tool_result_image_belongs_to_one_call_in_one_seeded_run() {
+    let daemon = FakeDaemon::start(on()).unwrap();
+    let images = daemon.tool_images(&run("render2"), "r1");
+    assert!(matches!(
+        images.as_slice(),
+        [VisualImage::Data { mime, bytes }] if mime == "image/png" && bytes.starts_with(b"\x89PNG")
+    ));
+    assert!(daemon.tool_images(&run("render2"), "w1").is_empty());
+    assert!(daemon.tool_images(&run("render1"), "r1").is_empty());
+
+    let without_demo = FakeDaemon::start(FakeConfig::default()).unwrap();
+    assert!(without_demo.tool_images(&run("render2"), "r1").is_empty());
 }
 
 fn dir(run_id: &str, dir: &str) -> FsListParams {

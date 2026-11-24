@@ -237,6 +237,24 @@ pub(crate) fn cached() -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn has_cached_picture(
+    tex: &str,
+    display: bool,
+    size: f32,
+    color: Hsla,
+    scale: f32,
+) -> bool {
+    let key = (
+        tex.to_owned(),
+        display,
+        (size * 100.0).round() as u32,
+        bytes_of(color),
+        (scale * 100.0).round() as u32,
+    );
+    CACHE.with(|cache| cache.borrow().peek(&key).is_some_and(Option::is_some))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
