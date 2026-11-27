@@ -4,7 +4,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
-use reno_proto::{ApprovalStatus, Effort};
+use reno_client::fake::ApprovalDisconnect;
+use reno_proto::{ApprovalStatus, Effort, ErrorCode, ErrorObject};
 
 use crate::app::RootView;
 use crate::store::Store;
@@ -96,6 +97,77 @@ fn the_approval_panel_replaces_the_composer_and_allow_once_decides(cx: &mut Test
         store.update(vcx, |s, cx| s.load_history(cx));
         status_of(&store, vcx, "appr_keeperpush") == Some(ApprovalStatus::Approved)
     });
+}
+
+#[gpui::test]
+fn a_lost_approval_reply_stays_uncertain_until_history_can_be_read(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (_root, vcx) = open_run(cx, &store, "keeper1");
+    let daemon = store.read_with(vcx, |s, _| s.fake_daemon().unwrap());
+    let reply = daemon.hold_next_approval_decision();
+    daemon.fail(
+        "approval.history",
+        ErrorObject::new(ErrorCode::Unavailable, "history is temporarily unavailable"),
+    );
+
+    wait_drawn(vcx, |vcx| painted(vcx, "approve"));
+    click(vcx, "approve");
+    draw(vcx);
+    assert!(
+        painted(vcx, "approval-sending"),
+        "show the in-flight decision"
+    );
+    assert_eq!(approvals(vcx, &store), 2);
+    vcx.simulate_keystrokes("escape");
+    reply.send(ApprovalDisconnect::AfterDecision).unwrap();
+
+    wait_drawn(vcx, |vcx| {
+        approvals(vcx, &store) == 1
+            && painted(vcx, "approval-checking")
+            && painted(vcx, "approval-check-again")
+    });
+    assert!(
+        !painted(vcx, "approve"),
+        "an empty pending list does not confirm the outcome"
+    );
+    daemon.clear_failures();
+    click(vcx, "approval-check-again");
+    wait_drawn(vcx, |vcx| {
+        vcx.update(|_, cx| {
+            crate::ui::toast::shown(cx)
+                .iter()
+                .any(|(label, message)| label == "Approval recorded" && message == "Approved.")
+        })
+    });
+    assert!(painted(vcx, "composer"));
+    assert!(!painted(vcx, "approval-checking"));
+}
+
+#[gpui::test]
+fn reconnecting_only_reopens_a_decision_the_daemon_still_lists_as_pending(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (_root, vcx) = open_run(cx, &store, "keeper1");
+    let daemon = store.read_with(vcx, |s, _| s.fake_daemon().unwrap());
+    let reply = daemon.hold_next_approval_decision();
+
+    wait_drawn(vcx, |vcx| painted(vcx, "approve"));
+    click(vcx, "approve");
+    wait_drawn(vcx, |vcx| painted(vcx, "approval-sending"));
+    reply.send(ApprovalDisconnect::BeforeDecision).unwrap();
+
+    wait_drawn(vcx, |vcx| painted(vcx, "approval-still-pending"));
+    assert_eq!(
+        approvals(vcx, &store),
+        2,
+        "reconnect did not resend the decision"
+    );
+    assert!(!painted(vcx, "approval-checking"));
+
+    click(vcx, "approve");
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "composer") && !painted(vcx, "approval-panel")
+    });
+    assert_eq!(approvals(vcx, &store), 1);
 }
 
 #[gpui::test]

@@ -1867,6 +1867,9 @@ impl RunScreen {
 
     /// Deny `approval`, with the reason the agent is told.
     fn deny(&mut self, approval: ApprovalId, message: Option<String>, cx: &mut Context<Self>) {
+        if !self.store.read(cx).can_decide_approval(&approval) {
+            return;
+        }
         self.note = None;
         let reasons = self
             .store
@@ -1886,6 +1889,9 @@ impl RunScreen {
         scope: Option<RememberScope>,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.read(cx).can_decide_approval(&approval) {
+            return;
+        }
         self.menu_open = None;
         let remember = scope.map(|scope| Remember {
             scope,

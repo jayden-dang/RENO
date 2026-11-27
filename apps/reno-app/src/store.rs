@@ -47,11 +47,13 @@ use reno_client::{
 };
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ApprovalDecision, ApprovalId, ExecEvent, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
+    ApprovalId, ApprovalStatus, ExecEvent, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
     FiringOutcome, JobFailure, JobKind, JobPhase, RoutingDecision, RunId, RunStatus, RunSummary,
     Seq, SignedIn, TaskRunParams, ThreadId, WorkspaceDiffResult, WorkspaceInfo,
 };
 
+mod approvals;
+pub(crate) use approvals::ApprovalFeedback;
 mod signin;
 pub(crate) use signin::{SigninPhase, SigninView};
 
@@ -92,6 +94,8 @@ pub(crate) enum StoreEvent {
     /// Reno looked again after a sign-in in Terminal and the executor is still signed out.
     StillSignedOut(String),
     Failed(String),
+    /// The daemon history resolved an approval whose reply the app lost.
+    ApprovalRecorded(ApprovalStatus),
     /// A task or steer sent with this ticket did not go through (`Failed` says why): the
     /// composer that sent it gets its draft back.
     SendFailed(u64),
@@ -347,8 +351,7 @@ pub(crate) struct Store {
     stop_errors: std::collections::HashMap<(RunId, String), StopError>,
     /// Where the real daemon's socket is, shown in Settings.
     socket: Option<PathBuf>,
-    /// Approvals with a decision in flight (their buttons are disabled).
-    deciding: BTreeSet<ApprovalId>,
+    approval_attempts: BTreeMap<ApprovalId, approvals::ApprovalAttempt>,
     /// Triggers being fired by hand (their buttons are disabled).
     firing: BTreeSet<String>,
     /// Executors being probed again: `None` is all of them (their buttons are disabled).
@@ -466,7 +469,7 @@ impl Store {
             capabilities: Capabilities::REAL,
             stop_errors: std::collections::HashMap::new(),
             socket: None,
-            deciding: BTreeSet::new(),
+            approval_attempts: BTreeMap::new(),
             firing: BTreeSet::new(),
             checking: BTreeSet::new(),
             installing: BTreeSet::new(),
@@ -965,10 +968,6 @@ impl Store {
         }
     }
 
-    pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
-        self.deciding.contains(id)
-    }
-
     pub(crate) fn is_firing(&self, name: &str) -> bool {
         self.firing.contains(name)
     }
@@ -1144,8 +1143,15 @@ impl Store {
     pub(crate) fn apply(&mut self, update: Update, cx: &mut Context<Self>) -> Changed {
         let before =
             matches!(update, Update::Executors(_)).then(|| self.state.executors().to_vec());
+        let approval_snapshot = matches!(update, Update::Approvals(_));
         self.watch_tool_updates(&update, cx);
         let changed = self.state.apply(update);
+        if approval_snapshot {
+            self.prune_approval_feedback();
+        }
+        if changed.connection || approval_snapshot {
+            self.refresh_approval_attempts(cx);
+        }
         if changed.connection && self.state.connection() != ConnectionStatus::Connected {
             self.tool_watch.attempts = Lru::new(WATCHED_ATTEMPTS, usize::MAX);
             self.tool_watch.clear_probe();
@@ -1993,70 +1999,6 @@ impl Store {
             },
             cx,
             D::fire_and_forget(),
-        );
-    }
-
-    /// Answers a held action. The card leaves when the daemon reports the new list.
-    #[cfg(test)]
-    pub(crate) fn decide(
-        &mut self,
-        id: ApprovalId,
-        decision: ApprovalDecision,
-        cx: &mut Context<Self>,
-    ) {
-        self.decide_with_message(id, decision, None, cx);
-    }
-
-    /// [`Store::decide`] with the reason for a denial, which reaches the harness.
-    pub(crate) fn decide_with_message(
-        &mut self,
-        id: ApprovalId,
-        decision: ApprovalDecision,
-        message: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.decide_remembering(id, decision, message, None, cx);
-    }
-
-    /// [`Store::decide_with_message`] that also keeps the answer as a standing rule when
-    /// `remember` is given. The rule list is read again once the daemon has taken the answer.
-    pub(crate) fn decide_remembering(
-        &mut self,
-        id: ApprovalId,
-        decision: ApprovalDecision,
-        message: Option<String>,
-        remember: Option<reno_proto::Remember>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.client().is_none() || !self.deciding.insert(id.clone()) {
-            return;
-        }
-        cx.notify();
-        let ok_id = id.clone();
-        let err_id = id.clone();
-        let remembered = remember.is_some();
-        self.call(
-            "Could not send the decision",
-            move |client| async move {
-                client
-                    .decide_remembering(&id, decision, message, remember)
-                    .await
-            },
-            cx,
-            D {
-                ok: Box::new(move |store, (), cx| {
-                    store.deciding.remove(&ok_id);
-                    if remembered {
-                        store.load_rules(cx);
-                    }
-                    cx.notify();
-                }),
-                err: Box::new(move |store, cx| {
-                    store.deciding.remove(&err_id);
-                    cx.notify();
-                }),
-                quiet: false,
-            },
         );
     }
 

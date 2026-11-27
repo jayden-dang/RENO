@@ -20,3 +20,22 @@ Proposition (accepted by the owner, confirmed_for_scope: fake daemon, `step: ZER
 Tests: `reno-client` `state::tests::a_run_get_answer_older_than_the_watch_does_not_undo_it`
 (FIX-1.1, FIX-1.2), `state::tests::run_upsert_inserts_then_replaces` (FIX-1.2); reproduction
 loop `reno-app` `screen_tests::runs_empty_and_live` (was 6/40 red, 0/100 after).
+
+## FIX-2 — Approval feedback after a lost response (2026-11-27)
+
+- **FIX-2.1** WHILE the app is sending an approval decision or its outcome is
+  uncertain, THE Approval panel SHALL show that state and keep decision actions
+  disabled.
+- **FIX-2.2** WHEN the RPC fails, THE app SHALL reconcile the same approval ID
+  using current pending approvals and the run's decision history. An unavailable
+  read or an ID missing from both sources leaves the outcome uncertain.
+- **FIX-2.3** WHEN the app reconciles the ID, THE app SHALL report the recorded
+  outcome if present or show the error and reopen the decision actions if the
+  request is still pending. Retrying the decision requires a new user action.
+- **FIX-2.4** THE Approval panel SHALL CONTINUE TO leave the composer's
+  keystrokes alone until the user claims the panel, and to send decisions through
+  the existing approval RPC and durable daemon store.
+
+Verification seam: drive the native GPUI panel against the existing fake at the
+RPC boundary. Hold a decision before answering, drop its connection, then let
+the normal client reconnect and read the daemon's pending list and history.

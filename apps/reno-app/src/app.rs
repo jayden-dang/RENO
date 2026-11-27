@@ -813,6 +813,15 @@ impl RootView {
                             message.clone(),
                         );
                     }
+                    StoreEvent::ApprovalRecorded(status) => {
+                        let message = match status {
+                            reno_proto::ApprovalStatus::Approved => "Approved.",
+                            reno_proto::ApprovalStatus::Denied => "Denied.",
+                            reno_proto::ApprovalStatus::Expired => "Expired.",
+                            reno_proto::ApprovalStatus::Pending => return,
+                        };
+                        toast::push(cx, toast::Tone::Info, "Approval recorded", message);
+                    }
                     StoreEvent::RunStarted(run) => {
                         this.open_run(run.clone(), window, cx);
                     }

@@ -7,9 +7,11 @@ use gpui::{
 use reno_proto::{Approval, ApprovalId};
 
 use super::{COLUMN, RunScreen};
+use crate::store::ApprovalFeedback;
 use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO};
+use crate::ui::notice::{self, NoticeChipIcon, NoticeTone};
 use crate::ui::theme;
 use crate::vm::approval_panel::{self, Kind};
 use crate::vm::capabilities::ApprovalItem;
@@ -44,6 +46,7 @@ pub(crate) fn bind_keys(cx: &mut gpui::App) {
 
 impl RunScreen {
     pub(super) fn dock(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let checking = self.approval_check_notice(cx);
         let held: Vec<Approval> = self
             .store
             .read(cx)
@@ -61,6 +64,7 @@ impl RunScreen {
             return self
                 .dock_frame()
                 .gap(px(8.0))
+                .children(checking)
                 .children(trays)
                 .children(question)
                 .child(self.steer.clone())
@@ -82,12 +86,48 @@ impl RunScreen {
         self.keep_composer |= self.steer.read(cx).has_text();
         self.panel_for = Some(first.id.clone());
         let panel = self.approval_panel(first, held.len(), window, cx);
-        let frame = self.dock_frame().gap(px(8.0)).child(panel);
+        let frame = self
+            .dock_frame()
+            .gap(px(8.0))
+            .children(checking)
+            .child(panel);
         if self.keep_composer {
             frame.child(self.steer.clone()).into_any_element()
         } else {
             frame.into_any_element()
         }
+    }
+
+    fn approval_check_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, can_check) = self.store.read(cx).approval_checking(&self.run)?;
+        let id = id.clone();
+        let theme = theme::current(cx);
+        let check_again = can_check.then(|| {
+            kit::pill_button(
+                &theme,
+                "approval-check-again",
+                "Check again",
+                kit::Tone::Quiet,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.store
+                    .update(cx, |store, cx| store.check_approval(id.clone(), cx));
+            }))
+        });
+        Some(
+            div()
+                .id("approval-checking")
+                .debug_selector(|| "approval-checking".to_owned())
+                .child(notice::notice_chip_with_action(
+                    &theme,
+                    NoticeTone::Warning,
+                    "Checking the decision…",
+                    "The reply was lost or refused. Reno is checking whether the approval is still waiting.",
+                    NoticeChipIcon::Plain,
+                    check_again.map(IntoElement::into_any_element),
+                ))
+                .into_any_element(),
+        )
     }
 
     fn dock_frame(&self) -> gpui::Div {
@@ -179,7 +219,7 @@ impl RunScreen {
         let theme = theme::current(cx);
         let view = approval_panel::view(&approval.subject);
         let id = approval.id.clone();
-        let (busy, items, choices, hint) = {
+        let (busy, feedback, items, choices, hint) = {
             let store = self.store.read(cx);
             let state = store.state();
             let summary = state.run(&approval.run_id);
@@ -206,7 +246,29 @@ impl RunScreen {
                 bot,
             );
             (
-                store.is_deciding(&approval.id),
+                !store.can_decide_approval(&approval.id),
+                match store.approval_feedback(&approval.id) {
+                    Some(ApprovalFeedback::Sending | ApprovalFeedback::Recorded) => Some(
+                        div()
+                            .id("approval-sending")
+                            .debug_selector(|| "approval-sending".to_owned())
+                            .text_size(px(13.5))
+                            .text_color(theme.muted)
+                            .child("Sending decision…"),
+                    ),
+                    Some(ApprovalFeedback::StillPending(error)) => Some(
+                        notice::notice_chip(
+                            &theme,
+                            NoticeTone::Danger,
+                            "Approval still waiting",
+                            error.as_str().to_owned(),
+                            NoticeChipIcon::Plain,
+                        )
+                        .id("approval-still-pending")
+                        .debug_selector(|| "approval-still-pending".to_owned()),
+                    ),
+                    _ => None,
+                },
                 items,
                 rules::approve_choices(bot, project.as_deref()),
                 hint,
@@ -230,14 +292,13 @@ impl RunScreen {
         };
         let on_fill = theme.on_fill(theme.accent);
 
-        let deny_button = kit::pill_button(&theme, "deny", "Deny", kit::Tone::Quiet)
+        let deny_button = kit::pill_button_enabled(&theme, "deny", "Deny", kit::Tone::Quiet, !busy)
             .child(kit::keycap(&theme, "Esc", None))
-            .when(busy, |b| b.opacity(0.4))
             .when(!busy, |b| b.on_click(deny));
-        let allow_button = kit::pill_button(&theme, "approve", "Allow once", kit::Tone::Primary)
-            .child(kit::keycap(&theme, "\u{23ce}", Some(on_fill)))
-            .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| b.on_click(allow));
+        let allow_button =
+            kit::pill_button_enabled(&theme, "approve", "Allow once", kit::Tone::Primary, !busy)
+                .child(kit::keycap(&theme, "\u{23ce}", Some(on_fill)))
+                .when(!busy, |b| b.on_click(allow));
         let more_button = (!items.is_empty() && noting.is_none()).then(|| {
             let toggle = {
                 let id = id.clone();
@@ -331,7 +392,7 @@ impl RunScreen {
                         })),
                 )
                 .child(
-                    kit::pill_button(&theme, "note-deny", "Deny", kit::Tone::Danger)
+                    kit::pill_button_enabled(&theme, "note-deny", "Deny", kit::Tone::Danger, !busy)
                         .child(kit::keycap(&theme, "\u{23ce}", None))
                         .when(!busy, |b| {
                             b.on_click(cx.listener(move |this, _, _, cx| {
@@ -438,6 +499,7 @@ impl RunScreen {
                     .child(view.detail)
                     .into_any_element(),
             })
+            .children(feedback)
             .child(match note_buttons {
                 Some(buttons) => buttons,
                 None => div()

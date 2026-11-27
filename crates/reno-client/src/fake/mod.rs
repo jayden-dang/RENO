@@ -76,7 +76,7 @@ use reno_proto::{
     SubGapParams, TaskRun, TaskRunResult,
 };
 use reno_rpc::{Router, Server, ServerConfig, ServerStats, SubItem, connect_in_memory_with_buffer};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -180,6 +180,7 @@ pub(crate) struct Shared {
     term_counter: std::sync::atomic::AtomicU64,
     /// Errors a method answers with, until cleared.
     injected: Mutex<HashMap<String, ErrorObject>>,
+    approval_disconnect: Mutex<Option<oneshot::Receiver<ApprovalDisconnect>>>,
     /// One token per open connection, so a test can cut them all.
     connections: Mutex<Vec<CancellationToken>>,
     /// The tasks `route.preview` was asked about, oldest first.
@@ -188,6 +189,15 @@ pub(crate) struct Shared {
     tracker: TaskTracker,
     cancel: CancellationToken,
     event_subscriptions: AtomicUsize,
+}
+
+/// Whether the fake connection is cut before or after handling an approval decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDisconnect {
+    /// The decision never reaches the fake's world.
+    BeforeDecision,
+    /// The decision reaches the fake's world, but the reply never reaches the client.
+    AfterDecision,
 }
 
 impl Shared {
@@ -353,6 +363,7 @@ impl FakeDaemon {
             terms: Mutex::new(HashMap::new()),
             term_counter: std::sync::atomic::AtomicU64::new(0),
             injected: Mutex::new(HashMap::new()),
+            approval_disconnect: Mutex::new(None),
             connections: Mutex::new(Vec::new()),
             previews: Mutex::new(Vec::new()),
             tracker: TaskTracker::new(),
@@ -400,6 +411,18 @@ impl FakeDaemon {
         for token in tokens {
             token.cancel();
         }
+    }
+
+    /// Holds the next approval RPC until the test chooses where to disconnect. Dropping the
+    /// sender lets the call finish normally.
+    pub fn hold_next_approval_decision(&self) -> oneshot::Sender<ApprovalDisconnect> {
+        let (send, receive) = oneshot::channel();
+        *self
+            .shared
+            .approval_disconnect
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(receive);
+        send
     }
 
     /// Replaces the triggers and publishes them to `triggers.watch`.
@@ -969,18 +992,34 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
-    let approval_decide = move |p: reno_proto::ApprovalDecideParams, _| {
+    let approval_decide = move |p: reno_proto::ApprovalDecideParams,
+                                connection: reno_rpc::Context| {
         let s = Arc::clone(&s);
         async move {
             injected(&s, "approval.decide")?;
-            let approval = s
-                .with(|w| w.take_approval(&p.approval_id, p.decision, p.message, p.remember))
-                .map_err(|why| match why {
-                    Some(why) => ErrorObject::new(ErrorCode::InvalidParams, why),
-                    None => not_found("approval"),
-                })?;
-            s.tracker
-                .spawn(script::resume(Arc::clone(&s), approval.run_id, p.decision));
+            let held = s
+                .approval_disconnect
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            let disconnect = match held {
+                Some(held) => held.await.ok(),
+                None => None,
+            };
+            if disconnect != Some(ApprovalDisconnect::BeforeDecision) {
+                let approval = s
+                    .with(|w| w.take_approval(&p.approval_id, p.decision, p.message, p.remember))
+                    .map_err(|why| match why {
+                        Some(why) => ErrorObject::new(ErrorCode::InvalidParams, why),
+                        None => not_found("approval"),
+                    })?;
+                s.tracker
+                    .spawn(script::resume(Arc::clone(&s), approval.run_id, p.decision));
+            }
+            if disconnect.is_some() {
+                connection.cancelled().cancel();
+                return std::future::pending().await;
+            }
             Ok(ApprovalDecideResult {})
         }
     };
